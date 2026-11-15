@@ -1,0 +1,51 @@
+diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
+index 5dc811c..e1c0deb 100644
+--- a/src/hle/rt64_present_queue.cpp
++++ b/src/hle/rt64_present_queue.cpp
+@@ -38,6 +38,9 @@ extern "C" {
+     volatile int blitz_ds_clip_show = 0;         // show it now, on the left of the second screen
+     volatile int blitz_ds_clip_frames = 0;       // how many frames it has
+     volatile int blitz_ds_second_dirty = 1;      // the panel changed (recompui::ds_panel_set)
++    // BLITZ_PRESENT_SKIP, or live "RT64 skip N" (dev_input.cpp): -1 unset (two screens 2, one screen 1); see threadLoop.
++    static std::atomic<int> blitz_present_skip_rule{ []() { const char *v = getenv("BLITZ_PRESENT_SKIP"); return (v != nullptr) ? atoi(v) : -1; }() };
++    void blitz_rt64_present_skip(int rule) { blitz_present_skip_rule = rule; }
+ 
+     static std::mutex blitz_ds_window_mutex;
+     static std::condition_variable blitz_ds_window_changed;
+@@ -795,6 +798,7 @@ namespace RT64 {
+ 
+         int processCursor = -1;
+         bool skipPresent = false;
++        int newerPresents = 0;
+         uint32_t displayTimingRate = UINT32_MAX;
+         const bool displayTiming = ext.device->getCapabilities().displayTiming;
+         bool swapChainValid = !ext.swapChain->needsResize();
+@@ -816,6 +820,7 @@ namespace RT64 {
+                     processCursor = threadCursor;
+                     threadCursor = (threadCursor + 1) % presents.size();
+                     skipPresent = (writeCursor != threadCursor);
++                    newerPresents = int((writeCursor + presents.size() - threadCursor) % presents.size());
+                 }
+             }
+ 
+@@ -861,6 +866,20 @@ namespace RT64 {
+                     }
+                 }
+ 
++                // BLITZ DS: RT64 drops a present whenever a newer one waits. The next workload waits on this present, so with two
++                // screens' passes in that wait the queue settles into dropping every other one: on an RG DS at 1.5x, 24 frames
++                // rendered a second and 12 shown. BLITZ_PRESENT_SKIP: 1 RT64's rule, 2 drop only when two or more newer ones wait
++                // (two screens' default), 0 never drop.
++                const bool twoScreens = (secondChain != nullptr) && secondValid;
++                const int presentSkipRule = blitz_present_skip_rule.load(std::memory_order_relaxed);
++                const int skipRule = (presentSkipRule >= 0) ? presentSkipRule : (twoScreens ? 2 : 1);
++                if (skipRule == 0) {
++                    skipPresent = false;
++                }
++                else if (skipRule == 2) {
++                    skipPresent = (newerPresents >= 2);
++                }
++
+                 skipPresent = skipPresent || ext.swapChain->isEmpty();
+ 
+                 Present &present = presents[processCursor];

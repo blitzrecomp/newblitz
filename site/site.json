@@ -1,0 +1,9 @@
+{
+  "_comment": "The site's few settings. Change one, then run: python3 site/tools/build.py (deploy.sh runs it too).",
+  "siteUrl": "https://newblitz.pages.dev",
+  "repo": "https://github.com/blitzrecomp/newblitz",
+  "trailerYouTubeId": "",
+  "discord": "https://discord.gg/AtcKN9dY5",
+  "youtube": "https://www.youtube.com/@BlitzRecomp",
+  "x": "https://x.com/blitzrecomp"
+}

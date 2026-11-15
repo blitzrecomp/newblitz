@@ -1,0 +1,47 @@
+diff --git a/recompui/src/base/ui_state.cpp b/recompui/src/base/ui_state.cpp
+index 5d8b215..8017137 100644
+--- a/recompui/src/base/ui_state.cpp
++++ b/recompui/src/base/ui_state.cpp
+@@ -656,6 +656,9 @@ void recompui::activate_mouse() {
+     ui_state->update_focus(true, false);
+ }
+ 
++extern "C" { volatile int blitz_ds_panel_first = 0; }
++namespace { Rml::Context* ds_context = nullptr; Rml::ElementDocument* ds_document = nullptr; }
++
+ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer* swap_chain_framebuffer) {
+ 
+     apply_background_input_mode();
+@@ -890,7 +893,8 @@ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer*
+     ui_state->update_primary_input(mouse_moved, non_mouse_interacted);
+     ui_state->update_focus(mouse_moved, non_mouse_interacted);
+ 
+-    if (recompui::is_any_context_shown()) {
++    const bool panel_first = blitz_ds_panel_first != 0 && ds_context != nullptr && ds_document != nullptr;  // BLITZ DS: game + companion
++    if (recompui::is_any_context_shown() || panel_first) {
+         if (recompui::is_context_shown(recompui::get_launcher_context_id())) {
+             recompui::update_launcher_menu();
+         }
+@@ -914,6 +918,13 @@ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer*
+         prev_width = width;
+         prev_height = height;
+ 
++        if (panel_first) {  // under anything else that's up
++            ds_context->SetDensityIndependentPixelRatio(height / 1080.0f);
++            ds_context->SetDimensions({ width, height });
++            ds_context->Update();
++            ds_context->GetRenderManager().SetViewport({ width, height });
++            ds_context->Render();
++        }
+         ui_state->context->Update();
+         ui_state->context->GetRenderManager().SetViewport({ width, height });  // BLITZ DS: the second screen's context shares it
+         ui_state->context->Render();
+@@ -924,8 +935,6 @@ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer*
+ // BLITZ DS: the second screen's UI, its own small RmlUi context of plain RML that the game writes (src/game/ds_view.cpp).
+ extern "C" void (*blitz_ds_second_hook)(plume::RenderCommandList*, plume::RenderFramebuffer*);
+ namespace {
+-    Rml::Context* ds_context = nullptr;
+-    Rml::ElementDocument* ds_document = nullptr;
+     std::mutex ds_panel_mutex;
+     std::string ds_panel_pending;
+     std::vector<recompui::DsMover> ds_movers;

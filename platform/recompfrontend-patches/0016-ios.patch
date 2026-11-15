@@ -1,0 +1,127 @@
+--- a/recompui/src/composites/ui_mod_menu.cpp
++++ b/recompui/src/composites/ui_mod_menu.cpp
+@@ -295,6 +295,8 @@
+ #elif defined(__linux__)
+     std::string command = "xdg-open \"" + mods_directory.string() + "\" &";
+     std::system(command.c_str());
++#elif defined(__APPLE__) && defined(BLITZ_IOS)
++    (void)mods_directory;  // BlitzRecomp: no Finder on iOS (system() isn't available there)
+ #elif defined(__APPLE__)
+     std::string command = "open \"" + mods_directory.string() + "\"";
+     std::system(command.c_str());
+--- a/recompui/src/util/file.cpp
++++ b/recompui/src/util/file.cpp
+@@ -1,7 +1,9 @@
+ #include "file.h"
+ 
+ #include <SDL.h>
++#if !defined(BLITZ_IOS)
+ #include "nfd.h"
++#endif
+ #include "RmlUi/Core.h"
+ 
+ #include "recompui/program_config.h"
+@@ -20,8 +22,9 @@
+ #endif
+ 
+ namespace recompui {
+-#if defined(__PROSPERO__)
+-    // PS5 homebrew (BlitzRecomp): no file dialog; files come from fixed folders (docs/PS5_HOMEBREW.md).
++#if defined(__PROSPERO__) || defined(BLITZ_IOS)
++    // PS5 homebrew (BlitzRecomp): no file dialog; files come from fixed folders (docs/PS5_HOMEBREW.md). iOS uses the
++    // system document picker instead (support_apple.mm), so these desktop dialogs aren't built there either.
+     static void perform_file_dialog_operation(const std::function<void(bool, const std::filesystem::path&)>& callback) {
+         callback(false, {});
+     }
+--- a/recompui/src/util/support_apple.mm
++++ b/recompui/src/util/support_apple.mm
+@@ -1,15 +1,80 @@
+ #include "./file.h"
+ #import <Foundation/Foundation.h>
++#include <TargetConditionals.h>
++#if TARGET_OS_IPHONE
++#import <UIKit/UIKit.h>
++#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
++#else
+ #import <AppKit/AppKit.h>
++#endif
+ #import <objc/runtime.h>
+ #import <objc/message.h>
+ #include <SDL.h>
++#if !TARGET_OS_IPHONE
+ #include "nfd.h"
++#endif
+ 
++#if TARGET_OS_IPHONE
++// BlitzRecomp: iOS picks files with the system document picker (the Files sheet). The picked files are copies in
++// the app's sandbox, so the import reads them like any local file.
++@interface RecompDocumentPicker : NSObject <UIDocumentPickerDelegate>
++@property(nonatomic, copy) void (^done)(NSArray<NSURL*>* urls);
++@end
++
++@implementation RecompDocumentPicker
++- (void)documentPicker:(UIDocumentPickerViewController*)controller didPickDocumentsAtURLs:(NSArray<NSURL*>*)urls {
++    if (self.done) self.done(urls);
++    self.done = nil;
++}
++- (void)documentPickerWasCancelled:(UIDocumentPickerViewController*)controller {
++    if (self.done) self.done(@[]);
++    self.done = nil;
++}
++@end
++
++static RecompDocumentPicker* recomp_picker_delegate = nil;  // kept while the picker is up
++#endif
++
+ namespace recompui::file {
++#if TARGET_OS_IPHONE
+     void apple::open_panel(bool multiple, std::function<void(bool success, const std::vector<std::filesystem::path>& paths)> callback,
+                            bool folders) {
+         dispatch_async(dispatch_get_main_queue(), ^{
++            UIWindow* window = nil;
++            for (UIScene* scene in [UIApplication sharedApplication].connectedScenes) {
++                if ([scene isKindOfClass:[UIWindowScene class]]) {
++                    for (UIWindow* w in ((UIWindowScene*)scene).windows) {
++                        if (w.isKeyWindow || window == nil) window = w;
++                    }
++                }
++            }
++            UIViewController* parent = window.rootViewController;
++            while (parent.presentedViewController != nil) parent = parent.presentedViewController;
++            auto cb = callback;  // copied into the blocks
++            if (parent == nil) {
++                dispatch_async(dispatch_get_main_queue(), ^{ cb(false, {}); });
++                return;
++            }
++            NSArray<UTType*>* types = folders ? @[UTTypeFolder] : @[UTTypeItem];
++            UIDocumentPickerViewController* picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types asCopy:!folders];
++            picker.allowsMultipleSelection = multiple ? YES : NO;
++            recomp_picker_delegate = [RecompDocumentPicker new];
++            recomp_picker_delegate.done = ^(NSArray<NSURL*>* urls) {
++                std::vector<std::filesystem::path> paths;
++                for (NSURL* url in urls) {
++                    if ([url isFileURL] && [url path] != nil) paths.emplace_back([[url path] UTF8String]);
++                }
++                bool ok = !paths.empty();
++                dispatch_async(dispatch_get_main_queue(), ^{ cb(ok, paths); recomp_picker_delegate = nil; });
++            };
++            picker.delegate = recomp_picker_delegate;
++            [parent presentViewController:picker animated:YES completion:nil];
++        });
++    }
++#else
++    void apple::open_panel(bool multiple, std::function<void(bool success, const std::vector<std::filesystem::path>& paths)> callback,
++                           bool folders) {
++        dispatch_async(dispatch_get_main_queue(), ^{
+             NSOpenPanel* panel = [NSOpenPanel openPanel];
+             [panel setCanChooseFiles:YES];
+             [panel setCanChooseDirectories:folders ? YES : NO];
+@@ -39,6 +104,8 @@
+         });
+     }
+ 
++#endif
++
+     void apple::dispatch_on_ui_thread(std::function<void()> func) {
+         dispatch_async(dispatch_get_main_queue(), ^{
+             func();

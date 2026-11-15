@@ -1,0 +1,212 @@
+diff --git a/recompui/src/base/ui_state.cpp b/recompui/src/base/ui_state.cpp
+index 8017137..d5366bf 100644
+--- a/recompui/src/base/ui_state.cpp
++++ b/recompui/src/base/ui_state.cpp
+@@ -529,8 +529,34 @@ void init_hook(plume::RenderInterface* interface, plume::RenderDevice* device) {
+ 
+ moodycamel::ConcurrentQueue<SDL_Event> ui_event_queue{};
+ 
++// BLITZ DS (rt64_present_queue.cpp's BLITZ_DS_UI_EVERY): picture-first may leave the first window as it was for a frame. An event
++// the UI can answer wakes it for the next: a press or a tap, a key, the window changing. Not the streams that come with play: a
++// stick's moves (and their raw joystick twins), a pointer or finger moving, buttons let go. While a context takes input or the
++// mouse, the draw wakes it every frame itself (draw_hook), so those count there anyway.
++extern "C" void blitz_ds_ui_wake(void);
++static bool ui_event_wakes(const SDL_Event& event) {
++    switch (event.type) {
++    case SDL_MOUSEBUTTONDOWN:
++    case SDL_MOUSEBUTTONUP:
++    case SDL_MOUSEWHEEL:
++    case SDL_FINGERDOWN:
++    case SDL_FINGERUP:
++    case SDL_KEYDOWN:
++    case SDL_TEXTINPUT:
++    case SDL_TEXTEDITING:
++    case SDL_CONTROLLERBUTTONDOWN:
++    case SDL_WINDOWEVENT:
++        return true;
++    default:
++        return false;
++    }
++}
++
+ void recompui::queue_event(const SDL_Event& event) {
+     ui_event_queue.enqueue(event);
++    if (ui_event_wakes(event)) {
++        blitz_ds_ui_wake();
++    }
+ }
+ 
+ bool recompui::try_deque_event(SDL_Event& out) {
+@@ -930,6 +956,11 @@ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer*
+         ui_state->context->Render();
+         ui_state->render_interface.end(command_list, swap_chain_framebuffer);
+     }
++
++    // BLITZ DS (BLITZ_DS_UI_EVERY): a menu's up, or anything else that takes input or the mouse: every frame, as ever.
++    if (ui_state->is_context_capturing_input() || ui_state->is_context_capturing_mouse()) {
++        blitz_ds_ui_wake();
++    }
+ }
+ 
+ // BLITZ DS: the second screen's UI, its own small RmlUi context of plain RML that the game writes (src/game/ds_view.cpp).
+@@ -969,6 +1000,7 @@ void recompui::ds_panel_set(const std::string& rml) {
+     }
+     ds_movers_applied.clear();
+     blitz_ds_second_dirty = 1;
++    blitz_ds_ui_wake();  // the panel's on the first window at Stylus's play select (blitz_ds_panel_first)
+ }
+ 
+ void recompui::ds_panel_move(const DsMover* movers, int count) {
+@@ -1047,6 +1079,7 @@ void recompui::show_context(ContextId context, std::string_view param) {
+ 
+         // TODO call the context's on_show callback with the param.
+         ui_state->show_context(context);
++        blitz_ds_ui_wake();
+     }
+     if (prev_context != ContextId::null()) {
+         prev_context.open();
+@@ -1064,6 +1097,7 @@ void recompui::hide_context(ContextId context) {
+         std::lock_guard lock{ ui_state_mutex };
+ 
+         ui_state->hide_context(context);
++        blitz_ds_ui_wake();
+     }
+     if (prev_context != ContextId::null()) {
+         prev_context.open();
+@@ -1079,6 +1113,7 @@ void recompui::hide_all_contexts() {
+ 
+     if (ui_state) {
+         ui_state->hide_all_contexts();
++        blitz_ds_ui_wake();
+     }
+ }
+ 
+diff --git a/recompui/src/core/ui_context.cpp b/recompui/src/core/ui_context.cpp
+index 9667a43..ecc517d 100644
+--- a/recompui/src/core/ui_context.cpp
++++ b/recompui/src/core/ui_context.cpp
+@@ -16,6 +16,7 @@
+ #include "util/file.h"
+ 
+ extern std::recursive_mutex ui_state_mutex;  // ui_state.cpp: the draw holds it
++extern "C" void blitz_ds_ui_wake(void);       // rt64_present_queue.cpp (BLITZ_DS_UI_EVERY): new text, an element gone
+ 
+ // Hash implementations for ContextId and ResourceId.
+ template <>
+@@ -635,6 +636,7 @@ void recompui::ContextId::queue_set_text(Element* element, std::string&& text) {
+     }
+ 
+     opened_context->to_set_text.emplace_back(std::make_tuple(element->resource_id, std::move(text)));
++    blitz_ds_ui_wake();
+ }
+ 
+ recompui::Style* recompui::ContextId::create_style() {
+@@ -668,6 +670,7 @@ void recompui::ContextId::destroy_resource(ResourceId resource) {
+     if (!pop_result.has_value()) {
+         context_error(*this, ContextErrorType::DestroyResourceNotFound);
+     }
++    blitz_ds_ui_wake();
+ }
+ 
+ void recompui::ContextId::clear_children() {
+diff --git a/recompui/src/elements/ui_element.cpp b/recompui/src/elements/ui_element.cpp
+index f2f0917..96051e3 100644
+--- a/recompui/src/elements/ui_element.cpp
++++ b/recompui/src/elements/ui_element.cpp
+@@ -8,6 +8,10 @@
+ 
+ #include <cassert>
+ 
++// BLITZ DS (rt64_present_queue.cpp's BLITZ_DS_UI_EVERY): what an element shows changed, so a first window left as it was gets
++// drawn again on the next frame. Only real changes count: a property set to what it already is changes nothing.
++extern "C" void blitz_ds_ui_wake(void);
++
+ namespace recompui {
+ 
+ Element::Element(ResourceId rid, Rml::Element *base) : Style(rid) {
+@@ -79,8 +83,13 @@ void Element::set_parent(Element *new_parent) {
+ void Element::set_property(Rml::PropertyId property_id, const Rml::Property &property) {
+     assert(base != nullptr);
+ 
++    const Rml::Property* cur_value = base->GetLocalProperty(property_id);
++    const bool changed = cur_value == nullptr || *cur_value != property;
+     base->SetProperty(property_id, property);
+     Style::set_property(property_id, property);
++    if (changed) {
++        blitz_ds_ui_wake();
++    }
+ }
+ 
+ void Element::register_event_listeners(uint32_t events_enabled) {
+@@ -129,6 +138,7 @@ void Element::apply_style(Style *style) {
+         const Rml::Property* cur_value = base->GetLocalProperty(it.first);
+         if (cur_value == nullptr || *cur_value != it.second) {
+             base->SetProperty(it.first, it.second);
++            blitz_ds_ui_wake();
+         }
+     }
+ }
+@@ -138,6 +148,7 @@ void Element::remove_property(Rml::PropertyId property_id) {
+     if (property_map.find(property_id) != property_map.end()) {
+         property_map.erase(property_id);
+     }
++    blitz_ds_ui_wake();
+ }
+ 
+ void Element::apply_styles() {
+@@ -161,6 +172,7 @@ void Element::propagate_disabled(bool disabled) {
+         } else {
+             base->RemoveAttribute("disabled");
+         }
++        blitz_ds_ui_wake();
+ 
+         if (events_enabled & Events(EventType::Enable)) {
+             handle_event(Event::enable_event(!attribute_state));
+@@ -344,6 +356,7 @@ void Element::ProcessEvent(Rml::Event &event) {
+ 
+ void Element::set_attribute(const Rml::String &attribute_key, const Rml::String &attribute_value) {
+     base->SetAttribute(attribute_key, attribute_value);
++    blitz_ds_ui_wake();
+ }
+ 
+ void Element::process_event(const Event &) {
+@@ -474,10 +487,12 @@ std::string Element::get_input_text() {
+ 
+ void Element::set_input_text(std::string_view val) {
+     base->SetAttribute("value", std::string{ val });
++    blitz_ds_ui_wake();
+ }
+ 
+ void Element::set_src(std::string_view src) {
+     base->SetAttribute("src", std::string(src));
++    blitz_ds_ui_wake();
+ }
+ 
+ void Element::set_style_enabled(std::string_view style_name, bool enable) {
+@@ -590,7 +605,9 @@ double Element::get_input_value_double() {
+ }
+ 
+ bool Element::focus() {
+-    return base->Focus();
++    const bool focused = base->Focus();
++    blitz_ds_ui_wake();
++    return focused;
+ }
+ 
+ bool Element::focus_first_focusable(bool skip_text_inputs) {
+@@ -620,6 +637,7 @@ bool Element::focus_first_focusable(bool skip_text_inputs) {
+ 
+ void Element::blur() {
+     base->Blur();
++    blitz_ds_ui_wake();
+ }
+ 
+ void Element::queue_update() {
+@@ -694,6 +712,7 @@ void Element::scroll_into_view(bool smooth) {
+     }
+ 
+     base->ScrollIntoView(options);
++    blitz_ds_ui_wake();
+ }
+ 
+ // Navigation

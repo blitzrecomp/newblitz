@@ -1,0 +1,284 @@
+diff --git a/librecomp/include/librecomp/game.hpp b/librecomp/include/librecomp/game.hpp
+index 74fe2f6..e94ff7b 100644
+--- a/librecomp/include/librecomp/game.hpp
++++ b/librecomp/include/librecomp/game.hpp
+@@ -3,6 +3,8 @@
+ 
+ #include <vector>
+ #include <filesystem>
++#include <functional>
++#include <span>
+ 
+ #include "recomp.h"
+ #include "rsp.hpp"
+@@ -97,6 +99,14 @@ namespace recomp {
+     bool is_rom_valid(std::u8string& game_id);
+     bool is_rom_loaded();
+     void set_rom_contents(std::vector<uint8_t>&& new_rom);
++    // BlitzRecomp: the stored ROM file mapped copy-on-write as the ROM, instead of read into memory (pi.cpp). On by
++    // default on Android (BLITZ_ROM_MAP=0 keeps the copy), elsewhere only with BLITZ_ROM_MAP=1. `check` sees the
++    // mapped bytes before they become the ROM. NotMapped: read the file instead.
++    enum class RomMapResult { Mapped, Rejected, NotMapped };
++    RomMapResult map_rom_file(const std::filesystem::path& path, const std::function<bool(std::span<const uint8_t>)>& check);
++    // While set, a ROM from set_rom_contents (a mod's ROM patch) replaces a mapped ROM with a copy. The old mapping
++    // stays readable until it is cleared (load_mods still reads the ROM it started with).
++    void set_rom_from_mods(bool from_mods);
+     std::span<const uint8_t> get_rom();
+     void do_rom_read(uint8_t* rdram, gpr ram_address, uint32_t physical_addr, size_t num_bytes);
+     void do_rom_pio(uint8_t* rdram, gpr ram_address, uint32_t physical_addr);
+diff --git a/librecomp/src/pi.cpp b/librecomp/src/pi.cpp
+index 016ac64..fb1e06c 100644
+--- a/librecomp/src/pi.cpp
++++ b/librecomp/src/pi.cpp
+@@ -11,18 +11,165 @@
+ #include <ultramodern/ultra64.h>
+ #include <ultramodern/ultramodern.hpp>
+ 
++#if !defined(_WIN32) && !defined(__PROSPERO__)
++#    define RECOMP_ROM_MAP 1
++#    include <algorithm>
++#    include <cerrno>
++#    include <cstdio>
++#    include <cstdlib>
++#    include <fcntl.h>
++#    include <sys/mman.h>
++#    include <sys/stat.h>
++#    include <unistd.h>
++#endif
++
++// BlitzRecomp: the ROM is a copy in memory (rom), or on Android a private mapping of the stored ROM file
++// (map_rom_file). The game reads rom_view either way.
+ static std::vector<uint8_t> rom;
++static std::span<const uint8_t> rom_view;
++
++#ifdef RECOMP_ROM_MAP
++// A reserved range with the stored file mapped over its start. Later changes (art, added files) are written into it
++// one page at a time where they differ: only those pages become anonymous memory (copy-on-write), the rest stay
++// the file's.
++static uint8_t* rom_map = nullptr;
++static size_t rom_map_reserved = 0;
++static std::string rom_map_file;
++static bool rom_from_mods = false;
++// A mapping a mod's ROM patch replaced: load_mods still reads it after patching (decompressed_rom, mods.cpp), so it
++// is unmapped once load_mods returns (set_rom_from_mods(false)).
++static uint8_t* rom_map_retired = nullptr;
++static size_t rom_map_retired_size = 0;
++
++static void unmap_rom() {
++    if (rom_map != nullptr) {
++        munmap(rom_map, rom_map_reserved);
++        rom_map = nullptr;
++        rom_map_reserved = 0;
++    }
++}
++#endif
+ 
+ bool recomp::is_rom_loaded() {
+-    return !rom.empty();
++    return !rom_view.empty();
+ }
+ 
+ void recomp::set_rom_contents(std::vector<uint8_t>&& new_rom) {
++#ifdef RECOMP_ROM_MAP
++    if (rom_map != nullptr) {
++        std::vector<uint8_t> data = std::move(new_rom);  // freed on return
++        if (!rom_from_mods && data.size() <= rom_map_reserved) {
++            const size_t page = (size_t)sysconf(_SC_PAGESIZE);
++            size_t copied = 0;
++            for (size_t off = 0; off < data.size(); off += page) {
++                size_t len = std::min(page, data.size() - off);
++                if (std::memcmp(rom_map + off, data.data() + off, len) != 0) {
++                    std::memcpy(rom_map + off, data.data() + off, len);
++                    copied++;
++                }
++            }
++            rom_view = std::span<const uint8_t>(rom_map, data.size());
++            fprintf(stderr, "[rom] mapped %zu from %s: %zu changed page(s) copied (%zu KB)\n", data.size(),
++                    rom_map_file.c_str(), copied, copied * page / 1024);
++            return;
++        }
++        // A mod's ROM patch, or a ROM too big for the reservation: back to a copy.
++        fprintf(stderr, "[rom] copied (%s)\n", rom_from_mods ? "a mod patches the ROM" : "larger than the mapping");
++        rom = std::move(data);
++        rom_view = rom;
++        if (rom_from_mods) {
++            rom_map_retired = rom_map;
++            rom_map_retired_size = rom_map_reserved;
++            rom_map = nullptr;
++            rom_map_reserved = 0;
++        }
++        else {
++            unmap_rom();
++        }
++        return;
++    }
++#endif
+     rom = std::move(new_rom);
++    rom_view = rom;
++}
++
++recomp::RomMapResult recomp::map_rom_file(const std::filesystem::path& path, const std::function<bool(std::span<const uint8_t>)>& check) {
++#ifdef RECOMP_ROM_MAP
++    // On by default in Android's Potato Mode (BLITZ_LEAN), until it's been seen on more devices: BLITZ_ROM_MAP=0 keeps the copy
++    // there; elsewhere BLITZ_ROM_MAP=1 turns it on.
++    const char* env = std::getenv("BLITZ_ROM_MAP");
++#ifdef __ANDROID__
++    if ((env != nullptr) ? (std::strcmp(env, "0") == 0) : (std::getenv("BLITZ_LEAN") == nullptr)) {
++        if (env != nullptr) fprintf(stderr, "[rom] copied (BLITZ_ROM_MAP=0)\n");
++        return RomMapResult::NotMapped;
++    }
++#else
++    if (env == nullptr || std::strcmp(env, "0") == 0) {
++        return RomMapResult::NotMapped;
++    }
++#endif
++    char why[160];
++    int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
++    struct stat st{};
++    if (fd < 0 || fstat(fd, &st) != 0 || st.st_size <= 0) {
++        snprintf(why, sizeof(why), "can't open %s: %s", path.c_str(), fd < 0 ? strerror(errno) : "empty or unreadable");
++        if (fd >= 0) close(fd);
++        fprintf(stderr, "[rom] copied (%s)\n", why);
++        return RomMapResult::NotMapped;
++    }
++    const size_t page = (size_t)sysconf(_SC_PAGESIZE);
++    const size_t size = (size_t)st.st_size;
++    const size_t file_span = (size + page - 1) & ~(page - 1);
++    // Room for files added past the end (fs_commit_files) and exported ROMs up to 64 MB. Untouched pages cost nothing.
++    const size_t reserved = std::max<size_t>(64 * 1024 * 1024, 2 * file_span);
++    // Anonymous first, so reads past the file's end see zeros, then the file over its start.
++    uint8_t* base = (uint8_t*)mmap(nullptr, reserved, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
++    if (base == (uint8_t*)MAP_FAILED ||
++        mmap(base, file_span, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED, fd, 0) == MAP_FAILED) {
++        snprintf(why, sizeof(why), "mmap failed: %s", strerror(errno));
++        if (base != (uint8_t*)MAP_FAILED) munmap(base, reserved);
++        close(fd);
++        fprintf(stderr, "[rom] copied (%s)\n", why);
++        return RomMapResult::NotMapped;
++    }
++    close(fd);  // the mapping keeps the file open
++
++    // Checked as mapped, so the bytes checked are the bytes the game reads.
++    if (!check(std::span<const uint8_t>(base, size))) {
++        munmap(base, reserved);
++        fprintf(stderr, "[rom] %s failed the ROM check\n", path.c_str());
++        return RomMapResult::Rejected;
++    }
++    unmap_rom();
++    std::vector<uint8_t>().swap(rom);
++    rom_map = base;
++    rom_map_reserved = reserved;
++    rom_map_file = path.string();
++    rom_view = std::span<const uint8_t>(base, size);
++    fprintf(stderr, "[rom] mapped %zu from %s\n", size, rom_map_file.c_str());
++    return RomMapResult::Mapped;
++#else
++    (void)path;
++    (void)check;
++    return RomMapResult::NotMapped;
++#endif
++}
++
++void recomp::set_rom_from_mods(bool from_mods) {
++#ifdef RECOMP_ROM_MAP
++    rom_from_mods = from_mods;
++    if (!from_mods && rom_map_retired != nullptr) {
++        munmap(rom_map_retired, rom_map_retired_size);
++        rom_map_retired = nullptr;
++        rom_map_retired_size = 0;
++    }
++#else
++    (void)from_mods;
++#endif
+ }
+ 
+ std::span<const uint8_t> recomp::get_rom() {
+-    return rom;
++    return rom_view;
+ }
+ 
+ constexpr uint32_t k1_to_phys(uint32_t addr) {
+@@ -67,7 +214,7 @@ void recomp::do_rom_read(uint8_t* rdram, gpr ram_address, uint32_t physical_addr
+     // TODO handle misaligned DMA
+     assert((physical_addr & 0x1) == 0 && "Only PI DMA from aligned ROM addresses is currently supported");
+     assert((ram_address & 0x7) == 0 && "Only PI DMA to aligned RDRAM addresses is currently supported");
+-    uint8_t* rom_addr = rom.data() + physical_addr - recomp::rom_base;
++    const uint8_t* rom_addr = rom_view.data() + physical_addr - recomp::rom_base;
+     for (size_t i = 0; i < num_bytes; i++) {
+         MEM_B(i, ram_address) = *rom_addr;
+         rom_addr++;
+@@ -77,7 +224,7 @@ void recomp::do_rom_read(uint8_t* rdram, gpr ram_address, uint32_t physical_addr
+ void recomp::do_rom_pio(uint8_t* rdram, gpr ram_address, uint32_t physical_addr) {
+     assert((physical_addr & 0x3) == 0 && "PIO not 4-byte aligned in device, currently unsupported");
+     assert((ram_address & 0x3) == 0 && "PIO not 4-byte aligned in RDRAM, currently unsupported");
+-    uint8_t* rom_addr = rom.data() + physical_addr - recomp::rom_base;
++    const uint8_t* rom_addr = rom_view.data() + physical_addr - recomp::rom_base;
+     MEM_B(0, ram_address) = *rom_addr++;
+     MEM_B(1, ram_address) = *rom_addr++;
+     MEM_B(2, ram_address) = *rom_addr++;
+diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
+index 74f0f25..902aed2 100644
+--- a/librecomp/src/recomp.cpp
++++ b/librecomp/src/recomp.cpp
+@@ -178,6 +178,14 @@ static bool rom_matches(const recomp::GameEntry& game_entry, const std::vector<u
+     return check_hash(rom_data, game_entry.rom_hash);
+ }
+ 
++// The same on a mapped ROM (map_rom_file). The game's own check takes a vector, so it gets a passing copy.
++static bool rom_matches(const recomp::GameEntry& game_entry, std::span<const uint8_t> rom_data) {
++    if (game_entry.rom_check != nullptr) {
++        return game_entry.rom_check(std::vector<uint8_t>(rom_data.begin(), rom_data.end()));
++    }
++    return XXH3_64bits(rom_data.data(), rom_data.size()) == game_entry.rom_hash;
++}
++
+ static std::vector<uint8_t> read_file(const std::filesystem::path& path) {
+     std::vector<uint8_t> ret;
+ 
+@@ -257,18 +265,27 @@ bool recomp::load_stored_rom(std::u8string& game_id) {
+     if (find_it == game_roms.end()) {
+         return false;
+     }
+-    
+-    std::vector<uint8_t> stored_rom_data = read_file(config_path / find_it->second.stored_filename());
+ 
+-    if (!rom_matches(find_it->second, stored_rom_data)) {
+-        // The ROM no longer has the right hash, delete it.
+-        std::error_code ec;
+-        std::filesystem::remove(config_path / find_it->second.stored_filename(), ec);
+-        return false;
++    // BlitzRecomp: on Android the stored file is mapped rather than read into memory, and checked as mapped (pi.cpp).
++    const std::filesystem::path rom_path = config_path / find_it->second.stored_filename();
++    recomp::RomMapResult mapped = recomp::map_rom_file(rom_path,
++        [&](std::span<const uint8_t> mapped_rom) { return rom_matches(find_it->second, mapped_rom); });
++    if (mapped == recomp::RomMapResult::Mapped) {
++        return true;
+     }
++    if (mapped == recomp::RomMapResult::NotMapped) {
++        std::vector<uint8_t> stored_rom_data = read_file(rom_path);
+ 
+-    recomp::set_rom_contents(std::move(stored_rom_data));
+-    return true;
++        if (rom_matches(find_it->second, stored_rom_data)) {
++            recomp::set_rom_contents(std::move(stored_rom_data));
++            return true;
++        }
++    }
++
++    // The ROM no longer has the right hash, delete it.
++    std::error_code ec;
++    std::filesystem::remove(rom_path, ec);
++    return false;
+ }
+ 
+ const recomp::Version& recomp::get_project_version() {
+@@ -772,7 +789,9 @@ bool wait_for_game_started(uint8_t* rdram, recomp_context* context) {
+                     std::vector<recomp::mods::ModLoadErrorDetails> mod_load_errors;
+                     {
+                         std::lock_guard lock { mod_context_mutex };
++                        recomp::set_rom_from_mods(true);  // BlitzRecomp: a mod's ROM patch stays a copy (pi.cpp)
+                         mod_load_errors = mod_context->load_mods(game_entry, current_game_mode_id, rdram, recomp::mod_rdram_start, mod_ram_used);
++                        recomp::set_rom_from_mods(false);
+                     }
+ 
+                     if (!mod_load_errors.empty()) {

@@ -1,0 +1,56 @@
+diff --git a/src/hle/rt64_blitz_replay.cpp b/src/hle/rt64_blitz_replay.cpp
+--- a/src/hle/rt64_blitz_replay.cpp
++++ b/src/hle/rt64_blitz_replay.cpp
+@@ -33,6 +33,7 @@
+ 
+     int blitz_replay_count(void);
+     int blitz_replay_frame_info(int index, float *aspect, int *ms, int *mark);
++    int blitz_replay_frame_tall(int index);
+     int blitz_replay_is_bgra(void);
+     void blitz_replay_read_start(int index, unsigned char *out);
+     int blitz_replay_read_done(void);
+@@ -52,6 +53,7 @@
+             float aspect = 1.0f;
+             int64_t ms = 0;
+             bool mark = false;
++            bool tall = false;  // kept while the picture went over both screens (BLITZ DS): shown that way, whatever's up now
+         };
+ 
+         struct Ring {
+@@ -180,6 +182,7 @@
+             frame.aspect = float(std::max(scissor.right - scissor.left, 1)) / float(std::max(scissor.bottom - scissor.top, 1));
+             frame.ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - r.firstCapture).count();
+             frame.mark = (blitz_replay_mark_next != 0);
++            frame.tall = (blitz_ds_mode == 1) && twoScreens;
+             blitz_replay_mark_next = 0;
+             r.head = (r.head + 1) % r.length;
+             r.count = std::min(r.count + 1, r.length);
+@@ -204,7 +207,9 @@
+             p.textureHeight = r.height;
+             p.stored = true;
+             p.storedAspect = frame.aspect;
+-            if ((blitz_ds_mode == 1) && twoScreens) {
++            // Each frame as it was kept: over both screens, or on one (the game shows it on the upper while the replay's up,
++            // replay_screen.cpp), so a play that switched screens mid-way still plays back right.
++            if (frame.tall && twoScreens) {
+                 p.part = true;
+                 p.partTop = (blitz_ds_second_on_top != 0) ? blitz_ds_split : 0.0f;
+                 p.partBottom = (blitz_ds_second_on_top != 0) ? 1.0f : blitz_ds_split;
+@@ -281,6 +286,17 @@
+         *ms = int(frame.ms);
+         *mark = frame.mark ? 1 : 0;
+         return 1;
++    }
++
++    // Whether a frame was kept over both screens (BLITZ DS), so the game puts the replay there. Index 0 is the oldest.
++    int blitz_replay_frame_tall(int index) {
++        RT64::Ring &r = RT64::ring();
++        std::scoped_lock lock(r.mutex);
++        if ((index < 0) || (index >= int(r.count))) {
++            return 0;
++        }
++
++        return r.frames[r.physical(uint32_t(index))].tall ? 1 : 0;
+     }
+ 
+     int blitz_replay_is_bgra(void) {

@@ -1,0 +1,52 @@
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index 0001297..72d3138 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -3166,6 +3166,7 @@ namespace plume {
+ 
+     void VulkanCommandList::drawInstanced(uint32_t vertexCountPerInstance, uint32_t instanceCount, uint32_t startVertexLocation, uint32_t startInstanceLocation) {
+         assert(activeGraphicsPipelineLayout != nullptr);
++        if (graphicsPipelineMissing) return;
+         checkActiveRenderPass();
+ 
+         vkCmdDraw(vk, vertexCountPerInstance, instanceCount, startVertexLocation, startInstanceLocation);
+@@ -3173,6 +3174,7 @@ namespace plume {
+     
+     void VulkanCommandList::drawIndexedInstanced(uint32_t indexCountPerInstance, uint32_t instanceCount, uint32_t startIndexLocation, int32_t baseVertexLocation, uint32_t startInstanceLocation) {
+         assert(activeGraphicsPipelineLayout != nullptr);
++        if (graphicsPipelineMissing) return;
+         checkActiveRenderPass();
+ 
+         vkCmdDrawIndexed(vk, indexCountPerInstance, instanceCount, startIndexLocation, baseVertexLocation, startInstanceLocation);
+@@ -3190,6 +3192,9 @@ namespace plume {
+         }
+         case VulkanPipeline::Type::Graphics: {
+             const VulkanGraphicsPipeline *graphicsPipeline = static_cast<const VulkanGraphicsPipeline *>(interfacePipeline);
++            // One the driver refused: its draws are skipped, as a null pipeline crashes inside Mali's.
++            graphicsPipelineMissing = graphicsPipeline->vk == VK_NULL_HANDLE;
++            if (graphicsPipelineMissing) break;
+             vkCmdBindPipeline(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline->vk);
+             break;
+         }
+@@ -4176,6 +4181,9 @@ namespace plume {
+         deviceFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+         deviceFeatures.pNext = featuresChain;
+         vkGetPhysicalDeviceFeatures2(physicalDevice, &deviceFeatures);
++        fprintf(stderr, "[vulkan] dynamic image indexing %d, int16 %d, sampled images per stage %u, per set %u\n",
++            deviceFeatures.features.shaderSampledImageArrayDynamicIndexing, deviceFeatures.features.shaderInt16,
++            physicalDeviceProperties.limits.maxPerStageDescriptorSampledImages, physicalDeviceProperties.limits.maxDescriptorSetSampledImages);
+ 
+         // Check for properties.
+         if (rayTracingFound) {
+diff --git a/plume_vulkan.h b/plume_vulkan.h
+index 4f4e5db..6d29695 100644
+--- a/plume_vulkan.h
++++ b/plume_vulkan.h
+@@ -304,6 +304,7 @@ namespace plume {
+         const VulkanFramebuffer *targetFramebuffer = nullptr;
+         const VulkanPipelineLayout *activeComputePipelineLayout = nullptr;
+         const VulkanPipelineLayout *activeGraphicsPipelineLayout = nullptr;
++        bool graphicsPipelineMissing = false;
+         const VulkanPipelineLayout *activeRaytracingPipelineLayout = nullptr;
+         VkRenderPass activeRenderPass = VK_NULL_HANDLE;
+ 

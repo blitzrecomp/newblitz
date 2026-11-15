@@ -1,0 +1,48 @@
+diff --git a/recompui/src/base/ui_state.cpp b/recompui/src/base/ui_state.cpp
+--- a/recompui/src/base/ui_state.cpp
++++ b/recompui/src/base/ui_state.cpp
+@@ -683,6 +683,7 @@
+ }
+ 
+ extern "C" { volatile int blitz_ds_panel_first = 0; }
++extern "C" int blitz_hotkey_held(void);  // BlitzRecomp controllers.cpp: L3 or R3 held, whose Select is a screenshot
+ namespace { Rml::Context* ds_context = nullptr; Rml::ElementDocument* ds_document = nullptr; }
+ 
+ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer* swap_chain_framebuffer) {
+@@ -881,7 +882,9 @@
+                 }
+             }
+             else {
+-                if (context_capturing_input) {
++                // BlitzRecomp: a controller press with the hotkey (L3 / R3) held is the combo's: the menu doesn't take it.
++                const bool hotkey_press = (cur_event.type == SDL_CONTROLLERBUTTONDOWN || cur_event.type == SDL_CONTROLLERBUTTONUP) && blitz_hotkey_held();
++                if (context_capturing_input && !hotkey_press) {
+                     RmlSDL::InputEventHandler(ui_state->context, cur_event);
+                 }
+             }
+@@ -909,7 +912,7 @@
+                     profile_index = recompinput::profiles::get_controller_profile_index_from_sdl_controller(controller);
+                 }
+ 
+-                if (check_menu_button_pressed(profile_index, recompinput::GameInput::TOGGLE_MENU, cur_event.cbutton.button)) {
++                if (check_menu_button_pressed(profile_index, recompinput::GameInput::TOGGLE_MENU, cur_event.cbutton.button) && !blitz_hotkey_held()) {
+                     open_config = true;
+                 }
+                 break;
+@@ -920,6 +923,16 @@
+                 recompui::config::open();
+             }
+         }
++        // BlitzRecomp: the menu button closes it too (Select toggles, as Back does on Android), not only Back in the menu.
++        else if (config_was_open && cur_event.type == SDL_EventType::SDL_CONTROLLERBUTTONDOWN && !blitz_hotkey_held() &&
++                 recompui::is_context_shown(recompui::config::get_config_context_id())) {
++            SDL_JoystickID joystick_id = cur_event.cbutton.which;
++            int profile_index = recompinput::players::is_single_player_mode() ? recompinput::profiles::get_sp_controller_profile_index()
++                : recompinput::profiles::get_controller_profile_index_from_sdl_controller(recompinput::get_controller_from_joystick_id(joystick_id));
++            if (check_menu_button_pressed(profile_index, recompinput::GameInput::TOGGLE_MENU, cur_event.cbutton.button)) {
++                recompui::config::close();
++            }
++        }
+     } // end dequeue event loop
+ 
+     // Handle controller key repeats.

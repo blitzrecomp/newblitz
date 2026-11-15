@@ -1,0 +1,35 @@
+diff --git a/recompui/include/recompui/recompui.h b/recompui/include/recompui/recompui.h
+index 30c463b..6076980 100644
+--- a/recompui/include/recompui/recompui.h
++++ b/recompui/include/recompui/recompui.h
+@@ -76,6 +76,9 @@ namespace recompui {
+         ButtonStyle cancel_variant = ButtonStyle::Danger,
+         bool focus_on_cancel = true
+     );
++    // Replaces the quit prompt (window close, Cmd+Q, Settings → Quit) while it returns true, e.g. to ask
++    // about saving a game in progress.
++    void set_quit_prompt_override(std::function<bool()> override_prompt);
+     void open_info_prompt(
+         const std::string& header_text,
+         const std::string& content_text,
+diff --git a/recompui/src/base/ui_state.cpp b/recompui/src/base/ui_state.cpp
+index 277a421..fe97814 100644
+--- a/recompui/src/base/ui_state.cpp
++++ b/recompui/src/base/ui_state.cpp
+@@ -35,7 +35,16 @@
+ 
+ static std::atomic_bool cursor_enabled = true;
+ 
++static std::function<bool()> quit_prompt_override;
++
++void recompui::set_quit_prompt_override(std::function<bool()> override_prompt) {
++    quit_prompt_override = std::move(override_prompt);
++}
++
+ void recompui::open_quit_game_prompt() {
++    if (quit_prompt_override && quit_prompt_override()) {
++        return;  // the game showed its own prompt
++    }
+     recompui::open_choice_prompt(
+         "Are you sure you want to quit?",
+         "Any progress since your last save will be lost.",

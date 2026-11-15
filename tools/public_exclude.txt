@@ -1,0 +1,84 @@
+# Paths left out of the public snapshot (tools/make_public_tree.sh). One per line, relative to the repo root.
+
+# Real NFL player names (the NFLPA's to license): offered as a separate download, not in the repo.
+packs/blitz2026
+
+# Private working pages and notes for the team's sit-downs (their data lives on claude.ai).
+docs/design/redesign/sitdown_checklist.html
+docs/design/redesign/roster_room.html
+
+# Going-public notes (risk, staying pseudonymous, who to tell first): a private conversation, not project docs.
+docs/OUTREACH.md
+
+# The design brief for swapping NFL out of our logos (names the old logo; the public tree ships only the result).
+docs/design/NEW_BLITZ_LOGO_PROMPT.md
+
+# Hardware test evidence: phone photos with GPS tags that show game screens and NFL art, Windows crash-report zips
+# that name the test PC, and logs with local paths. The findings are written up in the docs that cite them.
+docs/hardware
+
+# The Pac-12 league pak: school names and generated school art (docs/PROVENANCE.md: origin not documented).
+# CMake bundles it only when it's there.
+packs/pac12
+
+# The New Blitz 2027 logo (art/blitz2026/logo27, files) and the credits page (art/credits) are ours and ship: since
+# 2026-11-13 the logo says NEW where it said NFL (icons/source/, docs/design/NEW_BLITZ_LOGO_PROMPT.md).
+
+# ---- The optional Team Extension build (docs/ZOINKITY.md): uncomment to leave it out ----
+# Modern Blitz runs on the original game and needs none of these. tools/teamplus.py stays: tools/engine32_toml.py
+# takes its ADVANCED, SEASON32 and LEAGUE hook lists.
+# config/teamplus.json
+# syms/names_teamplus.toml
+# (and remove the app2026/rom2026/syms2026/recomp2026/dist2026/bundle-teamplus Make targets and BLITZ_FLAVOUR=teamplus by hand)
+
+# ---- Internal working notes (2026-11-13): logs, reviews, plans and research written for the two of us, frank about
+# private content and devices. The public docs are the README, docs/PLAYING.md, the platform guides and
+# docs/design/SEASON_PAK.md; NOTICES.md and CREDITS.md say what isn't ours.
+NOTES.md
+STATUS.md
+BLITZ_MAC_HANDOFF.md
+docs/PROVENANCE.md
+docs/RELEASE_SWITCHES.md
+docs/HUMAN_TESTS.md
+docs/REVIEW_2026-10-15.md
+docs/PAST_PROGRESS.md
+docs/POTATO_PERF.md
+docs/ENHANCEMENTS.md
+docs/NICE_TO_HAVE.md
+docs/M4_PLAN.md
+docs/TALL_VIEW.md
+docs/SKIN_SOURCES.md
+docs/CONTENT_MAP.md
+docs/BLITZ2026.md
+docs/TEAM_EXPANSION_OPTIONS.md
+docs/NCAA_FEASIBILITY.md
+docs/NO_EXPANSION_PAK.md
+docs/IOS_FEASIBILITY.md
+docs/ANDROID_FEASIBILITY.md
+docs/ZOINKITY.md
+docs/PSP_PORT.md
+docs/patch_pipeline_prototype
+docs/design/CLAUDE_DESIGN_PROMPT.md
+docs/design/MENUS_AUDIT.md
+docs/design/ONE_APP.md
+docs/design/ROSTER_UPDATES.md
+docs/design/redesign
+
+# Private distribution: ad hoc iPhone builds and install links for the team's own devices, the roster job's publisher.
+tools/ios/adhoc.sh
+tools/ios/publish.sh
+tools/android/publish.sh
+tools/android/short_link_worker
+tools/rosters_publish.sh
+# The private Workers behind those (2026-11-14): the iPhone install links, the test builds' log mailbox, and the private
+# roster hub's config. The public season server is the same hub code, deployed from wrangler.public.toml.
+tools/ios/install_worker
+tools/blitz_logs_worker
+tools/rosters_hub_worker/wrangler.toml
+
+# The launch to-do list and video plans (internal).
+docs/LAUNCH.md
+
+# Launch trailer working notes (2026-11-14): the shot list and the designer's brief, written for the two of us.
+docs/TRAILER_SHOTS.md
+docs/design/TRAILER_GRAPHICS_PROMPT.md

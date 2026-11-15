@@ -1,0 +1,33 @@
+diff --git a/src/render/rt64_framebuffer_renderer.h b/src/render/rt64_framebuffer_renderer.h
+--- a/src/render/rt64_framebuffer_renderer.h
++++ b/src/render/rt64_framebuffer_renderer.h
+@@ -143,7 +143,9 @@
+             std::vector<uint8_t> holdsTextureTMEM;
+         };
+ 
+-        static const uint32_t CompactSetCount = 3;
++        // Blitz: 8, not 3. On Mali the GPU can be more batches behind than 3 sets cover, so a set was written while a frame
++        // still read it: a HUD label's text as junk for a frame (RG DS). BLITZ_COMPACT_SETS=<2..8> uses fewer, for A/B tests.
++        static const uint32_t CompactSetCount = 8;
+         CompactTable compact2D;
+         CompactTable compactTMEM;
+         CompactSets compactSets[CompactSetCount];
+diff --git a/src/render/rt64_framebuffer_renderer.cpp b/src/render/rt64_framebuffer_renderer.cpp
+--- a/src/render/rt64_framebuffer_renderer.cpp
++++ b/src/render/rt64_framebuffer_renderer.cpp
+@@ -439,7 +439,14 @@
+     }
+ 
+     void FramebufferRenderer::updateCompactSets(RenderWorker *worker) {
+-        compactSetCursor = (compactSetCursor + 1) % CompactSetCount;
++        static const uint32_t setsUsed = []() {
++            const char *e = getenv("BLITZ_COMPACT_SETS");
++            const int n = (e != nullptr) ? atoi(e) : int(CompactSetCount);
++            const uint32_t used = uint32_t(std::clamp(n, 2, int(CompactSetCount)));
++            fprintf(stderr, "[textures] compact: %u descriptor sets in turn\n", used);
++            return used;
++        }();
++        compactSetCursor = (compactSetCursor + 1) % setsUsed;
+ 
+         CompactSets &sets = compactSets[compactSetCursor];
+         if (sets.set2D == nullptr) {

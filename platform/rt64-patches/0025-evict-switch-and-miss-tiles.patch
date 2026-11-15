@@ -1,0 +1,87 @@
+diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
+index b330f8b..f4ce2ef 100644
+--- a/src/hle/rt64_state.cpp
++++ b/src/hle/rt64_state.cpp
+@@ -10,6 +10,7 @@ namespace RT64 { extern std::atomic<uint64_t> statGpuWaitMs, statRamPasses, stat
+ 
+ #include <cassert>
+ #include <cinttypes>
++#include <cstring>
+ 
+ #include "im3d/im3d.h"
+ #include "im3d/im3d_math.h"
+@@ -1626,7 +1627,9 @@ namespace RT64 {
+             ext.textureCache->waitForGPUUploads();
+ 
+             // A driver with few texture slots: this workload's textures count as used now, not when its thread reaches them.
+-            if (ext.framebufferGraphicsWorker->device->getCapabilities().smallTextureLimit) {
++            // Recipe evictfix=0 leaves it off, to compare with the eviction of earlier builds.
++            static const bool evictFix = (getenv("BLITZ_RECIPE_EVICTFIX") == nullptr) || (strcmp(getenv("BLITZ_RECIPE_EVICTFIX"), "0") != 0);
++            if (evictFix && ext.framebufferGraphicsWorker->device->getCapabilities().smallTextureLimit) {
+                 thread_local std::vector<uint64_t> usedTextureHashes;
+                 usedTextureHashes.clear();
+                 for (uint32_t t = 0; t < rdpTileCursor; t++) {
+diff --git a/src/render/rt64_framebuffer_renderer.cpp b/src/render/rt64_framebuffer_renderer.cpp
+index d134ab7..d495c44 100644
+--- a/src/render/rt64_framebuffer_renderer.cpp
++++ b/src/render/rt64_framebuffer_renderer.cpp
+@@ -248,8 +248,7 @@ namespace RT64 {
+             if (!callTile.valid) {
+                 // Whatever an earlier frame left here would no longer mean a texture in this frame's table.
+                 if (compactTextures) {
+-                    dstGPUTiles[i].textureIndex = 0;
+-                    dstGPUTiles[i].flags.rawTMEM = false;
++                    compactMissTile(dstGPUTiles[i]);
+                 }
+ 
+                 continue;
+@@ -276,8 +275,7 @@ namespace RT64 {
+                     gpuTile.flags.hasMipmaps = false;
+                 }
+                 else if (compactTextures) {
+-                    gpuTile.textureIndex = 0;
+-                    gpuTile.flags.rawTMEM = false;
++                    compactMissTile(gpuTile);
+                     compactMissed++;
+                 }
+             }
+@@ -312,10 +310,27 @@ namespace RT64 {
+                 gpuTile.flags.rawTMEM = rawTMEM;
+                 gpuTile.flags.hasMipmaps = hasMipmaps;
+                 gpuTile.flags.shiftedByHalf = shiftedByHalf;
++                if (compactTextures && (textureIndex == 0)) {
++                    compactMissTile(gpuTile);
++                }
+             }
+         }
+     }
+ 
++    // The clear 4x4 texture in slot 0, read the whole way: wrapped to its size, so a miss can't read past it.
++    void FramebufferRenderer::compactMissTile(interop::GPUTile &gpuTile) {
++        gpuTile.textureIndex = 0;
++        gpuTile.textureDimensions = interop::float3(4.0f, 4.0f, 1.0f);
++        gpuTile.tcScale.x = gpuTile.tcScale.y = 1.0f;
++        gpuTile.ulScale.x = gpuTile.ulScale.y = 1.0f;
++        gpuTile.texelShift = { 0, 0 };
++        gpuTile.texelMask = { 3, 3 };
++        gpuTile.flags.rawTMEM = false;
++        gpuTile.flags.hasMipmaps = false;
++        gpuTile.flags.highRes = false;
++        gpuTile.flags.fromCopy = false;
++    }
++
+     uint32_t FramebufferRenderer::getDestinationIndex() {
+         uint32_t dstIndex;
+         if (textureCacheFreeSpaces.empty()) {
+diff --git a/src/render/rt64_framebuffer_renderer.h b/src/render/rt64_framebuffer_renderer.h
+index abdb81d..09b48cf 100644
+--- a/src/render/rt64_framebuffer_renderer.h
++++ b/src/render/rt64_framebuffer_renderer.h
+@@ -213,6 +213,7 @@ namespace RT64 {
+         uint32_t getDestinationIndex();
+         uint32_t getTextureIndex(RenderTarget *renderTarget);
+         uint32_t getTextureIndex(const FramebufferManager::TileCopy &tileCopy);
++        static void compactMissTile(interop::GPUTile &gpuTile);
+         uint32_t compactTextureIndex(const Texture *texture, bool &rawTMEM, bool &hasMipmaps, interop::float3 &textureDimensions);
+         void updateCompactSets(RenderWorker *worker);
+         void updateMultisampling();

@@ -1,0 +1,56 @@
+diff --git a/src/shaders/FbCommon.hlsli b/src/shaders/FbCommon.hlsli
+index 973ee67..70912db 100644
+--- a/src/shaders/FbCommon.hlsli
++++ b/src/shaders/FbCommon.hlsli
+@@ -7,8 +7,10 @@
+ 
+ #include "Formats.hlsli"
+ 
++// Written with multiply and divide, not shifts and masks: Adreno 650's compiler (driver 0746) fails to link a shader with
++// the shift-and-mask form. The results are the same for every value.
+ uint EndianSwapUINT16(uint i) {
+-    return ((i << 8) & 0xFF00) | ((i >> 8) & 0xFF);
++    return ((i & 0xFFU) * 256U) + ((i / 256U) & 0xFFU);
+ }
+ 
+ // This endian swapping function generates a DXC-LLVM code generation bug when optimizations are enabled. All files that include this 
+@@ -17,7 +19,7 @@ uint EndianSwapUINT16(uint i) {
+ // See this issue for more details: https://github.com/microsoft/DirectXShaderCompiler/issues/5104
+ 
+ uint EndianSwapUINT32(uint i) {
+-    return ((i << 24) & 0xFF000000) | ((i << 8) & 0xFF0000) | ((i >> 8) & 0xFF00) | ((i >> 24) & 0xFF);
++    return ((i & 0xFFU) * 16777216U) + (((i / 256U) & 0xFFU) * 65536U) + (((i / 65536U) & 0xFFU) * 256U) + (i / 16777216U);
+ }
+ 
+ uint EndianSwapUINT(uint i, uint siz) {
+diff --git a/src/shaders/TextureDecoder.hlsli b/src/shaders/TextureDecoder.hlsli
+index dcc88b2..8e5276f 100644
+--- a/src/shaders/TextureDecoder.hlsli
++++ b/src/shaders/TextureDecoder.hlsli
+@@ -177,6 +177,8 @@ float4 sampleTMEM(int2 texelInt, uint siz, uint fmt, uint address, uint stride,
+             RDP_TMEM_PALETTE + (palette << 7) + ((pixelValue4bit) << 3),
+             RDP_TMEM_PALETTE + (pixelValue0 << 3));
+         const uint paletteValue = loadTLUT(paletteAddress + 1) | (loadTLUT(paletteAddress) << 8);
++#ifdef RT64_TLUT_SWITCH
++        // As it was, for the probe's comparison (tools/android/probe). Adreno 650 suspected of taking the default here.
+         switch (tlut) {
+         case G_TT_RGBA16:
+             return RGBA16ToFloat4(paletteValue);
+@@ -185,6 +187,17 @@ float4 sampleTMEM(int2 texelInt, uint siz, uint fmt, uint address, uint stride,
+         default:
+             return float4(0.0f, 0.0f, 0.0f, 1.0f);
+         }
++#else
++        if (tlut == G_TT_RGBA16) {
++            return RGBA16ToFloat4(paletteValue);
++        }
++        else if (tlut == G_TT_IA16) {
++            return IA16ToFloat4(paletteValue);
++        }
++        else {
++            return float4(0.0f, 0.0f, 0.0f, 1.0f);
++        }
++#endif
+     }
+     else {
+         // Load the two high samples for 32-bit textures.

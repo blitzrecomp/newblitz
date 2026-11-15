@@ -1,0 +1,15 @@
+diff --git a/recompui/src/elements/ui_modal.cpp b/recompui/src/elements/ui_modal.cpp
+index ff43416..bb92f37 100644
+--- a/recompui/src/elements/ui_modal.cpp
++++ b/recompui/src/elements/ui_modal.cpp
+@@ -169,6 +169,10 @@ bool TabbedModal::close() {
+ 
+ static std::pair<recompinput::InputDevice, int> get_last_input_info() {
+     if (recompinput::players::is_single_player_mode()) {
++#ifdef __ANDROID__
++        // Handhelds and phones: nobody has a keyboard, and until the first press (or after a tap) nothing says "controller".
++        return { recompinput::InputDevice::Controller, recompinput::profiles::get_sp_controller_profile_index() };
++#endif
+         if (get_cont_active()) {
+             return { recompinput::InputDevice::Controller, recompinput::profiles::get_sp_controller_profile_index() };
+         } else {

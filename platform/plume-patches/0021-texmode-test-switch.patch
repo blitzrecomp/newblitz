@@ -1,0 +1,14 @@
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index 4548b1a..35d5c3b 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -4841,7 +4841,8 @@ namespace plume {
+             const VkPhysicalDeviceLimits &limits = physicalDeviceProperties.limits;
+             capabilities.smallTextureLimit = !descriptorIndexingSupported && (limits.maxPerStageDescriptorSampledImages < 4096);
+ 
+-            const char *texmode = getenv("BLITZ_RECIPE_TEXMODE");
++            // A run recipe (BLITZ_RECIPE_TEXMODE), else BLITZ_TEXMODE (test_env.txt: a recipe clears the keys it doesn't name).
++            const char *texmode = (getenv("BLITZ_RECIPE_TEXMODE") != nullptr) ? getenv("BLITZ_RECIPE_TEXMODE") : getenv("BLITZ_TEXMODE");
+             const bool compactAsked = (texmode != nullptr) && (strcmp(texmode, "compact") == 0);
+             const uint32_t stageResources = (limits.maxPerStageResources > 49) ? (limits.maxPerStageResources - 49) : 0;
+             const uint32_t imageLimit = std::min({ limits.maxPerStageDescriptorSampledImages, limits.maxDescriptorSetSampledImages, stageResources });

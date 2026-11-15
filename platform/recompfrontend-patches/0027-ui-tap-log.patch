@@ -1,0 +1,37 @@
+diff --git a/recompui/src/base/ui_state.cpp b/recompui/src/base/ui_state.cpp
+index d5366bf..68d329f 100644
+--- a/recompui/src/base/ui_state.cpp
++++ b/recompui/src/base/ui_state.cpp
+@@ -773,6 +773,10 @@ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer*
+ 
+                 // if controller is the primary input, don't use mouse movement to allow cursor to reactivate
+                 if (recompui::get_cont_active()) {
++                    if (cur_event.motion.which == SDL_TOUCH_MOUSEID) {
++                        static int told = 0;
++                        if (told++ < 20) fprintf(stderr, "[ui tap] a tap's move to %d,%d not used: the controller is the active input\n", cur_event.motion.x, cur_event.motion.y);
++                    }
+                     break;
+                 }
+             }
+@@ -860,6 +864,21 @@ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer*
+                 if (context_capturing_mouse) {
+                     RmlSDL::InputEventHandler(ui_state->context, cur_event);
+                 }
++                // BlitzRecomp: a tap's mouse button, as the UI took it (Android, where a menu tap can go missing).
++                if ((cur_event.type == SDL_MOUSEBUTTONDOWN || cur_event.type == SDL_MOUSEBUTTONUP) && cur_event.button.which == SDL_TOUCH_MOUSEID) {
++                    static int told = 0;
++                    if (told++ < 60) {
++                        int pw = 0, ph = 0, xw = 0, xh = 0;
++                        SDL_GetWindowSize(window, &pw, &ph);
++                        SDL_GetWindowSizeInPixels(window, &xw, &xh);
++                        Rml::Element* hover = ui_state->context->GetHoverElement();
++                        fprintf(stderr, "[ui tap] %s at %d,%d, window %dx%d points %dx%d pixels, context %dx%d, mouse %d input %d, cont active %d, hover %s#%s\n",
++                            cur_event.type == SDL_MOUSEBUTTONDOWN ? "down" : "up", cur_event.button.x, cur_event.button.y, pw, ph, xw, xh,
++                            ui_state->context->GetDimensions().x, ui_state->context->GetDimensions().y, context_capturing_mouse ? 1 : 0,
++                            context_capturing_input ? 1 : 0, recompui::get_cont_active() ? 1 : 0,
++                            hover ? hover->GetTagName().c_str() : "none", hover ? hover->GetId().c_str() : "");
++                    }
++                }
+             }
+             else {
+                 if (context_capturing_input) {

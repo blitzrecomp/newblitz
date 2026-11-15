@@ -1,0 +1,61 @@
+diff --git a/recompinput/include/recompinput/input_types.h b/recompinput/include/recompinput/input_types.h
+index f5ed6c0..cf642de 100644
+--- a/recompinput/include/recompinput/input_types.h
++++ b/recompinput/include/recompinput/input_types.h
+@@ -7,6 +7,8 @@
+ #include "SDL.h"
+ 
+ namespace recompinput {
++    // Button prompts in the Controls tab: 0 Xbox / generic (default), 1 PlayStation.
++    void set_controller_glyph_style(int style);
+     #define DEFINE_N64_BUTTON_INPUTS() \
+         DEFINE_INPUT(A, 0x8000, "A") \
+         DEFINE_INPUT(B, 0x4000, "B") \
+diff --git a/recompinput/src/input_types.cpp b/recompinput/src/input_types.cpp
+index c6786e6..8b8f4eb 100644
+--- a/recompinput/src/input_types.cpp
++++ b/recompinput/src/input_types.cpp
+@@ -1,3 +1,4 @@
++#include <atomic>
+ #include "recompinput.h"
+ #include <string>
+ #include <array>
+@@ -85,7 +86,27 @@ const std::string& get_game_input_enum_name(GameInput input) {
+     return game_input_enum_names.at(static_cast<size_t>(input));
+ }
+ 
++static std::atomic<int> glyph_style{0};  // 0 Xbox/generic, 1 PlayStation
++
++void recompinput::set_controller_glyph_style(int style) {
++    glyph_style = style;
++}
++
+ static std::string controller_button_to_string(SDL_GameControllerButton button) {
++    if (glyph_style == 1) {
++        switch (button) {
++        case SDL_GameControllerButton::SDL_CONTROLLER_BUTTON_A: return PF_SONY_A;
++        case SDL_GameControllerButton::SDL_CONTROLLER_BUTTON_B: return PF_SONY_B;
++        case SDL_GameControllerButton::SDL_CONTROLLER_BUTTON_X: return PF_SONY_X;
++        case SDL_GameControllerButton::SDL_CONTROLLER_BUTTON_Y: return PF_SONY_Y;
++        case SDL_GameControllerButton::SDL_CONTROLLER_BUTTON_BACK: return PF_SONY_DUALSENSE_SHARE;
++        case SDL_GameControllerButton::SDL_CONTROLLER_BUTTON_START: return PF_SONY_DUALSENSE_OPTIONS;
++        case SDL_GameControllerButton::SDL_CONTROLLER_BUTTON_LEFTSHOULDER: return PF_SONY_LEFT_SHOULDER;
++        case SDL_GameControllerButton::SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: return PF_SONY_RIGHT_SHOULDER;
++        case SDL_GameControllerButton::SDL_CONTROLLER_BUTTON_TOUCHPAD: return PF_SONY_DUALSENSE_TOUCHPAD;
++        default: break;
++        }
++    }
+     switch (button) {
+     case SDL_GameControllerButton::SDL_CONTROLLER_BUTTON_A:
+         return PF_GAMEPAD_A;
+@@ -240,8 +261,10 @@ static std::string controller_axis_to_string(int axis) {
+     case SDL_GameControllerAxis::SDL_CONTROLLER_AXIS_RIGHTY:
+         return positive ? PF_ANALOG_R_DOWN : PF_ANALOG_R_UP;
+     case SDL_GameControllerAxis::SDL_CONTROLLER_AXIS_TRIGGERLEFT:
++        if (glyph_style == 1) return PF_SONY_LEFT_TRIGGER;
+         return positive ? PF_XBOX_LEFT_TRIGGER : PF_XBOX_LEFT_TRIGGER_PULL;
+     case SDL_GameControllerAxis::SDL_CONTROLLER_AXIS_TRIGGERRIGHT:
++        if (glyph_style == 1) return PF_SONY_RIGHT_TRIGGER;
+         return positive ? PF_XBOX_RIGHT_TRIGGER : PF_XBOX_RIGHT_TRIGGER_PULL;
+     default:
+         return recompinput::unknown_device_input;

@@ -1,0 +1,116 @@
+diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
+--- a/librecomp/src/recomp.cpp
++++ b/librecomp/src/recomp.cpp
+@@ -26,7 +26,9 @@
+ #include "ultramodern/error_handling.hpp"
+ #include "librecomp/addresses.hpp"
+ #include "librecomp/mods.hpp"
++#if !defined(RECOMP_NO_MODS)
+ #include "recompiler/live_recompiler.h"
++#endif
+ 
+ #ifdef _WIN32
+ #    define WIN32_LEAN_AND_MEAN
+@@ -59,8 +61,10 @@
+ std::filesystem::path config_path;
+ // Maps game_id to the game's entry.
+ std::unordered_map<std::u8string, recomp::GameEntry> game_roms {};
++#if !defined(RECOMP_NO_MODS)
+ // The global mod context.
+ std::unique_ptr<recomp::mods::ModContext> mod_context = std::make_unique<recomp::mods::ModContext>();
++#endif
+ // The project's version.
+ recomp::Version project_version;
+ // The current game's save type.
+@@ -88,13 +92,18 @@
+         std::lock_guard<std::mutex> lock(game_roms_mutex);
+         game_roms.insert({ entry.game_id, entry });
+     }
++#if !defined(RECOMP_NO_MODS)
+     if (!entry.mod_game_id.empty()) {
+         std::lock_guard<std::mutex> lock(mod_context_mutex);
+         mod_context->register_game(entry.mod_game_id);
+     }
++#endif
+     return true;
+ }
+ 
++// BlitzRecomp (PSP): RECOMP_NO_MODS builds without mods, the live recompiler and sljit (mods.cpp, mod_*.cpp and
++// heap.cpp aren't compiled), so nothing here may reach the mod context.
++#if !defined(RECOMP_NO_MODS)
+ void recomp::mods::initialize_mods() {
+     N64Recomp::live_recompiler_init();
+     std::error_code ec;  // BlitzRecomp: non-throwing (a refusal on a console ended the app)
+@@ -167,6 +176,7 @@
+     std::lock_guard mod_lock{ mod_context_mutex };
+     return mod_context->is_dependency_met(mod_index, dependency_id);
+ }
++#endif
+ 
+ bool check_hash(const std::vector<uint8_t>& rom_data, uint64_t expected_hash) {
+     uint64_t calculated_hash = XXH3_64bits(rom_data.data(), rom_data.size());
+@@ -640,7 +650,9 @@
+     current_game = game_id;
+     game_status.store(GameStatus::Running);
+     game_status.notify_all();
++#if !defined(RECOMP_NO_MODS)
+     mods::set_latest_game_mode_id(game_mode_id);
++#endif
+ }
+ 
+ bool ultramodern::is_game_started() {
+@@ -659,6 +671,7 @@
+     current_game.reset();
+ }
+ 
++#if !defined(RECOMP_NO_MODS)
+ void recomp::mods::enable_mod(const std::string& mod_id, bool enabled) {
+     std::lock_guard lock { mod_context_mutex };
+     return mod_context->enable_mod(mod_id, enabled, true);
+@@ -796,6 +809,7 @@
+     std::lock_guard lock{ mod_context_mutex };
+     return mod_context->set_mod_index(mod_game_id, mod_id, index);
+ }
++#endif
+ 
+ bool wait_for_game_started(uint8_t* rdram, recomp_context* context) {
+     game_status.wait(GameStatus::None);
+@@ -817,6 +831,7 @@
+                 }
+ 
+                 uint32_t mod_ram_used = 0;
++#if !defined(RECOMP_NO_MODS)
+                 if (!game_entry.mod_game_id.empty()) {
+                     std::vector<recomp::mods::ModLoadErrorDetails> mod_load_errors;
+                     {
+@@ -848,6 +863,7 @@
+                         return false;
+                     }
+                 }
++#endif
+ 
+ #if !defined(RECOMP_SMALL_RDRAM)
+                 recomp::init_heap(rdram, recomp::mod_rdram_start + mod_ram_used);
+@@ -938,8 +954,10 @@
+         }
+     }
+ 
++#if !defined(RECOMP_NO_MODS)
+     recomp::mods::initialize_mods();
+     recomp::mods::scan_mods();
++#endif
+ 
+     // Allocate rdram without comitting it. Use a platform-specific virtual allocation function
+     // that initializes to zero. Protect the region above the memory size to catch accesses to invalid addresses.
+@@ -1006,9 +1024,11 @@
+         return;
+     }
+ 
++#if !defined(RECOMP_NO_MODS)
+     recomp::register_heap_exports();
+     recomp::mods::register_config_exports();
+     recomp::mods::register_hook_exports();
++#endif
+ 
+     ultramodern::host_thread_t game_thread = ultramodern::host_thread(ultramodern::host_threads::game_start, [](ultramodern::renderer::WindowHandle window_handle, uint8_t* rdram) {
+         debug_printf("[Recomp] Starting\n");

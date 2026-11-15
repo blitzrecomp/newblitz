@@ -1,0 +1,30 @@
+diff --git a/recompui/src/base/ui_launcher.cpp b/recompui/src/base/ui_launcher.cpp
+--- a/recompui/src/base/ui_launcher.cpp
++++ b/recompui/src/base/ui_launcher.cpp
+@@ -425,7 +425,10 @@
+                     return;
+                 }
+                 if (app_rom_error_text) {
+-                    recompui::message_box(app_rom_error_text(rom_error).c_str());
++                    std::string text = app_rom_error_text(rom_error);
++                    if (!text.empty()) {  // Blitz: empty when the app already said what happened (handed to the other game)
++                        recompui::message_box(text.c_str());
++                    }
+                     callback(false);
+                     return;
+                 }
+diff --git a/recompui/src/util/file.cpp b/recompui/src/util/file.cpp
+--- a/recompui/src/util/file.cpp
++++ b/recompui/src/util/file.cpp
+@@ -115,6 +115,11 @@
+     }
+ 
+     std::filesystem::path file::get_program_path() {
++        // Blitz: one app bundle holds both games, each with its own resources (docs/design/ONE_APP.md); the
++        // starter says which.
++        if (const char* res = getenv("BLITZ_RESOURCES")) {
++            return std::filesystem::path{res};
++        }
+ #if defined(__APPLE__)
+         return file::apple::get_bundle_resource_directory();
+ #elif defined(__linux__) && defined(RECOMP_FLATPAK)

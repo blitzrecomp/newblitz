@@ -1,0 +1,39 @@
+diff --git a/src/render/rt64_texture_cache.cpp b/src/render/rt64_texture_cache.cpp
+--- a/src/render/rt64_texture_cache.cpp
++++ b/src/render/rt64_texture_cache.cpp
+@@ -1217,10 +1217,25 @@
+                 }
+                 
+                 // Execute the copy worker and signal a semaphore so it synchronizes with the direct worker afterwards.
++                // Blitz (Mali, RG DS): that wait holds back only fragment work, so the decode's compute and a raw-TMEM draw's
++                // vertex work could read the upload before its copy landed: a HUD label as junk for a frame. Serial: the CPU
++                // waits for the copy instead (one more wait per batch). On in Potato Mode; BLITZ_UPLOAD_SERIAL=0/1 says.
++                static const bool uploadSerial = []() {
++                    const char *v = getenv("BLITZ_UPLOAD_SERIAL");
++                    const bool on = (v != nullptr) ? (atoi(v) != 0) : (getenv("BLITZ_LEAN") != nullptr);
++                    fprintf(stderr, "[textures] uploads %s\n", on ? "serial (the copy waited for)" : "on a semaphore");
++                    return on;
++                }();
+                 const RenderCommandList *copyCommandList = copyWorker->commandList.get();
+                 RenderCommandSemaphore *syncSemaphore = copyToDirectSemaphore.get();
+                 copyWorker->commandList->end();
+-                copyWorker->commandQueue->executeCommandLists(&copyCommandList, 1, nullptr, 0, &syncSemaphore, 1);
++                if (uploadSerial) {
++                    copyWorker->commandQueue->executeCommandLists(&copyCommandList, 1, nullptr, 0, nullptr, 0, copyWorker->commandFence.get());
++                    copyWorker->wait();
++                }
++                else {
++                    copyWorker->commandQueue->executeCommandLists(&copyCommandList, 1, nullptr, 0, &syncSemaphore, 1);
++                }
+                 
+                 // Decode all textures using the direct worker and transition all textures to their final layouts.
+                 directWorker->commandList->begin();
+@@ -1265,7 +1280,7 @@
+                 // Execute the direct worker but make it wait for the copy worker to finish first.
+                 const RenderCommandList *directCommandList = directWorker->commandList.get();
+                 directWorker->commandList->end();
+-                directWorker->commandQueue->executeCommandLists(&directCommandList, 1, &syncSemaphore, 1, nullptr, 0, directWorker->commandFence.get());
++                directWorker->commandQueue->executeCommandLists(&directCommandList, 1, uploadSerial ? nullptr : &syncSemaphore, uploadSerial ? 0u : 1u, nullptr, 0, directWorker->commandFence.get());
+                 blitzPhase(BlitzWatchTexture, "gpu");
+                 directWorker->wait();
+                 blitzPhase(BlitzWatchTexture, "upload");

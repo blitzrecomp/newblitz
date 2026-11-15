@@ -1,0 +1,155 @@
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index 6d3c2ad..cbadaaa 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -11,6 +11,7 @@
+ #include "plume_vulkan.h"
+ 
+ #include <algorithm>
++#include <atomic>
+ #include <cmath>
+ #include <climits>
+ #include <unordered_map>
+@@ -2186,6 +2187,60 @@ namespace plume {
+ 
+     // VulkanSwapChain
+ 
++#   if defined(__ANDROID__)
++    // BlitzRecomp: Android replaces the app's window (its ANativeWindow) when the app goes to the background and comes
++    // back. The app reports the current one (nullptr while backgrounded) with plume_android_set_window; a swap chain
++    // that sees it change rebuilds its surface on the new window at its next resize.
++    static std::atomic<ANativeWindow *> androidCurrentWindow{ nullptr };
++    static std::atomic<bool> androidWindowReported{ false };
++
++    static VkResult createAndroidSurface(VkInstance instance, ANativeWindow *window, VkSurfaceKHR *surface) {
++        VkAndroidSurfaceCreateInfoKHR surfaceCreateInfo = {};
++        surfaceCreateInfo.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
++        surfaceCreateInfo.window = window;
++        return vkCreateAndroidSurfaceKHR(instance, &surfaceCreateInfo, nullptr, surface);
++    }
++
++    // True when the swap chain's surface is on the current window (rebuilding it first if the window changed).
++    bool VulkanSwapChain::refreshAndroidSurface() {
++        if (!androidWindowReported.load()) {
++            return surface != VK_NULL_HANDLE;
++        }
++
++        ANativeWindow *current = androidCurrentWindow.load();
++        if (current == desc.renderWindow) {
++            return (current != nullptr) && (surface != VK_NULL_HANDLE);
++        }
++
++        VulkanInterface *renderInterface = commandQueue->device->renderInterface;
++        releaseImageViews();
++        releaseSwapChain();
++        if (surface != VK_NULL_HANDLE) {
++            vkDestroySurfaceKHR(renderInterface->instance, surface, nullptr);
++            surface = VK_NULL_HANDLE;
++        }
++
++        if (desc.renderWindow != nullptr) {
++            ANativeWindow_release(desc.renderWindow);
++        }
++
++        desc.renderWindow = current;
++        if (current == nullptr) {
++            return false;
++        }
++
++        ANativeWindow_acquire(current);
++        VkResult res = createAndroidSurface(renderInterface->instance, current, &surface);
++        if (res != VK_SUCCESS) {
++            fprintf(stderr, "vkCreateAndroidSurfaceKHR failed with error code 0x%X.\n", res);
++            surface = VK_NULL_HANDLE;
++            return false;
++        }
++
++        return true;
++    }
++#   endif
++
+     VulkanSwapChain::VulkanSwapChain(VulkanCommandQueue *commandQueue, const RenderSwapChainDesc &desc) {
+         assert(commandQueue != nullptr);
+         assert(desc.textureCount > 0);
+@@ -2224,12 +2279,9 @@ namespace plume {
+         }
+ #   elif defined(__ANDROID__)
+         assert(desc.renderWindow != nullptr);
+-        VkAndroidSurfaceCreateInfoKHR surfaceCreateInfo = {};
+-        surfaceCreateInfo.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
+-        surfaceCreateInfo.window = desc.renderWindow;
+-
++        ANativeWindow_acquire(this->desc.renderWindow);  // BlitzRecomp: held until the surface moves to a new window
+         VulkanInterface *renderInterface = commandQueue->device->renderInterface;
+-        res = vkCreateAndroidSurfaceKHR(renderInterface->instance, &surfaceCreateInfo, nullptr, &surface);
++        res = createAndroidSurface(renderInterface->instance, desc.renderWindow, &surface);
+         if (res != VK_SUCCESS) {
+             fprintf(stderr, "vkCreateAndroidSurfaceKHR failed with error code 0x%X.\n", res);
+             return;
+@@ -2369,6 +2421,12 @@ namespace plume {
+             vkDestroySurfaceKHR(renderInterface->instance, surface, nullptr);
+         }
+ 
++#   if defined(__ANDROID__)
++        if (desc.renderWindow != nullptr) {
++            ANativeWindow_release(desc.renderWindow);
++        }
++#   endif
++
+         // Remove tracking from the parent command queue.
+         commandQueue->swapChains.erase(this);
+     }
+@@ -2430,6 +2488,11 @@ namespace plume {
+     }
+ 
+     bool VulkanSwapChain::resize() {
++#   if defined(__ANDROID__)
++        if (!refreshAndroidSurface()) {
++            return false;  // backgrounded: no window to draw to until the app comes back
++        }
++#   endif
+         getWindowSize(width, height);
+ 
+         // Don't recreate the swap chain at all if the window doesn't have a valid size.
+@@ -2530,6 +2593,15 @@ namespace plume {
+     }
+ 
+     bool VulkanSwapChain::needsResize() const {
++#   if defined(__ANDROID__)
++        if (androidWindowReported.load() && (androidCurrentWindow.load() != desc.renderWindow)) {
++            return true;
++        }
++
++        if (desc.renderWindow == nullptr) {
++            return true;
++        }
++#   endif
+         uint32_t windowWidth, windowHeight;
+         getWindowSize(windowWidth, windowHeight);
+         return (vk == VK_NULL_HANDLE) || (windowWidth != width) || (windowHeight != height) || (requiredPresentMode != createdPresentMode);
+@@ -4794,3 +4866,11 @@ namespace plume {
+     }
+ #endif
+ };
++
++#if defined(__ANDROID__)
++// BlitzRecomp: the app's current window (SDL's ANativeWindow), or nullptr while the app is in the background.
++extern "C" void plume_android_set_window(ANativeWindow *window) {
++    plume::androidCurrentWindow.store(window);
++    plume::androidWindowReported.store(true);
++}
++#endif
+diff --git a/plume_vulkan.h b/plume_vulkan.h
+index 0a1edbe..03769c1 100644
+--- a/plume_vulkan.h
++++ b/plume_vulkan.h
+@@ -247,6 +247,9 @@ namespace plume {
+         bool present(uint32_t textureIndex, RenderCommandSemaphore **waitSemaphores, uint32_t waitSemaphoreCount) override;
+         void wait() override;
+         bool resize() override;
++#   if defined(__ANDROID__)
++        bool refreshAndroidSurface();  // BlitzRecomp: the surface follows Android's current window
++#   endif
+         bool needsResize() const override;
+         void setVsyncEnabled(bool vsyncEnabled) override;
+         bool isVsyncEnabled() const override;

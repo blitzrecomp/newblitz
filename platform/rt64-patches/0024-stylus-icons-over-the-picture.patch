@@ -1,0 +1,21 @@
+diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
+index 4072947..5dc811c 100644
+--- a/src/hle/rt64_present_queue.cpp
++++ b/src/hle/rt64_present_queue.cpp
+@@ -27,6 +27,7 @@ extern "C" {
+     volatile int blitz_ds_mode = 0;
+     volatile float blitz_ds_split = 0.5f;        // the upper screen's share of the picture's height
+     volatile int blitz_ds_second_on_top = 1;     // the second window is the upper screen
++    volatile int blitz_ds_second_icons = 0;      // mode 3 only: the hook's drawing goes over the picture (Stylus's receiver icons)
+     void (*blitz_ds_second_hook)(plume::RenderCommandList *, plume::RenderFramebuffer *) = nullptr;
+     volatile uint64_t blitz_ds_second_frames = 0;
+     volatile uint64_t blitz_ds_second_failures = 0;
+@@ -728,7 +729,7 @@ namespace RT64 {
+             viRenderer->render(p);
+         }
+ 
+-        if ((blitz_ds_second_hook != nullptr) && (mode != 3)) {
++        if ((blitz_ds_second_hook != nullptr) && ((mode != 3) || (blitz_ds_second_icons != 0))) {
+             blitz_ds_second_hook(commandList, framebuffer);
+         }
+ 

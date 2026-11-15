@@ -1,0 +1,25 @@
+diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
+index b44d5d7..d16e731 100644
+--- a/ultramodern/src/events.cpp
++++ b/ultramodern/src/events.cpp
+@@ -402,7 +402,7 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
+                 }
+             }
+             else if (const auto* dummy_workload_action = std::get_if<DummyWorkloadAction>(&action)) {
+-                renderer_context->send_dummy_workload(dummy_workload_action->fb_address);
++                if (!ultramodern::is_game_started()) renderer_context->send_dummy_workload(dummy_workload_action->fb_address);
+             }
+         }
+     }
+@@ -456,8 +456,9 @@ void set_dummy_vi(bool odd) {
+     ViState* next_state = events_context.vi.get_next_state();
+     next_state->mode = &dummy_mode;
+     next_state->control = next_state->mode->comRegs.ctrl;
+-    // Set up a dummy framebuffer.
+-    next_state->framebuffer = 0x80700000;
++    // Set up a dummy framebuffer: the very top of RDRAM. The dummy workload fills it with zeros, and a slow renderer can
++    // get to that after the game has started, so it must not be anywhere the game uses (0x80710000.. holds Blitz's tables).
++    next_state->framebuffer = 0x807B0000;
+     if (odd) {
+         next_state->framebuffer += 0x25800;
+     }

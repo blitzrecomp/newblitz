@@ -1,0 +1,55 @@
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index e0d5638..f0d1405 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -716,6 +716,8 @@ namespace plume {
+         }
+     }
+     
++    static std::atomic<bool> narrowBarriers{false};
++
+     static VkPipelineStageFlags toStageFlags(RenderBarrierStages stages, bool geometrySupported, bool rtSupported) {
+         VkPipelineStageFlags flags = 0;
+ 
+@@ -3117,6 +3119,30 @@ namespace plume {
+         const bool rtEnabled = queue->device->capabilities.raytracing;
+         VkPipelineStageFlags srcStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+         VkPipelineStageFlags dstStageMask = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT | toStageFlags(stages, geometryEnabled, rtEnabled);
++
++        // Potato Mode (Settings → GPU Waits): a texture waits only for the stage that uses it, not every stage of the next pass. On
++        // a tile-based GPU, waiting at the vertex stages stops the next pass's binning until the last one has finished its pixels.
++        if (narrowBarriers.load() && (stages == RenderBarrierStage::GRAPHICS) && (bufferBarriersCount == 0) && (textureBarriersCount > 0)) {
++            VkPipelineStageFlags narrow = 0;
++            for (uint32_t i = 0; i < textureBarriersCount; i++) {
++                switch (textureBarriers[i].layout) {
++                case RenderTextureLayout::SHADER_READ:
++                    narrow |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
++                    break;
++                case RenderTextureLayout::COLOR_WRITE:
++                    narrow |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
++                    break;
++                case RenderTextureLayout::DEPTH_WRITE:
++                case RenderTextureLayout::DEPTH_READ:
++                    narrow |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
++                    break;
++                default:
++                    narrow = dstStageMask;
++                    break;
++                }
++            }
++            dstStageMask = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT | narrow;
++        }
+         thread_local std::vector<VkBufferMemoryBarrier> bufferMemoryBarriers;
+         thread_local std::vector<VkImageMemoryBarrier> imageMemoryBarriers;
+         bufferMemoryBarriers.clear();
+@@ -5053,6 +5079,10 @@ extern "C" void plume_android_set_window(ANativeWindow *window) {
+ }
+ #endif
+ 
++extern "C" void plume_narrow_barriers(int on) {
++    plume::narrowBarriers = on != 0;
++}
++
+ extern "C" void plume_save_pipeline_cache() {
+     if (plume::savedCacheDevice != nullptr) {
+         plume::savedCacheDevice->savePipelineCache();

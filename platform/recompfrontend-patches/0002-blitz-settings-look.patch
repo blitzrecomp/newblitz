@@ -1,0 +1,960 @@
+diff --git a/recompui/src/config/ui_config_option.cpp b/recompui/src/config/ui_config_option.cpp
+index 86428c9..fb77548 100644
+--- a/recompui/src/config/ui_config_option.cpp
++++ b/recompui/src/config/ui_config_option.cpp
+@@ -19,15 +19,20 @@ ConfigOptionElement::ConfigOptionElement(
+     set_option_value(set_option_value),
+     on_hover(on_hover)
+ {
++    // Blitz '27: one 78 dp row (52 px at 960x720), the label left and the control right, a soft cyan
++    // underline; while it or its control has focus the row is the red accent bar with selected-yellow text.
+     set_display(Display::Flex);
+     set_position(Position::Relative);
+-    set_flex_direction(FlexDirection::Column);
+-    set_align_items(AlignItems::FlexStart);
+-    set_justify_content(JustifyContent::FlexStart);
+-    set_padding_top(config_option_element_margin_vertical);
+-    set_padding_left(12.0f);
+-    set_padding_right(12.0f);
+-    set_padding_bottom(config_option_element_margin_vertical);
++    set_flex_direction(FlexDirection::Row);
++    set_align_items(AlignItems::Center);
++    set_justify_content(JustifyContent::SpaceBetween);
++    set_gap(18.0f);
++    set_padding_left(24.0f);
++    set_padding_right(18.0f);
++    set_min_height(78.0f);
++    set_border_bottom_width(1.5f);
++    set_border_bottom_color(theme::color::BorderSoft);
++    set_background_color(theme::color::Transparent);
+     set_height_auto();
+     set_width(100.0f, Unit::Percent);
+     set_as_navigation_container(NavigationType::Auto);
+@@ -37,8 +42,11 @@ ConfigOptionElement::ConfigOptionElement(
+     ContextId context = recompui::get_current_context();
+     auto name_text = option.name;
+     if (!name_text.empty()) {
+-        name_label = context.create_element<Label>(this, name_text, theme::Typography::LabelMD);
+-        name_label->set_margin_bottom(8.0f);
++        std::string upper_name = name_text;
++        for (char& c : upper_name) c = (char)std::toupper((unsigned char)c);
++        name_label = context.create_element<Label>(this, upper_name, theme::Typography::LabelMD);
++        name_label->set_flex_shrink(1.0f);
++        name_label->set_color(theme::color::Text);
+     } else {
+         name_label = context.create_element<Label>(this, "", theme::Typography::LabelMD);
+         set_padding_top(0.0f);
+@@ -73,6 +81,7 @@ void ConfigOptionElement::process_event(const Event &e) {
+     }
+     case EventType::Focus: {
+         bool active = std::get<EventFocus>(e.variant).active;
++        set_row_lit(active);
+         if (active) {
+             on_hover(option_id);
+             scroll_into_view();
+@@ -87,6 +96,11 @@ void ConfigOptionElement::process_event(const Event &e) {
+     }
+ }
+ 
++void ConfigOptionElement::set_row_lit(bool lit) {
++    set_background_color(lit ? theme::color::Primary : theme::color::Transparent);
++    if (name_label != nullptr) name_label->set_color(lit ? theme::color::SecondaryL : theme::color::Text);
++}
++
+ void ConfigOptionElement::update_hidden() {
+     if (config->is_config_option_hidden(option_index)) {
+         set_display(Display::None);
+@@ -113,15 +127,13 @@ ConfigOptionEnum::ConfigOptionEnum(
+     wrapper->set_display(Display::Flex);
+     wrapper->set_flex_direction(FlexDirection::Row);
+     wrapper->set_align_items(AlignItems::Center);
+-    wrapper->set_justify_content(JustifyContent::FlexStart);
+-    wrapper->set_width(100.0f, Unit::Percent);
++    wrapper->set_justify_content(JustifyContent::FlexEnd);
++    wrapper->set_flex_shrink(0.0f);
+     wrapper->set_gap(12.0f);
+ 
+-    // Negates the extra padding that radio tabs automatically add.
+-    name_label->set_margin_bottom(4.0f);
+-
+     radio = context.create_element<Radio>(wrapper);
+     radio->set_focus_callback([this](bool active) {
++        this->set_row_lit(active);
+         if (active) {
+             this->on_hover(this->option_id);
+         }
+@@ -133,13 +145,29 @@ ConfigOptionEnum::ConfigOptionEnum(
+         }
+     });
+ 
+-    details_label = context.create_element<Label>(wrapper, "", theme::Typography::LabelXS);
+-    details_label->set_color(theme::color::Primary);
++    // Blitz '27: a note in steel, right-aligned (e.g. "Downsampling is not available at auto resolution");
++    // while every choice is unavailable it stands in for the pills instead of overlapping the row.
++    details_label = context.create_element<Label>(wrapper, "", theme::Typography::Body);
++    details_label->set_font_size(27.0f);
++    details_label->set_color(theme::color::TextDim);
++    details_label->set_text_align(TextAlign::Right);
++    details_label->set_max_width(420.0f);
+ 
+     auto &enum_opt = config->get_option_config<recomp::config::ConfigOptionEnum>(this->option_index);
+     for (uint32_t i = 0; i < enum_opt.options.size(); i++) {
+         radio->add_option(enum_opt.options[i].name);
+     }
++    // Blitz '27: five or more pills don't fit beside the label at 4:3, so they go on their own line.
++    if (enum_opt.options.size() >= 5) {
++        set_flex_wrap(FlexWrap::Wrap);
++        set_row_gap(9.0f);
++        set_padding_top(15.0f);
++        set_padding_bottom(15.0f);
++        wrapper->set_flex_basis(100.0f, Unit::Percent);
++        radio->set_flex_wrap(FlexWrap::Wrap);
++        radio->set_justify_content(JustifyContent::FlexEnd);
++        radio->set_row_gap(9.0f);
++    }
+ 
+     update_value();
+     update_enum_details();
+@@ -172,16 +200,21 @@ void ConfigOptionEnum::update_enum_details() {
+     } else {
+         details_label->set_text(enum_details);
+     }
++    update_enum_disabled();
+ };
+ 
+ void ConfigOptionEnum::update_enum_disabled() {
+     bool all_disabled = get_disabled();
++    bool none_enabled = true;
+     auto &enum_opt = config->get_option_config<recomp::config::ConfigOptionEnum>(option_index);
+     for (uint32_t i = 0; i < enum_opt.options.size(); i++) {
+         bool enum_disabled = all_disabled || config->get_enum_option_disabled(option_index, i);
+         auto opt_element = radio->get_option_element(i);
+         opt_element->set_enabled(!enum_disabled);
++        none_enabled = none_enabled && enum_disabled;
+     }
++    bool has_details = !config->get_enum_option_details(option_index).empty();
++    radio->set_display(none_enabled && has_details ? Display::None : Display::Flex);
+ };
+ 
+ // ConfigOptionNumber
+@@ -199,8 +232,8 @@ ConfigOptionNumber::ConfigOptionNumber(
+     auto &num_opt = config->get_option_config<recomp::config::ConfigOptionNumber>(option_index);
+ 
+     slider = context.create_element<Slider>(this, num_opt.percent ? SliderType::Percent : SliderType::Double);
+-    slider->set_width(100.0f, Unit::Percent);
+-    slider->set_max_width(512.0f, Unit::Dp);
++    slider->set_width(420.0f, Unit::Dp);
++    slider->set_flex_shrink(0.0f);
+ 
+     slider->set_min_value(num_opt.min);
+     slider->set_max_value(num_opt.max);
+@@ -210,6 +243,7 @@ ConfigOptionNumber::ConfigOptionNumber(
+         this->set_option_value(this->option_id, v);
+     });
+     slider->set_focus_callback([this](bool active) {
++        this->set_row_lit(active);
+         if (active) {
+             this->on_hover(this->option_id);
+         }
+@@ -240,18 +274,16 @@ ConfigOptionString::ConfigOptionString(
+     on_option_hover_t on_hover
+ ) : ConfigOptionElement(rid, parent, option_id, option_index, config, set_option_value, on_hover)
+ {
+-    // Negates the extra padding that text inputs automatically add.
+-    name_label->set_margin_bottom(4.0f);
+-
+     ContextId context = recompui::get_current_context();
+     text_input = context.create_element<TextInput>(this);
+-    text_input->set_width(100.0f, Unit::Percent);
+-    text_input->set_max_width(100.0f, Unit::Percent);
++    text_input->set_width(60.0f, Unit::Percent);
++    text_input->set_max_width(60.0f, Unit::Percent);
+     update_value();
+     text_input->add_text_changed_callback([this](const std::string &text){
+         this->set_option_value(this->option_id, text);
+     });
+     text_input->set_focus_callback([this](bool active) {
++        this->set_row_lit(active);
+         if (active) {
+             this->on_hover(this->option_id);
+         }
+@@ -268,6 +300,37 @@ void ConfigOptionString::update_disabled() {
+     text_input->set_enabled(!disabled);
+ };
+ 
++// ConfigOptionAction
++ConfigOptionAction::ConfigOptionAction(
++    ResourceId rid,
++    Element *parent,
++    std::string option_id,
++    size_t option_index,
++    const recomp::config::Config *config,
++    set_option_value_t set_option_value,
++    on_option_hover_t on_hover,
++    const std::string &button_text
++) : ConfigOptionElement(rid, parent, option_id, option_index, config, set_option_value, on_hover)
++{
++    ContextId context = recompui::get_current_context();
++    button = context.create_element<Button>(this, button_text, ButtonStyle::Secondary, ButtonSize::Card);
++    button->set_flex_shrink(0.0f);
++    button->set_min_width(150.0f);
++    button->set_focus_callback([this](bool active) {
++        this->set_row_lit(active);
++        if (active) {
++            this->on_hover(this->option_id);
++        }
++    });
++    button->add_pressed_callback([this]() {
++        this->set_option_value(this->option_id, true);
++    });
++}
++
++void ConfigOptionAction::update_disabled() {
++    button->set_enabled(!get_disabled());
++}
++
+ // ConfigOptionBool
+ ConfigOptionBool::ConfigOptionBool(
+     ResourceId rid,
+@@ -279,21 +342,43 @@ ConfigOptionBool::ConfigOptionBool(
+     on_option_hover_t on_hover
+ ) : ConfigOptionElement(rid, parent, option_id, option_index, config, set_option_value, on_hover)
+ {
+-    // Negates the extra padding that text inputs automatically add.
+-    name_label->set_margin_bottom(4.0f);
+-
+     ContextId context = recompui::get_current_context();
++    // Blitz '27: the state as a word left of the switch (ON in green, OFF in steel), so a list of switches
++    // reads at a glance from the couch.
++    state_word = context.create_element<Label>(this, "", theme::Typography::LabelMD);
++    state_word->set_font_size(30.0f);
++    state_word->set_width(60.0f);
++    state_word->set_margin_left_auto();  // the word and the switch sit together on the right
++    state_word->set_text_align(TextAlign::Right);
++    state_word->set_flex_shrink(0.0f);
+     toggle = context.create_element<Toggle>(this, ToggleSize::Medium);
++    toggle->set_flex_shrink(0.0f);
++    toggle->set_focus_callback([this](bool active) {
++        this->set_row_lit(active);
++        this->lit = active;
++        this->show_state(this->toggle->is_checked());
++        if (active) {
++            this->on_hover(this->option_id);
++        }
++    });
+ 
+     update_value();
+     toggle->add_checked_callback([this](bool checked){
++        this->show_state(checked);
+         this->set_option_value(this->option_id, checked);
+     });
+ };
+ 
++void ConfigOptionBool::show_state(bool checked) {
++    state_word->set_text(checked ? "ON" : "OFF");
++    // On the red focus bar both words take the bar's selected yellow.
++    state_word->set_color(lit ? theme::color::SecondaryL : checked ? theme::color::Success : theme::color::TextDim);
++}
++
+ void ConfigOptionBool::update_value() {
+     bool value = std::get<bool>(get_value());
+     toggle->set_checked(value);
++    show_state(value);
+ };
+ 
+ void ConfigOptionBool::update_disabled() {
+diff --git a/recompui/src/config/ui_config_page_options_menu.cpp b/recompui/src/config/ui_config_page_options_menu.cpp
+index 6ba64e2..5f17692 100644
+--- a/recompui/src/config/ui_config_page_options_menu.cpp
++++ b/recompui/src/config/ui_config_page_options_menu.cpp
+@@ -1,8 +1,107 @@
+ #include "ui_config_page_options_menu.h"
++#include "recompui/config.h"
++#include <map>
+ 
+ 
+ namespace recompui {
+ 
++namespace {
++    struct OptionSection {
++        std::string label;
++        std::function<std::string()> count;
++    };
++    std::map<std::string, OptionSection> &option_sections() {
++        static std::map<std::string, OptionSection> sections;
++        return sections;
++    }
++    std::map<std::string, std::string> &option_actions() {
++        static std::map<std::string, std::string> actions;
++        return actions;
++    }
++
++    // Blitz '27 section row: cyan caps, a soft rule filling the rest, and an optional live count in green.
++    class ConfigSectionRow : public Element {
++        Label *count_label = nullptr;
++        std::function<std::string()> count;
++        std::string shown;
++    protected:
++        std::string_view get_type_name() override { return "ConfigSectionRow"; }
++        void process_event(const Event &e) override {
++            if (e.type != EventType::Update) {
++                return;
++            }
++            if (count) {
++                std::string now = count();
++                if (now != shown) {
++                    shown = now;
++                    count_label->set_text(now);
++                }
++            }
++            queue_update();
++        }
++    public:
++        ConfigSectionRow(ResourceId rid, Element *parent, const std::string &label, std::function<std::string()> count_fn)
++            : Element(rid, parent, Events(EventType::Update), "div", false), count(std::move(count_fn)) {
++            ContextId context = get_current_context();
++            set_display(Display::Flex);
++            set_align_items(AlignItems::Center);
++            set_gap(18.0f);
++            set_height(54.0f);
++            set_margin_top(12.0f);
++            set_padding_left(24.0f);
++            set_padding_right(18.0f);
++            Label *heading = context.create_element<Label>(this, label, theme::Typography::LabelXS);
++            heading->set_color(Color{143, 239, 245, 255});
++            heading->set_white_space(WhiteSpace::Nowrap);
++            Element *rule = context.create_element<Element>(this, 0, "div", false);
++            rule->set_flex_grow(1.0f);
++            rule->set_height(1.5f);
++            rule->set_background_color(theme::color::BorderSoft);
++            if (count) {
++                count_label = context.create_element<Label>(this, "", theme::Typography::LabelMD);
++                count_label->set_font_size(30.0f);
++                count_label->set_color(theme::color::Success);
++                queue_update();
++            }
++        }
++    };
++}
++
++static ConfigPageOptionsMenu *described_page = nullptr;  // the open options page, for header descriptions
++
++void config::describe_header_button(const std::string &title, const std::string &text) {
++    if (described_page != nullptr) {
++        described_page->describe(title, text);
++    }
++}
++
++ConfigPageOptionsMenu::~ConfigPageOptionsMenu() {
++    if (described_page == this) {
++        described_page = nullptr;
++    }
++}
++
++void ConfigPageOptionsMenu::describe(const std::string &title, const std::string &text) {
++    description_option_id.clear();
++    if (description_title) {
++        description_title->set_text(title);
++        description_title->set_display(Display::Block);
++        description_rule->set_display(Display::Block);
++    }
++    if (description_container) {
++        description_container->set_text(text);
++    }
++}
++
++void config::set_option_section(const std::string &config_id, const std::string &option_id, const std::string &label,
++                                std::function<std::string()> count) {
++    option_sections()[config_id + "/" + option_id] = { label, std::move(count) };
++}
++
++void config::set_option_action(const std::string &config_id, const std::string &option_id, const std::string &button_text) {
++    option_actions()[config_id + "/" + option_id] = button_text;
++}
++
+ ConfigPageOptionsMenu::ConfigPageOptionsMenu(
+     ResourceId rid,
+     Element *parent,
+@@ -14,12 +113,50 @@ ConfigPageOptionsMenu::ConfigPageOptionsMenu(
+ {
+     ContextId context = recompui::get_current_context();
+     set_as_navigation_container(NavigationType::Vertical);
++    described_page = this;
+ 
+     render_config_options();
+-    description_container = context.create_element<Element>(body->get_right(), 0, "p", true);
++    // Blitz '27: the rows take the room; the description is a 435 dp (290 px) column on the right.
++    body->get_right()->set_flex_grow(0.0f);
++    body->get_right()->set_flex_shrink(0.0f);
++    body->get_right()->set_flex_basis(435.0f, Unit::Dp);
++    body->get_right()->set_width(435.0f, Unit::Dp);
++    // The description: a grid panel (the app's "description" decorator) with the option's name as a
++    // yellow title over a short orange rule, then the text.
++    body->get_right()->set_display(Display::Flex);
++    body->get_right()->set_flex_direction(FlexDirection::Column);
++    Element* desc_box = context.create_element<Element>(body->get_right(), 0, "div", false);
++    desc_box->set_margin(16.0f);
++    desc_box->set_flex_grow(1.0f);  // the panel fills the column, so its frame doesn't jump as it fills
++    Element* desc_content = decorate_panel(context, desc_box, "description");
++    if (desc_content == desc_box) {
++        desc_box->set_border_radius(theme::border::radius_md);
++        desc_box->set_background_color(theme::color::ElevatedSoft);
++        desc_box->set_border_width(theme::border::width);
++        desc_box->set_border_color(theme::color::BorderSoft);
++    }
++    desc_content->set_padding(24.0f);
++    // A long description scrolls inside the panel instead of running out of it.
++    desc_box->set_display(Display::Flex);
++    desc_box->set_flex_direction(FlexDirection::Column);
++    desc_box->set_min_height(0.0f);
++    desc_content->set_flex_grow(1.0f);
++    desc_content->set_flex_shrink(1.0f);
++    desc_content->set_flex_basis(0.0f);
++    desc_content->set_min_height(0.0f);
++    desc_content->set_overflow_y(Overflow::Auto);
++    description_title = context.create_element<Label>(desc_content, "", theme::Typography::Header3);
++    description_title->set_color(theme::color::Secondary);
++    description_rule = context.create_element<Element>(desc_content, 0, "div", false);
++    description_rule->set_height(6.0f);
++    description_rule->set_width(140.0f);
++    description_rule->set_margin_top(10.0f);
++    description_rule->set_margin_bottom(14.0f);
++    description_rule->set_background_color(theme::color::SecondaryD);
++    description_container = context.create_element<Element>(desc_content, 0, "p", true);
+     description_container->set_typography(theme::Typography::Body);
+-    description_container->set_line_height(28.0f);
+-    description_container->set_padding(8.0f);
++    description_container->set_line_height(42.0f);
++    description_container->set_color(theme::color::TextDim);
+     set_description_text("");
+ 
+     if (config->requires_confirmation) {
+@@ -28,9 +165,18 @@ ConfigPageOptionsMenu::ConfigPageOptionsMenu(
+     }
+ }
+ 
+-void ConfigPageOptionsMenu::set_description_text(const std::string &text) {
++void ConfigPageOptionsMenu::set_description_text(const std::string &text_in) {
++    // With nothing focused, the tab's name and how to get a description (controller words, not mouse ones).
++    const std::string text = text_in.empty() ? "Move to a setting to see what it does." : text_in;
++    if (description_title) {
++        std::string title = (!text_in.empty() && !description_option_id.empty()) ? config->get_option(description_option_id).name : config->name;
++        for (char& c : title) c = (char)std::toupper((unsigned char)c);
++        description_title->set_text(title);
++        description_title->set_display(title.empty() ? Display::None : Display::Block);
++        description_rule->set_display(title.empty() ? Display::None : Display::Block);
++    }
+     if (description_container) {
+-        if (is_internal) {
++        if (is_internal || text_in.empty()) {
+             description_container->set_text_unsafe(text);
+         } else {
+             description_container->set_text(text);
+@@ -184,6 +330,26 @@ void ConfigPageOptionsMenu::render_config_options() {
+         for (size_t i = 0; i < schema.options.size(); i++) {
+             auto &config_option = schema.options[i];
+             ConfigOptionElement *element = nullptr;
++            const std::string key = config->id + "/" + config_option.id;
++            if (auto section = option_sections().find(key); section != option_sections().end()) {
++                context.create_element<ConfigSectionRow>(body_left_scroll, section->second.label, section->second.count);
++            }
++            if (auto action = option_actions().find(key); action != option_actions().end() &&
++                config_option.type == recomp::config::ConfigOptionType::Bool) {
++                element = context.create_element<ConfigOptionAction>(
++                    body_left_scroll,
++                    config_option.id,
++                    i,
++                    config,
++                    bound_set_option_value,
++                    bound_on_option_hover,
++                    action->second
++                );
++                element->update_disabled();
++                element->update_hidden();
++                config_option_elements.push_back(element);
++                continue;
++            }
+             switch (config_option.type) {
+                 case recomp::config::ConfigOptionType::Enum: {
+                     element = context.create_element<ConfigOptionEnum>(
+diff --git a/recompui/src/elements/ui_modal.cpp b/recompui/src/elements/ui_modal.cpp
+index b057f46..881dca1 100644
+--- a/recompui/src/elements/ui_modal.cpp
++++ b/recompui/src/elements/ui_modal.cpp
+@@ -1,4 +1,5 @@
+ #include "ui_modal.h"
++#include "recompui/recompui.h"  // decorate_panel
+ #include "ui_element.h"
+ #include "ui_document.h"
+ #include "recompinput/recompinput.h"
+@@ -59,6 +60,7 @@ Modal::Modal(
+     set_left(0);
+ 
+     modal_overlay = context.create_element<ModalOverlay>(this);
++    decorate_panel(context, modal_overlay, "modal_backdrop");  // the app's backdrop art, if any
+ 
+     Element* modal_whole_page_wrapper = context.create_element<Element>(modal_overlay);
+     modal_whole_page_wrapper->set_display(Display::Flex);
+@@ -81,14 +83,19 @@ Modal::Modal(
+     modal_element->set_max_width(modal_width);
+     modal_element->set_height(100, Unit::Percent);
+     modal_element->set_margin_auto();
+-    modal_element->set_border_width(theme::border::width);
+-    modal_element->set_border_radius(theme::border::radius_lg);
+-    modal_element->set_border_color(theme::color::Border);
+-    modal_element->set_background_color(theme::color::ModalOverlay);
++    // The app may draw the panel (set_panel_decorator, "modal": the Blitz '27 frame and grid); its
++    // decorations go behind, and the header and body stay this element's own flex children.
++    if (decorate_panel(context, modal_element, "modal") == modal_element) {
++        modal_element->set_border_width(theme::border::width);
++        modal_element->set_border_radius(theme::border::radius_lg);
++        modal_element->set_border_color(theme::color::Border);
++        modal_element->set_background_color(theme::color::ModalOverlay);
++    }
+     modal_element->set_as_navigation_container(NavigationType::Vertical);
+     modal_element->set_nav_wrapping(true);
+ 
+     header = context.create_element<ConfigHeaderFooter>(modal_element, true);
++    decorate_panel(context, header, "modal_header");  // e.g. a bevel strip and a logo before the tabs
+     header->set_padding_top(0.0f);
+     header->set_padding_bottom(0.0f);
+     header->set_padding_left(8.0f);
+@@ -126,8 +133,10 @@ void TabbedModal::open() {
+     Modal::open();
+ 
+     if (tabs != nullptr) {
+-        tabs->focus_on_active_tab();
++        // Blitz '27: open into the content (its first row); the tab row is one Back away. The content
++        // may only be built on the next update, so the focus is placed there (falling back to the tab).
+         on_tab_change(tabs->get_active_tab());
++        content_focus_frames = 6;  // the modal's own per-frame update picks this up
+     }
+ }
+ 
+@@ -175,6 +184,92 @@ static std::pair<recompinput::InputDevice, int> get_last_input_info() {
+     return { device, recompinput::profiles::get_input_profile_for_player(0, device) };
+ }
+ 
++std::pair<recompinput::InputDevice, int> hint_input_info() {
++    return get_last_input_info();
++}
++
++// The one glyph shown for an action: the keyboard's real key for the actions that are hidden F-keys, else
++// the profile's first visible binding.
++static recompinput::InputField hint_binding(MenuAction action, recompinput::InputDevice device, int profile) {
++    if (device == recompinput::InputDevice::Keyboard) {
++        switch (action) {
++            case MenuAction::Back: return recompinput::InputField::keyboard(SDL_SCANCODE_BACKSPACE);
++            case MenuAction::TabLeft: return recompinput::InputField::keyboard(SDL_SCANCODE_PAGEUP);
++            case MenuAction::TabRight: return recompinput::InputField::keyboard(SDL_SCANCODE_PAGEDOWN);
++            default: break;
++        }
++    }
++    recompinput::GameInput input = menu_action_mapping::game_input_from_menu_action(action);
++    if (input == recompinput::GameInput::COUNT || profile < 0) {
++        return {};
++    }
++    for (size_t i = 0; i < recompinput::num_bindings_per_input; i++) {
++        auto binding = recompinput::profiles::get_input_binding(profile, input, i);
++        if (binding.is_empty()) {
++            continue;
++        }
++        if (binding.input_type == recompinput::InputType::Keyboard && menu_action_mapping::is_sdl_input_fake_mapped(binding.input_id)) {
++            continue;
++        }
++        return binding;
++    }
++    return {};
++}
++
++// PromptFont draws shoulders and triggers small inside the em, so they get a bigger size.
++static bool is_small_glyph(const recompinput::InputField &field) {
++    if (field.input_type == recompinput::InputType::ControllerDigital) {
++        return field.input_id == SDL_CONTROLLER_BUTTON_LEFTSHOULDER || field.input_id == SDL_CONTROLLER_BUTTON_RIGHTSHOULDER;
++    }
++    if (field.input_type == recompinput::InputType::ControllerAnalog) {
++        int axis = field.input_id - 1;
++        return axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT || axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT;
++    }
++    return false;
++}
++
++void build_hint_row(ContextId context, Element *row, const std::vector<HintItem> &items, recompinput::InputDevice device, int profile) {
++    row->clear_children();
++    if (device == recompinput::InputDevice::COUNT) {
++        return;
++    }
++    for (const HintItem &item : items) {
++        std::vector<recompinput::InputField> glyphs;
++        for (MenuAction action : item.actions) {
++            recompinput::InputField field = hint_binding(action, device, profile);
++            if (!field.is_empty()) {
++                glyphs.push_back(field);
++            }
++        }
++        if (glyphs.empty()) {
++            continue;
++        }
++        auto item_wrapper = context.create_element<Element>(row, 0, "span", false);
++        item_wrapper->set_display(Display::Flex);
++        item_wrapper->set_flex_direction(FlexDirection::Row);
++        item_wrapper->set_align_items(AlignItems::Center);
++        item_wrapper->set_gap(12.0f);
++        item_wrapper->set_color(theme::color::Text);
++        auto glyph_wrapper = context.create_element<Element>(item_wrapper, 0, "span", false);
++        glyph_wrapper->set_display(Display::Flex);
++        glyph_wrapper->set_align_items(AlignItems::Center);
++        glyph_wrapper->set_gap(6.0f);
++        for (const auto &field : glyphs) {
++            auto glyph = context.create_element<Label>(glyph_wrapper, field.to_string(), theme::Typography::LabelSM);
++            glyph->set_font_family("promptfont");
++            glyph->set_font_style(FontStyle::Normal);
++            glyph->set_font_weight(400);
++            glyph->set_font_size(is_small_glyph(field) ? 66.0f : 54.0f);
++            glyph->set_letter_spacing(0.0f);
++        }
++        std::string caps = item.label;
++        for (char &c : caps) c = (char)std::toupper((unsigned char)c);
++        auto label = context.create_element<Label>(item_wrapper, caps, theme::Typography::LabelSM);
++        label->set_font_size(30.0f);
++        label->set_white_space(WhiteSpace::Nowrap);
++    }
++}
++
+ void Modal::process_event(const Event &e) {
+     switch (e.type) {
+         case EventType::Update: {
+@@ -184,6 +279,12 @@ void Modal::process_event(const Event &e) {
+                 if (current_device != last_input_device || current_profile != last_input_profile) {
+                     render_menu_actions();
+                 }
++                // The layer on top owns the hint row: a prompt draws its own.
++                bool prompt_open = is_prompt_open();
++                if (menu_actions_wrapper != nullptr && prompt_open != hints_hidden_for_prompt) {
++                    hints_hidden_for_prompt = prompt_open;
++                    menu_actions_wrapper->set_visibility(prompt_open ? Visibility::Hidden : Visibility::Visible);
++                }
+             }
+             queue_update();
+             break;
+@@ -233,9 +334,9 @@ void Modal::render_menu_actions() {
+         menu_actions_wrapper->set_max_width(modal_width + (modal_page_padding * 2.0f));
+         menu_actions_wrapper->set_height(modal_page_padding);
+         menu_actions_wrapper->set_display(Display::Flex);
+-        menu_actions_wrapper->set_justify_content(JustifyContent::FlexStart);
++        menu_actions_wrapper->set_justify_content(JustifyContent::Center);  // Blitz '27: centred, icon then caps
+         menu_actions_wrapper->set_align_items(AlignItems::Center);
+-        menu_actions_wrapper->set_gap(32.0f);
++        menu_actions_wrapper->set_gap(45.0f);
+     } else {
+         menu_actions_wrapper->clear_children();
+     }
+@@ -244,59 +345,31 @@ void Modal::render_menu_actions() {
+     last_input_device = current_device;
+     last_input_profile = current_profile;
+ 
+-    if (last_input_device == recompinput::InputDevice::COUNT) {
+-        return;
+-    }
+-    
+-    for (auto &action : menu_action_order) {
++    // ✕ SELECT · ○ BACK · L1 R1 TABS · CLOSE (then Apply when a page has one).
++    auto described = [this](MenuAction action) {
+         auto it = menu_action_callbacks.find(action);
+-        if (it == menu_action_callbacks.end()) {
+-            continue;
+-        }
+-
+-        recompui::MenuActionCallback &action_info = it->second;
+-        if (action_info.description.empty()) {
+-            continue;
+-        }
+-
+-        recompinput::GameInput input = menu_action_mapping::game_input_from_menu_action(action);
+-        if (input == recompinput::GameInput::COUNT) {
+-            continue;
+-        }
+-
+-        std::vector<recompinput::InputField> bound_inputs;
+-        for (size_t i = 0; i < recompinput::num_bindings_per_input; i++) {
+-            auto binding = recompinput::profiles::get_input_binding(last_input_profile, input, i);
+-            if (!binding.is_empty()) {
+-                if (
+-                    binding.input_type == recompinput::InputType::Keyboard &&
+-                    menu_action_mapping::is_sdl_input_fake_mapped(binding.input_id)
+-                ) {
+-                    continue;
+-                }
+-                bound_inputs.push_back(binding);
++        return it != menu_action_callbacks.end() && !it->second.description.empty();
++    };
++    std::vector<HintItem> items;
++    items.push_back({ { MenuAction::Accept }, described(MenuAction::Accept) ? menu_action_callbacks[MenuAction::Accept].description : "Select" });
++    if (described(MenuAction::Back)) {
++        items.push_back({ { MenuAction::Back }, menu_action_callbacks[MenuAction::Back].description });
++    }
++    if (described(MenuAction::TabLeft) && described(MenuAction::TabRight)) {
++        items.push_back({ { MenuAction::TabLeft, MenuAction::TabRight }, "Tabs" });
++    } else {
++        for (MenuAction action : { MenuAction::TabLeft, MenuAction::TabRight }) {
++            if (described(action)) {
++                items.push_back({ { action }, menu_action_callbacks[action].description });
+             }
+         }
+-
+-        if (bound_inputs.size() == 0) {
+-            continue;
+-        }
+-
+-        auto action_wrapper = context.create_element<Element>(menu_actions_wrapper, 0, "span", false);
+-        action_wrapper->set_display(Display::Flex);
+-        action_wrapper->set_flex_direction(FlexDirection::Row);
+-        action_wrapper->set_align_items(AlignItems::Center);
+-        action_wrapper->set_gap(4.0f);
+-        action_wrapper->set_color(theme::color::TextA80);
+-
+-        auto action_label = context.create_element<Label>(action_wrapper, action_info.description + ":", theme::Typography::LabelSM);
+-        for (const auto &bound_input : bound_inputs) {
+-            auto binding_label = context.create_element<Label>(action_wrapper, bound_input.to_string(), theme::Typography::LabelSM);
+-            binding_label->set_font_family("promptfont");
+-            binding_label->set_font_style(FontStyle::Normal);;
+-            binding_label->set_font_weight(400);;
++    }
++    for (MenuAction action : { MenuAction::Toggle, MenuAction::Apply }) {
++        if (described(action)) {
++            items.push_back({ { action }, menu_action_callbacks[action].description });
+         }
+     }
++    build_hint_row(context, menu_actions_wrapper, items, current_device, current_profile);
+ }
+ 
+ void Modal::set_on_close_callback(std::function<void()> callback) {
+@@ -325,10 +398,10 @@ TabbedModal::TabbedModal(
+     }, "Back");
+     set_menu_action_callback(MenuAction::TabLeft, [this]() {
+         this->navigate_tab_direction(-1);
+-    }, "Previous Tab");
++    }, "Tab");
+     set_menu_action_callback(MenuAction::TabRight, [this]() {
+         this->navigate_tab_direction(1);
+-    }, "Next Tab");
++    }, "Tab");
+ }
+ 
+ void TabbedModal::process_event(const Event &e) {
+@@ -341,6 +414,16 @@ void TabbedModal::process_event(const Event &e) {
+                 }
+                 previous_tab_index = current_tab_index;
+             }
++            if (content_focus_frames > 0) {
++                // A frame or two for the new content's styles before it can take focus.
++                content_focus_frames--;
++                // A text field is a poor first stop (Back doesn't leave it), so prefer anything else.
++                if (content_focus_frames <= 3 && (body->focus_first_focusable(true) || body->focus_first_focusable())) {
++                    content_focus_frames = 0;
++                } else if (content_focus_frames == 0 && tabs != nullptr) {
++                    tabs->focus_on_active_tab();
++                }
++            }
+             queue_update();
+             break;
+         }
+diff --git a/recompui/src/elements/ui_radio.cpp b/recompui/src/elements/ui_radio.cpp
+index 7e5c18d..1029d63 100644
+--- a/recompui/src/elements/ui_radio.cpp
++++ b/recompui/src/elements/ui_radio.cpp
+@@ -12,18 +12,28 @@ namespace recompui {
+         enable_focus();
+         set_text(name);
+         set_cursor(Cursor::Pointer);
+-        set_typography(theme::Typography::LabelSM);
+-        set_border_color(theme::color::Text, 0);
+-        set_border_bottom_width(theme::border::width);
+-        set_color(theme::color::TextInactive);
+-        set_padding_top(8.0f);
+-        set_padding_bottom(8.0f - theme::border::width);
++        // Blitz '27 pill: 54 dp (36 px) tall, deep navy, a soft cyan rim; chosen: Blitz yellow with midnight text.
++        set_typography(theme::Typography::LabelMD);
++        set_font_size(30.0f);
++        set_border_width(theme::border::width);
++        set_border_color(theme::color::BorderSoft);
++        set_border_radius(theme::border::radius_sm);
++        set_background_color(theme::color::Background3);
++        set_color(theme::color::TextDim);
++        set_padding_top(9.0f);
++        set_padding_bottom(9.0f);
++        set_padding_left(18.0f);
++        set_padding_right(18.0f);
+         set_text_transform(TextTransform::Uppercase);
++        set_white_space(WhiteSpace::Nowrap);
++        set_flex_shrink(0.0f);
+         set_height_auto();
+         set_opacity(1.0f);
+-        hover_style.set_color(theme::color::WhiteA80);
+-        checked_style.set_color(theme::color::White);
+-        checked_style.set_border_color(theme::color::Text);
++        hover_style.set_color(theme::color::White);
++        hover_style.set_border_color(theme::color::SecondaryL);
++        checked_style.set_color(theme::color::Background1);
++        checked_style.set_background_color(theme::color::Secondary);
++        checked_style.set_border_color(theme::color::Secondary);
+         pulsing_style.set_border_color(theme::color::SecondaryA80);
+         disabled_style.set_color(theme::color::TextInactive);
+         disabled_style.set_opacity(0.5f);
+@@ -83,7 +93,8 @@ namespace recompui {
+             break;
+         case EventType::Update:
+             if (is_style_enabled(focus_state)) {
+-                pulsing_style.set_color(recompui::get_pulse_color(750));
++                // Pulse the outline, not the text: the selected pill's text sits on the accent colour.
++                pulsing_style.set_border_color(recompui::get_pulse_color(750));
+                 apply_styles();
+                 queue_update();
+             }
+@@ -127,7 +138,9 @@ namespace recompui {
+     }
+ 
+     Radio::Radio(ResourceId rid, Element *parent) : Container(rid, parent, FlexDirection::Row, JustifyContent::FlexStart, Events(EventType::Focus, EventType::Update, EventType::Enable)) {
+-        set_gap(24.0f);
++        set_gap(8.0f);
++        set_flex_wrap(FlexWrap::NoWrap);  // Blitz '27 rows: the pills sit in a line at the row's right
++        set_flex_shrink(0.0f);
+         set_align_items(AlignItems::FlexStart);
+         // enable_focus();
+         set_as_navigation_container(NavigationType::Horizontal);
+diff --git a/recompui/src/elements/ui_tab_set.cpp b/recompui/src/elements/ui_tab_set.cpp
+index 2c5dc52..1566b6b 100644
+--- a/recompui/src/elements/ui_tab_set.cpp
++++ b/recompui/src/elements/ui_tab_set.cpp
+@@ -19,26 +19,34 @@ Tab::Tab(ResourceId rid, Element *parent, int tab_index, std::string_view text,
+     set_tab_index_auto();
+     set_cursor(Cursor::Pointer);
+ 
+-    set_color(theme::color::TextInactive);
++    // Blitz '27 tabs: idle steel; the open tab Blitz yellow with an orange underline; the focused tab the
++    // red bar with selected-yellow text.
++    set_color(theme::color::TextDim);
+     set_background_color(theme::color::Transparent);
++    set_border_radius(theme::border::radius_sm);
+     set_opacity(1.0f);
+ 
+-    hover_style.set_color(theme::color::WhiteA80);
+-    checked_style.set_color(theme::color::White);
+-    pulsing_style.set_color(theme::color::WhiteA80);
++    hover_style.set_color(theme::color::Text);
++    checked_style.set_color(theme::color::Secondary);
++    pulsing_style.set_color(theme::color::SecondaryL);
++    pulsing_style.set_background_color(theme::color::Primary);
+ 
+     disabled_style.set_cursor(Cursor::None);
+     disabled_style.set_color(theme::color::TextDim);
+     disabled_style.set_opacity(0.5f);
+ 
+     ContextId context = get_current_context();
+-    label = context.create_element<Label>(this, std::string{text}, theme::Typography::Header3);
++    label = context.create_element<Label>(this, std::string{text}, theme::Typography::LabelMD);
++    label->set_text_transform(TextTransform::Uppercase);
++    label->set_font_size(31.0f);        // nine tabs fit the default 960-wide window
++    label->set_letter_spacing(1.0f);
++    label->set_white_space(WhiteSpace::Nowrap);
+ 
+     indicator = context.create_element<Element>(this, 0, "div", false);
+     indicator->set_display(Display::Block);
+     indicator->set_position(Position::Absolute);
+-    indicator->set_height(2.0f);
+-    indicator->set_bottom(2.0f);
++    indicator->set_height(6.0f);
++    indicator->set_bottom(0.0f);
+     indicator->set_left(0.0f);
+     indicator->set_right(0.0f);
+     indicator->set_background_color(theme::color::Transparent);
+@@ -73,30 +81,24 @@ void Tab::process_event(const Event &e) {
+     case EventType::Enable: {
+         bool active = std::get<EventEnable>(e.variant).active;
+         set_style_enabled(disabled_state, !active);
+-        indicator->set_background_color(active ? theme::color::BorderSolid : theme::color::Transparent);
++        indicator->set_background_color(active && is_selected ? theme::color::SecondaryD : theme::color::Transparent);
+         break;
+     }
+     case EventType::Focus:
+         {
+             bool active = std::get<EventFocus>(e.variant).active;
++            focused = active;
+             set_style_enabled(focus_state, active);
+             if (active) {
++                // Blitz '27: the focused tab is always the open one, so moving along the tab row opens tabs.
++                if (!is_selected) {
++                    on_select_tab(tab_index);
++                }
+                 queue_update();
+             }
+         }
+         break;
+     case EventType::Update:
+-        if (is_style_enabled(focus_state)) {
+-            recompui::Color pulse_color = recompui::get_pulse_color(750);
+-            pulsing_style.set_color(pulse_color);
+-            if (is_selected) {
+-                indicator->set_background_color(pulse_color);
+-            } else {
+-                indicator->set_background_color(theme::color::Transparent);
+-            }
+-            apply_styles();
+-            queue_update();
+-        }
+         break;
+     default:
+         break;
+@@ -107,7 +109,7 @@ void Tab::set_selected(bool enable) {
+     is_selected = enable;
+     set_as_primary_focus(enable);
+     set_style_enabled(checked_state, enable);
+-    indicator->set_background_color(enable ? theme::color::BorderSolid : theme::color::Transparent);
++    indicator->set_background_color(enable ? theme::color::SecondaryD : theme::color::Transparent);
+ }
+ 
+ TabSet::TabSet(ResourceId rid, Element *parent) :
+@@ -146,10 +148,19 @@ void TabSet::set_active_tab(int tab_index, bool report_change) {
+         return;
+     }
+     if (active_tab != tab_index) {
++        // Blitz '27: if a tab has focus, focus moves with the open tab, so the red (focused) tab is never
++        // a different one from the yellow (open) one.
++        bool tab_focused = false;
++        for (Tab *tab : tabs) {
++            tab_focused = tab_focused || tab->has_focus();
++        }
+         active_tab = tab_index;
+         for (int i = 0; i < static_cast<int>(tabs.size()); i++) {
+             tabs[i]->set_selected(i == active_tab);
+         }
++        if (tab_focused && !tabs[active_tab]->has_focus()) {
++            tabs[active_tab]->focus();
++        }
+         if (report_change && change_tab_callback) {
+             change_tab_callback(active_tab);
+         }
+diff --git a/recompui/src/elements/ui_tab_set.h b/recompui/src/elements/ui_tab_set.h
+index b8d3783..bec4ca0 100644
+--- a/recompui/src/elements/ui_tab_set.h
++++ b/recompui/src/elements/ui_tab_set.h
+@@ -20,9 +20,10 @@ namespace recompui {
+         Element *indicator = nullptr;
+ 
+         bool visible = true;
++        bool focused = false;
+ 
+         static constexpr float tab_vertical_padding = 20.0f;
+-        static constexpr float tab_horizontal_padding = 24.0f;
++        static constexpr float tab_horizontal_padding = 14.0f;
+         static constexpr recompui::Display default_display_setting = Display::Block;
+     protected:
+         std::string_view get_type_name() override { return "Tab"; }
+@@ -32,6 +33,7 @@ namespace recompui {
+         void set_selected(bool selected);
+         void set_visible(bool is_visible);
+         bool get_visible() { return visible; }
++        bool has_focus() const { return focused; }
+     };
+ 
+     class TabSet : public Element {

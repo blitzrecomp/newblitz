@@ -1,0 +1,34 @@
+diff --git a/thirdparty/concurrentqueue/lightweightsemaphore.h b/thirdparty/concurrentqueue/lightweightsemaphore.h
+--- a/thirdparty/concurrentqueue/lightweightsemaphore.h
++++ b/thirdparty/concurrentqueue/lightweightsemaphore.h
+@@ -352,7 +352,14 @@
+ 		while (true)
+ 		{
+ 			oldCount = m_count.load(std::memory_order_acquire);
+-			if (oldCount >= 0 && m_sema.try_wait())
++			#if defined(__PSP__)
++					// BlitzRecomp (PSP, one core): a signaller has counted us in and will post the kernel semaphore, so block
++					// for it. Polling here spun for ever above a lower-priority signaller preempted between its fetch_add and
++					// its post (the PSP-1001's attract hangs, 2026-11-04: the Gfx thread's 1 ms timed wait hit that window).
++					if (oldCount >= 0 && m_sema.wait())
++#else
++					if (oldCount >= 0 && m_sema.try_wait())
++#endif
+ 				return true;
+ 			if (oldCount < 0 && m_count.compare_exchange_strong(oldCount, oldCount + 1, std::memory_order_relaxed, std::memory_order_relaxed))
+ 				return false;
+@@ -383,7 +390,14 @@
+ 				while (true)
+ 				{
+ 					oldCount = m_count.load(std::memory_order_acquire);
++					#if defined(__PSP__)
++					// BlitzRecomp (PSP, one core): a signaller has counted us in and will post the kernel semaphore, so block
++					// for it. Polling here spun for ever above a lower-priority signaller preempted between its fetch_add and
++					// its post (the PSP-1001's attract hangs, 2026-11-04: the Gfx thread's 1 ms timed wait hit that window).
++					if (oldCount >= 0 && m_sema.wait())
++#else
+ 					if (oldCount >= 0 && m_sema.try_wait())
++#endif
+ 						break;
+ 					if (oldCount < 0 && m_count.compare_exchange_strong(oldCount, oldCount + 1, std::memory_order_relaxed, std::memory_order_relaxed))
+ 						return 0;

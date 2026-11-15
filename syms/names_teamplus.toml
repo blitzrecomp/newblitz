@@ -1,0 +1,19 @@
+# Extra hand names for the 2026 flavour (Zoinkity's Team Extension v2.0 applied to v1.1, "team+").
+# Merged over syms/names.toml by tools/gen_syms.py --names. Evidence: build/analysis/romhacks/
+# resurrection/feasibility_notes.md (static + tool runs, 2026-10-15).
+
+[boot]
+# Unreferenced vanilla functions. team+'s team-count word at 0x800248FC (inside boot text) makes
+# spimdisasm lose these labels; pinned so the boot function list matches Classic.
+0x80026758 = "func_80026758"
+0x800267B4 = "func_800267B4"
+0x80026830 = "func_80026830"
+0x80026950 = "func_80026950"
+
+[ovl_a]
+0x802FEF18 = "tp_game_process"          # process entry (pointer); team+ prepends 4 nops to vanilla 0x802FEF08
+0x80332B9C = "tp_match_init"            # called by load_overlay_b_2; vanilla 0x80332B90 plus 3 nops
+
+[ovl_b]
+0x803015C0 = "tp_team_count_for_mode"   # byte 0 (Arcade/Tournament) or byte 2 (31, modes >= 2) of 0x800248FC
+0x803015E0 = "tp_count_teams"           # counts 0x220-byte team blocks until a negative first word; stores to 0x800248FC

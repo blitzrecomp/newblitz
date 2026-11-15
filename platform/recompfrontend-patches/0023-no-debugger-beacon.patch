@@ -1,0 +1,14 @@
+diff --git a/recompui/src/base/ui_state.cpp b/recompui/src/base/ui_state.cpp
+index 8867bbd..5d8b215 100644
+--- a/recompui/src/base/ui_state.cpp
++++ b/recompui/src/base/ui_state.cpp
+@@ -253,7 +253,8 @@ public:
+         
+         context = Rml::CreateContext("main", Rml::Vector2i(width, height));
+ 
+-        Rml::Debugger::Initialise(context);
++        // Its beacon, a yellow "!" over the game at any UI warning, is for developers: BLITZ_RML_DEBUG=1.
++        if (getenv("BLITZ_RML_DEBUG") != nullptr) Rml::Debugger::Initialise(context);
+         {
+             struct FontFace {
+                 const char* filename;

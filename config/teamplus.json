@@ -1,0 +1,10 @@
+{
+  "_comment": "The 2026 flavour's base: Zoinkity's NFL Blitz 2000 Team Extension v2.0 (nflblitzfans.com topic 53) applied to our v1.1. Hashes only; the user supplies Blitz2k-11_team+.bps (never committed or bundled).",
+  "patch_crc32": "BE45C3BE",
+  "source_crc32": "B591CFEA",
+  "target_crc32": "72539E9B",
+  "target_sha1": "39c8a7805b3d84da79cb376e370f66211f6a96c7",
+  "target_xxh3": "0xAF7E4EA8EE47BBB3",
+  "code_regions": [["0x0", "0x11EC8C"], ["0x12357C", "0x150C40"]],
+  "code_xxh3": "0xB1A70371349CB6C5"
+}

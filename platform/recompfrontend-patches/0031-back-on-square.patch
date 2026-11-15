@@ -1,0 +1,38 @@
+diff --git a/recompinput/src/input_mapping.cpp b/recompinput/src/input_mapping.cpp
+--- a/recompinput/src/input_mapping.cpp
++++ b/recompinput/src/input_mapping.cpp
+@@ -61,7 +61,7 @@
+         { GameInput::TOGGLE_MENU,    { InputField::controller_digital(SDL_CONTROLLER_BUTTON_BACK), InputField::controller_digital(SDL_CONTROLLER_BUTTON_TOUCHPAD) } },
+ #endif
+         { GameInput::ACCEPT_MENU,    { InputField::controller_digital(SDL_CONTROLLER_BUTTON_SOUTH) } },
+-        { GameInput::BACK_MENU,      { InputField::controller_digital(SDL_CONTROLLER_BUTTON_EAST), InputField::controller_digital(SDL_CONTROLLER_BUTTON_WEST) } },  // Blitz '27: Back on ○ / B (east), west still works
++        { GameInput::BACK_MENU,      { InputField::controller_digital(SDL_CONTROLLER_BUTTON_WEST), InputField::controller_digital(SDL_CONTROLLER_BUTTON_EAST) } },  // Back on □ (west), as the game's own menus go (team, 2026-11-02); ○ still works
+         { GameInput::APPLY_MENU,     { InputField::controller_digital(SDL_CONTROLLER_BUTTON_NORTH), InputField::controller_digital(SDL_CONTROLLER_BUTTON_START) } },
+         { GameInput::TAB_LEFT_MENU,  { InputField::controller_digital(SDL_CONTROLLER_BUTTON_LEFTSHOULDER) } },
+         { GameInput::TAB_RIGHT_MENU, { InputField::controller_digital(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) } },
+diff --git a/recompinput/src/profiles.cpp b/recompinput/src/profiles.cpp
+--- a/recompinput/src/profiles.cpp
++++ b/recompinput/src/profiles.cpp
+@@ -542,14 +542,16 @@
+                     if (!load_input_device_from_json(profile, profile_index, device, "mappings")) {
+                         assign_all_mappings(profile_index, device);
+                     }
+-                    // Blitz '27: menus go back with ○ / B (east). A profile saved with the old default (west
+-                    // alone) moves to east, keeping west as the second binding.
++                    // Menus go back with □ (west), as the game's own do (team, 2026-11-02), ○ (east) second. A profile
++                    // saved with west alone gets east too; one saved with Blitz '27's east-first order is turned round.
+                     if (device == InputDevice::Controller) {
+                         InputField west = InputField::controller_digital(SDL_CONTROLLER_BUTTON_WEST);
+-                        if (profiles::get_input_binding(profile_index, GameInput::BACK_MENU, 0) == west &&
+-                            profiles::get_input_binding(profile_index, GameInput::BACK_MENU, 1).input_type == InputType::None) {
+-                            profiles::set_input_binding(profile_index, GameInput::BACK_MENU, 0, InputField::controller_digital(SDL_CONTROLLER_BUTTON_EAST));
+-                            profiles::set_input_binding(profile_index, GameInput::BACK_MENU, 1, west);
++                        InputField east = InputField::controller_digital(SDL_CONTROLLER_BUTTON_EAST);
++                        const InputField first = profiles::get_input_binding(profile_index, GameInput::BACK_MENU, 0);
++                        const InputField second = profiles::get_input_binding(profile_index, GameInput::BACK_MENU, 1);
++                        if ((first == west && second.input_type == InputType::None) || (first == east && second == west)) {
++                            profiles::set_input_binding(profile_index, GameInput::BACK_MENU, 0, west);
++                            profiles::set_input_binding(profile_index, GameInput::BACK_MENU, 1, east);
+                         }
+                     }
+                 }

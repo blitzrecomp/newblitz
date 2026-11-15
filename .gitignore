@@ -1,0 +1,32 @@
+# Game data: never commit the ROM or anything extracted or derived from it.
+rom/*
+!rom/README.md
+build/
+/extracted_assets/
+extracted/
+*.z64
+*.n64
+*.v64
+*.mpk
+*.eep
+*.sra
+*.fla
+
+# splat / disassembly / recompiler output (derived from the ROM)
+asm/
+bin/
+RecompiledFuncs/
+recomp_out/
+*.elf
+*.gzf
+ghidra/projects/
+
+# Tooling
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+.cache/
+.vscode/
+.claude/settings.local.json
+tools/blitz_logs_worker/.wrangler/

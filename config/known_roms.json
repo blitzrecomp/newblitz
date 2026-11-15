@@ -1,0 +1,55 @@
+{
+  "_source": "MD5 and header CRCs from mupen64plus-core data/mupen64plus.ini (GoodN64 names). SHA-1 is recorded per ROM in config/target_rom.json once a dump is imported.",
+  "roms": [
+    {
+      "id": "blitz",
+      "title": "NFL Blitz",
+      "region": "USA (NTSC)",
+      "revision": "1.0",
+      "md5": "7f6c5e71711dec81e77ccf71060f67ca",
+      "crc": ["D094B170", "D7C4B5CC"],
+      "players": 2
+    },
+    {
+      "id": "blitz-se",
+      "title": "NFL Blitz - Special Edition",
+      "region": "USA (NTSC)",
+      "revision": "1.0",
+      "md5": "7e856fa8f743900feba5a4e28c234af7",
+      "crc": ["30EAD54F", "31620BF6"],
+      "players": 4
+    },
+    {
+      "id": "blitz2000-v10",
+      "title": "NFL Blitz 2000",
+      "region": "USA (NTSC)",
+      "revision": "1.0",
+      "md5": "ba49514441023722f02d41c62612f6c3",
+      "crc": ["15A00969", "34E5A285"],
+      "players": 4
+    },
+    {
+      "id": "blitz2000-v11",
+      "title": "NFL Blitz 2000",
+      "region": "USA (NTSC)",
+      "revision": "1.1",
+      "md5": "dd96bb80e652cd1cf23ca4b8294ba7b5",
+      "crc": ["5B755842", "6CA39C7A"],
+      "players": 4
+    },
+    {
+      "id": "blitz2001",
+      "title": "NFL Blitz 2001",
+      "region": "USA (NTSC)",
+      "revision": "1.0",
+      "md5": "e4edd73cb036c6b143cee9aeeed60341",
+      "crc": ["36FA35EB", "E85E2E36"],
+      "players": 4
+    }
+  ],
+  "rejected": [
+    {"md5": "f0a1cc3d1d99a60f35d37ddccf43cabb", "name": "NFL Blitz (U) [f1] (PAL)", "reason": "fan-modified PAL fix, not an original dump"},
+    {"md5": "ddbe4248ea34e11c091a975776042670", "name": "NFL Blitz 2000 (U) (V1.0) [f1] (PAL)", "reason": "fan-modified PAL fix, not an original dump"},
+    {"md5": "d13a38b9639cf1944fe7024e4c58739d", "name": "NFL Blitz 2001 (U) [f1] (PAL-NTSC)", "reason": "fan-modified PAL fix, not an original dump"}
+  ]
+}

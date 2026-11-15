@@ -1,0 +1,23 @@
+{
+  "format": "blitz-pack/1",
+  "id": "blitz2026-proof",
+  "title": "Blitz 2026 - first content proof",
+  "requires_rom": "blitz2000-v11",
+  "teams": [
+    {
+      "team": "ARZ",
+      "ratings": { "passing": 5 },
+      "players": [
+        {
+          "slot": 3,
+          "expect": { "last": "Plummer", "number": 16 },
+          "first": "Kyler",
+          "last": "Murray",
+          "number": 1,
+          "size": 1.10,
+          "announcer_call": "none"
+        }
+      ]
+    }
+  ]
+}

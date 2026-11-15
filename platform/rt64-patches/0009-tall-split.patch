@@ -1,0 +1,60 @@
+diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
+index 1cf1ebf..5e8812d 100644
+--- a/src/hle/rt64_workload_queue.cpp
++++ b/src/hle/rt64_workload_queue.cpp
+@@ -10,7 +10,8 @@
+ 
+ #define ENABLE_HIGH_RESOLUTION_RENDERER 1
+ 
+-// Tall view experiment (the game's src/game/tall_view.cpp): nonzero lets Expand go narrower than the game's own shape.
++// Tall view experiment (the game's src/game/tall_view.cpp): nonzero makes Expand a 2:3 picture, whatever the window;
++// VIRenderer::render puts its two halves at the window's top and bottom.
+ extern "C" { volatile float blitz_tall_aspect_on = 0.0f; }
+ 
+ namespace RT64 {
+@@ -146,7 +147,7 @@ namespace RT64 {
+         case UserConfiguration::AspectRatio::Expand:
+             if ((ext.sharedResources->swapChainWidth > 0) && (ext.sharedResources->swapChainHeight > 0)) {
+                 const float derivedRatioTarget = (float(ext.sharedResources->swapChainWidth) / float(ext.sharedResources->swapChainHeight)) * pixelAspect;
+-                workloadConfig.aspectRatioTarget = (blitz_tall_aspect_on != 0.0f) ? derivedRatioTarget : std::max(derivedRatioTarget, workloadConfig.aspectRatioSource);
++                workloadConfig.aspectRatioTarget = (blitz_tall_aspect_on != 0.0f) ? (2.0f / 3.0f) * pixelAspect : std::max(derivedRatioTarget, workloadConfig.aspectRatioSource);
+             }
+             else {
+                 workloadConfig.aspectRatioTarget = workloadConfig.aspectRatioSource;
+diff --git a/src/render/rt64_vi_renderer.cpp b/src/render/rt64_vi_renderer.cpp
+index 67d17b0..deb9a8e 100644
+--- a/src/render/rt64_vi_renderer.cpp
++++ b/src/render/rt64_vi_renderer.cpp
+@@ -41,6 +41,8 @@ namespace RT64 {
+         return windowCenter + relativeCoordinate * relativeScale;
+     }
+ 
++    extern "C" volatile float blitz_tall_aspect_on;  // rt64_workload_queue.cpp
++
+     void VIRenderer::render(const RenderParams &p) {
+         const ShaderRecord *shader = nullptr;
+         const RenderSampler *sampler = nullptr;
+@@ -83,6 +85,23 @@ namespace RT64 {
+         p.commandList->setGraphicsDescriptorSet(descriptorSet->get(), 0);
+         p.commandList->setGraphicsPushConstants(0, &pushConstants);
+         p.commandList->setVertexBuffers(0, nullptr, 0, nullptr);
++
++        // Tall view: a window taller than 2:3 parts the picture's halves, so the space between them hides none of it.
++        const float tallPicture = float(p.swapChain->getWidth()) * 1.5f;
++        const float tallGap = float(p.swapChain->getHeight()) - tallPicture;
++        if ((blitz_tall_aspect_on != 0.0f) && (tallGap >= 1.0f)) {
++            const int32_t move = lround(tallGap * 0.5f);
++            const int32_t middle = (scissor.top + scissor.bottom) / 2;
++            RenderViewport part = viewport;
++            part.y = viewport.y - float(move);
++            p.commandList->setViewports(part);
++            p.commandList->setScissors(RenderRect(scissor.left, scissor.top - move, scissor.right, middle - move));
++            p.commandList->drawInstanced(3, 1, 0, 0);
++            part.y = viewport.y + float(move);
++            p.commandList->setViewports(part);
++            p.commandList->setScissors(RenderRect(scissor.left, middle + move, scissor.right, scissor.bottom + move));
++        }
++
+         p.commandList->drawInstanced(3, 1, 0, 0);
+     }
+ 

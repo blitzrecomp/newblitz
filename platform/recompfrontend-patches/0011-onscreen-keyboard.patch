@@ -1,0 +1,396 @@
+diff --git a/recompui/include/recompui/recompui.h b/recompui/include/recompui/recompui.h
+index 0708fa4..50fdac6 100644
+--- a/recompui/include/recompui/recompui.h
++++ b/recompui/include/recompui/recompui.h
+@@ -97,6 +97,11 @@ namespace recompui {
+     );
+     void close_prompt();
+     bool is_prompt_open();
++    // Blitz '27: an on-screen QWERTY keyboard for controllers. `done` gets the text on Done (not on Back).
++    // upper_only: capitals only, no Shift (codes, initials).
++    void open_keyboard(const std::string& title, const std::string& text, size_t max_len, bool upper_only,
++                       std::function<void(const std::string&)> done);
++    bool is_keyboard_open();
+     // Blitz '27: a scoreline plate on the open prompt, from a game summary "ARI 7 - 0 CHI, 2nd & 7 at the 35,
+     // Q2 1:23" (teams and score on the first line, the rest under it). Call after opening; "" hides it.
+     void set_prompt_scoreline(const std::string &summary);
+diff --git a/recompui/src/composites/ui_keyboard.cpp b/recompui/src/composites/ui_keyboard.cpp
+new file mode 100644
+index 0000000..ec9a91b
+--- /dev/null
++++ b/recompui/src/composites/ui_keyboard.cpp
+@@ -0,0 +1,244 @@
++// Blitz '27: an on-screen QWERTY keyboard for typing with a controller (open_keyboard, recompui.h). Every TextInput
++// opens it when Accept comes from a controller; a physical keyboard still types into the field directly.
++#include <mutex>
++
++#include "recompui.h"
++
++#include "elements/ui_element.h"
++#include "elements/ui_label.h"
++#include "elements/ui_button.h"
++#include "elements/ui_modal.h"  // build_hint_row, hint_input_info
++
++namespace {
++    struct {
++        recompui::ContextId context = recompui::ContextId::null();
++        recompui::Label* title = nullptr;
++        recompui::Label* field = nullptr;
++        recompui::Element* rows = nullptr;
++        recompui::Element* first_key = nullptr;
++        std::string text;
++        size_t max_len = 64;
++        bool upper_only = false;
++        bool shift = true;
++        std::vector<std::pair<recompui::Button*, char>> letters;  // relabelled when Shift changes
++        recompui::Button* shift_button = nullptr;
++        std::function<void(const std::string&)> done;
++        bool open = false;
++    } kb;
++
++    void refresh_field() {
++        std::string shown = kb.text + (kb.text.size() < kb.max_len ? "_" : "");
++        kb.field->set_text(shown);
++    }
++
++    void refresh_case() {
++        bool up = kb.upper_only || kb.shift;
++        for (auto& [b, c] : kb.letters) b->set_text(std::string(1, up ? (char)std::toupper((unsigned char)c) : c));
++        if (kb.shift_button != nullptr) kb.shift_button->apply_button_style(kb.shift ? recompui::ButtonStyle::Primary : recompui::ButtonStyle::Secondary);
++    }
++
++    void type(char c) {
++        if (kb.text.size() >= kb.max_len) return;
++        bool letter = std::isalpha((unsigned char)c);
++        if (letter && (kb.upper_only || kb.shift)) c = (char)std::toupper((unsigned char)c);
++        kb.text += c;
++        if (letter && kb.shift && !kb.upper_only) {  // a one-letter shift (the first letter starts capitalised)
++            kb.shift = false;
++            refresh_case();
++        }
++        refresh_field();
++    }
++
++    void close_keyboard(bool accept) {
++        if (!kb.open) return;
++        kb.open = false;
++        recompui::hide_context(kb.context);
++        auto done = std::move(kb.done);
++        kb.done = {};
++        if (accept && done) {
++            // Called from a key's press, with the keyboard's context open: the receiver may open its own.
++            recompui::ContextId prev = recompui::try_close_current_context();
++            done(kb.text);
++            if (prev != recompui::ContextId::null()) prev.open();
++        }
++    }
++
++    class KeyboardRoot : public recompui::Element {
++    protected:
++        std::string_view get_type_name() override { return "KeyboardRoot"; }
++        void process_event(const recompui::Event& e) override {
++            if (e.type != recompui::EventType::MenuAction) return;
++            auto action = std::get<recompui::EventMenuAction>(e.variant).action;
++            if (action == recompui::MenuAction::Back) close_keyboard(false);
++        }
++    public:
++        KeyboardRoot(recompui::ResourceId rid, recompui::Element* parent)
++            : Element(rid, parent, recompui::Events(recompui::EventType::MenuAction), "div", false) {}
++    };
++
++    class KeyboardHints : public recompui::Element {
++        recompinput::InputDevice shown_device = recompinput::InputDevice::COUNT;
++        int shown_profile = -2;
++    protected:
++        std::string_view get_type_name() override { return "KeyboardHints"; }
++        void process_event(const recompui::Event& e) override {
++            if (e.type != recompui::EventType::Update) return;
++            auto [device, profile] = recompui::hint_input_info();
++            if (device != shown_device || profile != shown_profile) {
++                shown_device = device;
++                shown_profile = profile;
++                recompui::build_hint_row(recompui::get_current_context(), this, {
++                    {{recompui::MenuAction::Accept}, "Type"},
++                    {{recompui::MenuAction::Back}, "Cancel"},
++                }, device, profile);
++            }
++            queue_update();
++        }
++    public:
++        KeyboardHints(recompui::ResourceId rid, recompui::Element* parent)
++            : Element(rid, parent, recompui::Events(recompui::EventType::Update), "div", false) {
++            using namespace recompui;
++            set_position(Position::Absolute);
++            set_left(0);
++            set_right(0);
++            set_bottom(0);
++            set_height(64.0f);
++            set_background_color(Color{6, 12, 30, 255});  // over whatever hint row the screen below has
++            set_display(Display::Flex);
++            set_justify_content(JustifyContent::Center);
++            set_align_items(AlignItems::Center);
++            set_gap(45.0f);
++            queue_update();
++        }
++    };
++
++    recompui::Button* key(recompui::Element* row, const std::string& label, float width, std::function<void()> fn,
++                          recompui::ButtonStyle style = recompui::ButtonStyle::Secondary) {
++        using namespace recompui;
++        Button* b = kb.context.create_element<Button>(row, label, style, ButtonSize::Card);
++        b->hide_focus_ring();
++        b->set_width(width);
++        b->set_min_width(width);
++        b->add_pressed_callback(std::move(fn));
++        return b;
++    }
++
++    void build() {
++        using namespace recompui;
++        kb.context = create_context();
++        kb.context.open();
++        Element* root = kb.context.create_element<KeyboardRoot>(kb.context.get_root_element());
++        root->set_position(Position::Absolute);
++        root->set_top(0);
++        root->set_left(0);
++        root->set_right(0);
++        root->set_bottom(0);
++        root->set_display(Display::Flex);
++        root->set_align_items(AlignItems::Center);
++        root->set_justify_content(JustifyContent::Center);
++        root->set_background_color(theme::color::BGOverlay);
++        Element* card = kb.context.create_element<Element>(root);
++        card->set_position(Position::Relative);
++        card->set_width(1240, Unit::Dp);
++        Element* content = decorate_panel(kb.context, card, "prompt");
++        if (content == card) {
++            card->set_border_width(theme::border::width, Unit::Dp);
++            card->set_border_radius(theme::border::radius_lg, Unit::Dp);
++            card->set_border_color(theme::color::Border);
++            card->set_background_color(theme::color::ModalOverlay);
++        }
++        content->set_display(Display::Flex);
++        content->set_flex_direction(FlexDirection::Column);
++        content->set_align_items(AlignItems::Center);
++        content->set_padding(24, Unit::Dp);
++        content->set_gap(12, Unit::Dp);
++        kb.title = kb.context.create_element<Label>(content, "", theme::Typography::LabelSM);
++        kb.title->set_color(theme::color::TextDim);
++        kb.title->set_text_transform(TextTransform::Uppercase);
++        kb.field = kb.context.create_element<Label>(content, "", theme::Typography::Header2);
++        kb.field->set_color(theme::color::Secondary);
++        kb.field->set_min_height(64, Unit::Dp);
++        kb.rows = kb.context.create_element<Element>(content);
++        kb.rows->set_display(Display::Flex);
++        kb.rows->set_flex_direction(FlexDirection::Column);
++        kb.rows->set_align_items(AlignItems::Center);
++        kb.rows->set_gap(8, Unit::Dp);
++        kb.rows->set_as_navigation_container(NavigationType::GridCol);
++        kb.context.create_element<KeyboardHints>(root);
++        kb.context.close();
++    }
++
++    // The keys, rebuilt each time (Shift and Space depend on the options).
++    void build_keys() {
++        using namespace recompui;
++        kb.rows->clear_children();
++        kb.letters.clear();
++        kb.shift_button = nullptr;
++        kb.first_key = nullptr;
++        static const char* lines[] = {"1234567890", "qwertyuiop", "asdfghjkl'", "zxcvbnm,.-"};
++        const float w = 96.0f;
++        for (const char* l : lines) {
++            Element* row = kb.context.create_element<Element>(kb.rows);
++            row->set_display(Display::Flex);
++            row->set_flex_direction(FlexDirection::Row);
++            row->set_gap(8, Unit::Dp);
++            row->set_as_navigation_container(NavigationType::GridRow);
++            for (const char* c = l; *c; c++) {
++                char ch = *c;
++                Button* b = key(row, std::string(1, ch), w, [ch] { type(ch); });
++                if (std::isalpha((unsigned char)ch)) kb.letters.emplace_back(b, ch);
++                if (!kb.first_key) kb.first_key = b;
++            }
++        }
++        Element* row = kb.context.create_element<Element>(kb.rows);
++        row->set_display(Display::Flex);
++        row->set_flex_direction(FlexDirection::Row);
++        row->set_gap(8, Unit::Dp);
++        row->set_as_navigation_container(NavigationType::GridRow);
++        if (!kb.upper_only) {
++            kb.shift_button = key(row, "Shift", 2 * w + 8, [] {
++                kb.shift = !kb.shift;
++                refresh_case();
++            });
++        }
++        key(row, "Space", (kb.upper_only ? 6 : 4) * w + (kb.upper_only ? 40 : 24), [] { type(' '); });
++        key(row, "Delete", 2 * w + 8, [] {
++            if (!kb.text.empty()) kb.text.pop_back();
++            if (kb.text.empty() && !kb.upper_only) {
++                kb.shift = true;
++                refresh_case();
++            }
++            refresh_field();
++        });
++        key(row, "Done", 2 * w + 8, [] { close_keyboard(true); }, ButtonStyle::Primary);
++        refresh_case();
++    }
++}
++
++void recompui::open_keyboard(const std::string& title, const std::string& text, size_t max_len, bool upper_only,
++                             std::function<void(const std::string&)> done) {
++    if (kb.context == ContextId::null()) {
++        ContextId prev = try_close_current_context();
++        build();
++        if (prev != ContextId::null()) prev.open();
++    }
++    ContextId prev = try_close_current_context();
++    kb.context.open();
++    kb.text = text.substr(0, max_len);
++    kb.max_len = max_len == 0 ? 64 : max_len;
++    kb.upper_only = upper_only;
++    kb.shift = kb.text.empty();
++    kb.done = std::move(done);
++    kb.title->set_text(title);
++    build_keys();
++    refresh_field();
++    kb.context.set_autofocus_element(kb.first_key);
++    kb.context.close();
++    if (prev != ContextId::null()) prev.open();
++    kb.open = true;
++    show_context(kb.context, "");
++}
++
++bool recompui::is_keyboard_open() {
++    return kb.open;
++}
+diff --git a/recompui/src/config/ui_config_option.cpp b/recompui/src/config/ui_config_option.cpp
+index fb77548..170a959 100644
+--- a/recompui/src/config/ui_config_option.cpp
++++ b/recompui/src/config/ui_config_option.cpp
+@@ -276,6 +276,7 @@ ConfigOptionString::ConfigOptionString(
+ {
+     ContextId context = recompui::get_current_context();
+     text_input = context.create_element<TextInput>(this);
++    text_input->set_keyboard(config->get_option(option_index).name);
+     text_input->set_width(60.0f, Unit::Percent);
+     text_input->set_max_width(60.0f, Unit::Percent);
+     update_value();
+diff --git a/recompui/src/elements/ui_element.cpp b/recompui/src/elements/ui_element.cpp
+index 9096a5f..f2f0917 100644
+--- a/recompui/src/elements/ui_element.cpp
++++ b/recompui/src/elements/ui_element.cpp
+@@ -1,4 +1,5 @@
+ #include "RmlUi/Core/StringUtilities.h"
++#include "ui_modal.h"  // hint_input_info
+ 
+ #include "overloaded.h"
+ #include "recompui.h"
+@@ -179,6 +180,12 @@ void Element::handle_event(const Event& event) {
+     process_event(event);
+ }
+ 
++void Element::bubble_menu_action(MenuAction action) {
++    for (Element* p = parent; p != nullptr; p = p->parent) {
++        if (p->events_enabled & Events(EventType::MenuAction)) p->handle_event(Event::menu_action_event(action));
++    }
++}
++
+ void Element::set_id(const std::string& new_id) {
+     id = new_id;
+     base->SetId(new_id);
+@@ -262,7 +269,9 @@ void Element::ProcessEvent(Rml::Event &event) {
+             // Backspace and Page Up/Down are menu keys, except while typing in a text field.
+             if (rml_key == Rml::Input::KI_BACK || rml_key == Rml::Input::KI_PRIOR || rml_key == Rml::Input::KI_NEXT) {
+                 Rml::Element *target = event.GetTargetElement();
+-                if (target != nullptr && (target->GetTagName() == "input" || target->GetTagName() == "textarea")) {
++                // Blitz '27: only for a keyboard; a controller's Back (sent as Backspace) still backs out of the field.
++                if (target != nullptr && (target->GetTagName() == "input" || target->GetTagName() == "textarea") &&
++                    recompui::hint_input_info().first == recompinput::InputDevice::Keyboard) {
+                     action = MenuAction::None;
+                 }
+             }
+diff --git a/recompui/src/elements/ui_element.h b/recompui/src/elements/ui_element.h
+index 0817d24..05d6bc8 100644
+--- a/recompui/src/elements/ui_element.h
++++ b/recompui/src/elements/ui_element.h
+@@ -112,6 +112,9 @@ public:
+ 
+     // Used to actually construct elements.
+     Element(ResourceId rid, Element* parent, uint32_t events_enabled = 0, Rml::String base_class = "div", bool can_set_text = false);
++    // Blitz '27: hands a menu action to this element's ancestors, as a bubbling key event would (for an element whose
++    // own widget stops the key, like a text field's Backspace).
++    void bubble_menu_action(MenuAction action);
+     virtual ~Element();
+     void clear_children();
+     bool remove_child(ResourceId child, bool remove_from_context = true);
+diff --git a/recompui/src/elements/ui_text_input.cpp b/recompui/src/elements/ui_text_input.cpp
+index 42c74e7..2b11fd2 100644
+--- a/recompui/src/elements/ui_text_input.cpp
++++ b/recompui/src/elements/ui_text_input.cpp
+@@ -2,6 +2,9 @@
+ 
+ #include <cassert>
+ 
++#include "recompui.h"
++#include "ui_modal.h"  // hint_input_info
++
+ namespace recompui {
+ 
+     void TextInput::process_event(const Event &e) {
+@@ -16,6 +19,24 @@ namespace recompui {
+ 
+             break;
+         }
++        case EventType::MenuAction: {
++            // Blitz '27: a controller can't type, so Accept opens the on-screen keyboard (a keyboard types directly).
++            if (recompui::hint_input_info().first == recompinput::InputDevice::Keyboard) break;
++            MenuAction action = std::get<EventMenuAction>(e.variant).action;
++            if (action == MenuAction::Back) {  // the field's widget stops Backspace: pass a controller's Back up
++                bubble_menu_action(action);
++                break;
++            }
++            if (action != MenuAction::Accept) break;
++            ContextId ctx = get_current_context();
++            open_keyboard(keyboard_title, text, keyboard_max, false, [this, ctx](const std::string &typed) mutable {
++                ctx.open();
++                set_text(typed);
++                ctx.close();
++                for (const auto &function : text_changed_callbacks) function(typed);
++            });
++            break;
++        }
+         case EventType::Focus: {
+             const EventFocus &event = std::get<EventFocus>(e.variant);
+             if (focus_callback != nullptr) {
+@@ -29,7 +50,7 @@ namespace recompui {
+         }
+     }
+     
+-    TextInput::TextInput(ResourceId rid, Element *parent, bool text_visible) : Element(rid, parent, Events(EventType::Text, EventType::Focus), "input") {
++    TextInput::TextInput(ResourceId rid, Element *parent, bool text_visible) : Element(rid, parent, Events(EventType::Text, EventType::Focus, EventType::MenuAction), "input") {
+         if (!text_visible) {
+             set_attribute("type", "password");
+         }
+diff --git a/recompui/src/elements/ui_text_input.h b/recompui/src/elements/ui_text_input.h
+index 52282a7..3c40451 100644
+--- a/recompui/src/elements/ui_text_input.h
++++ b/recompui/src/elements/ui_text_input.h
+@@ -10,6 +10,8 @@ namespace recompui {
+         std::vector<std::function<void(const std::string &)>> text_changed_callbacks;
+         std::function<void(bool)> focus_callback = nullptr;
+         Style focus_style;
++        std::string keyboard_title = "Type";  // Blitz '27: the on-screen keyboard's heading
++        size_t keyboard_max = 64;
+     protected:
+         virtual void process_event(const Event &e) override;
+         std::string_view get_type_name() override { return "TextInput"; }
+@@ -19,6 +21,8 @@ namespace recompui {
+         const std::string &get_text();
+         void add_text_changed_callback(std::function<void(const std::string &)> callback);
+         void set_focus_callback(std::function<void(bool)> callback);
++        // Blitz '27: Accept from a controller opens the on-screen keyboard (open_keyboard) with this heading and limit.
++        void set_keyboard(const std::string &title, size_t max_len = 64) { keyboard_title = title; keyboard_max = max_len; }
+     };
+ 
+ } // namespace recompui

@@ -1,0 +1,16 @@
+diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
+index 902aed2..f6df259 100644
+--- a/librecomp/src/recomp.cpp
++++ b/librecomp/src/recomp.cpp
+@@ -1004,6 +1004,11 @@ void recomp::start(
+     free_failed = (VirtualFree(rdram, 0, MEM_RELEASE) == 0);
+ #elif defined(__PROSPERO__)
+     free_failed = false;  // the process ends next; the direct memory goes with it
++#elif defined(__ANDROID__)
++    // Only the game thread was joined: the game's other threads (the pad's poll among them) can still be running, and one that
++    // yields after an unmap read freed memory (a SIGSEGV in check_running_queue on an RG DS quit, 2026-11-02, after which
++    // GammaOS's system_server hung and restarted). The process ends with the activity, so the memory goes with it.
++    free_failed = false;
+ #else
+     // munmap returns -1 on failure.
+     free_failed = (munmap(rdram, allocation_size) == -1);

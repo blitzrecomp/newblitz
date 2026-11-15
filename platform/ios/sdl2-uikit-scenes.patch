@@ -1,0 +1,82 @@
+diff --color -ru a/include/SDL_config_iphoneos.h b/include/SDL_config_iphoneos.h
+--- a/include/SDL_config_iphoneos.h	2026-10-21 23:45:11
++++ b/include/SDL_config_iphoneos.h	2026-10-21 23:45:11
+@@ -209,7 +209,8 @@
+ #define SDL_IPHONE_KEYBOARD 1
+ 
+ /* enable iOS extended launch screen */
+-#define SDL_IPHONE_LAUNCHSCREEN 1
++/* BlitzRecomp: no programmatic launch window (it isn't scene-attached on iOS 27; the system launch screen shows) */
++/* #define SDL_IPHONE_LAUNCHSCREEN 1 */
+ 
+ /* enable filesystem support */
+ #define SDL_FILESYSTEM_COCOA   1
+diff --color -ru a/src/video/uikit/SDL_uikitmessagebox.m b/src/video/uikit/SDL_uikitmessagebox.m
+--- a/src/video/uikit/SDL_uikitmessagebox.m	2026-10-21 23:45:11
++++ b/src/video/uikit/SDL_uikitmessagebox.m	2026-10-21 23:45:11
+@@ -99,7 +99,11 @@
+     }
+ 
+     if (window == nil || window.rootViewController == nil) {
+-        alertwindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
++        UIWindowScene *scene = nil;
++        if (@available(iOS 13.0, tvOS 13.0, *)) {
++            scene = UIKit_GetWindowScene();
++        }
++        alertwindow = scene ? [[UIWindow alloc] initWithWindowScene:scene] : [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+         alertwindow.rootViewController = [UIViewController new];
+         alertwindow.windowLevel = UIWindowLevelAlert;
+ 
+diff --color -ru a/src/video/uikit/SDL_uikitwindow.h b/src/video/uikit/SDL_uikitwindow.h
+--- a/src/video/uikit/SDL_uikitwindow.h	2026-10-21 23:45:11
++++ b/src/video/uikit/SDL_uikitwindow.h	2026-10-21 23:45:11
+@@ -27,6 +27,7 @@
+ #import "SDL_uikitviewcontroller.h"
+ 
+ extern int UIKit_CreateWindow(_THIS, SDL_Window * window);
++extern UIWindowScene *UIKit_GetWindowScene(void) API_AVAILABLE(ios(13.0), tvos(13.0));
+ extern void UIKit_SetWindowTitle(_THIS, SDL_Window * window);
+ extern void UIKit_ShowWindow(_THIS, SDL_Window * window);
+ extern void UIKit_HideWindow(_THIS, SDL_Window * window);
+diff --color -ru a/src/video/uikit/SDL_uikitwindow.m b/src/video/uikit/SDL_uikitwindow.m
+--- a/src/video/uikit/SDL_uikitwindow.m	2026-10-21 23:45:11
++++ b/src/video/uikit/SDL_uikitwindow.m	2026-10-21 23:45:11
+@@ -149,6 +149,23 @@
+     return 0;
+ }
+ 
++/* BlitzRecomp: iOS 27 requires the scene lifecycle, and a window shows only in a window scene. The app's scene
++ * connects as the run loop turns after launch, so this waits for it (up to 3 s) when SDL is asked early. */
++UIWindowScene *UIKit_GetWindowScene(void)
++{
++    if (@available(iOS 13.0, tvOS 13.0, *)) {
++        for (int tries = 0; tries < 300; tries++) {
++            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
++                if ([scene isKindOfClass:[UIWindowScene class]]) {
++                    return (UIWindowScene *)scene;
++                }
++            }
++            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, false);
++        }
++    }
++    return nil;
++}
++
+ int UIKit_CreateWindow(_THIS, SDL_Window *window)
+ {
+     @autoreleasepool {
+@@ -207,7 +224,13 @@
+ 
+         /* ignore the size user requested, and make a fullscreen window */
+         /* !!! FIXME: can we have a smaller view? */
+-        uiwindow = [[SDL_uikitwindow alloc] initWithFrame:data.uiscreen.bounds];
++        if (@available(iOS 13.0, tvOS 13.0, *)) {
++            UIWindowScene *scene = UIKit_GetWindowScene();
++            uiwindow = scene ? [[SDL_uikitwindow alloc] initWithWindowScene:scene]
++                             : [[SDL_uikitwindow alloc] initWithFrame:data.uiscreen.bounds];
++        } else {
++            uiwindow = [[SDL_uikitwindow alloc] initWithFrame:data.uiscreen.bounds];
++        }
+ 
+         /* put the window on an external display if appropriate. */
+         if (data.uiscreen != [UIScreen mainScreen]) {

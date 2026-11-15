@@ -1,0 +1,86 @@
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index 558fa01..39136a3 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -1407,10 +1407,13 @@ namespace plume {
+         this->format = format;
+         this->entryPointName = (entryPointName != nullptr) ? std::string(entryPointName) : std::string();
+ 
++        this->codeSize = size;
++
+         VkShaderModuleCreateInfo shaderInfo = {};
+         shaderInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+         shaderInfo.pCode = reinterpret_cast<const uint32_t *>(data);
+         shaderInfo.codeSize = size;
++
+         VkResult res = vkCreateShaderModule(device->vk, &shaderInfo, nullptr, &vk);
+         if (res != VK_SUCCESS) {
+             fprintf(stderr, "vkCreateShaderModule failed with error code 0x%X.\n", res);
+@@ -1506,7 +1509,7 @@ namespace plume {
+ 
+         VkResult res = vkCreateComputePipelines(device->vk, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &vk);
+         if (res != VK_SUCCESS) {
+-            fprintf(stderr, "vkCreateComputePipelines failed with error code 0x%X.\n", res);
++            fprintf(stderr, "vkCreateComputePipelines failed with error code 0x%X (shader of %llu bytes).\n", res, (unsigned long long)(computeShader->codeSize));
+             return;
+         }
+     }
+@@ -2013,7 +2016,8 @@ namespace plume {
+             boundlessRangeSize = std::max(desc.boundlessRangeSize, 1U);
+ 
+             const RenderDescriptorRange &lastDescriptorRange = desc.descriptorRanges[desc.descriptorRangesCount - 1];
+-            typeCounts[toVk(lastDescriptorRange.type)] += boundlessRangeSize;
++            // As big as the layout declares: Adreno ignores the smaller variable count here, and runs out of pool.
++            typeCounts[toVk(lastDescriptorRange.type)] += std::max(boundlessRangeSize, lastDescriptorRange.count);
+             rangeCount--;
+         }
+ 
+@@ -2045,7 +2049,11 @@ namespace plume {
+ 
+         VkResult res = vkAllocateDescriptorSets(device->vk, &allocateInfo, &vk);
+         if (res != VK_SUCCESS) {
+-            fprintf(stderr, "vkAllocateDescriptorSets failed with error code 0x%X.\n", res);
++            fprintf(stderr, "vkAllocateDescriptorSets failed with error code 0x%X. %u ranges, boundless %d of %u.", res, desc.descriptorRangesCount, int(desc.lastRangeIsBoundless), desc.boundlessRangeSize);
++            for (auto it : typeCounts) {
++                fprintf(stderr, " type %d: %u", int(it.first), it.second);
++            }
++            fprintf(stderr, "\n");
+             return;
+         }
+     }
+@@ -2654,6 +2662,11 @@ namespace plume {
+     }
+ 
+     uint32_t VulkanSwapChain::getRefreshRate() const {
++        // Android can take the window between frames, leaving no swap chain to ask (crash on leaving the app, Retroid Pocket 5).
++        if (vk == VK_NULL_HANDLE) {
++            return 0;
++        }
++
+         VkRefreshCycleDurationGOOGLE refreshCycle = {};
+         VkResult res = vkGetRefreshCycleDurationGOOGLE(commandQueue->device->vk, vk, &refreshCycle);
+         if (res != VK_SUCCESS) {
+@@ -4273,6 +4286,11 @@ namespace plume {
+         createInfo.ppEnabledExtensionNames = enabledExtensions.data();
+         createInfo.enabledExtensionCount = uint32_t(enabledExtensions.size());
+         createInfo.pEnabledFeatures = &deviceFeatures.features;
++        fprintf(stderr, "[vulkan] %s, api %u.%u.%u, driver 0x%x: read without format %d, write without format %d, extended formats %d, scalar layout %d, descriptor indexing %d, null descriptor %d, int64 %d, float64 %d, storage msaa %d\n",
++            physicalDeviceProperties.deviceName, VK_VERSION_MAJOR(physicalDeviceProperties.apiVersion), VK_VERSION_MINOR(physicalDeviceProperties.apiVersion), VK_VERSION_PATCH(physicalDeviceProperties.apiVersion), physicalDeviceProperties.driverVersion,
++            deviceFeatures.features.shaderStorageImageReadWithoutFormat, deviceFeatures.features.shaderStorageImageWriteWithoutFormat, deviceFeatures.features.shaderStorageImageExtendedFormats,
++            layoutFeatures.scalarBlockLayout, indexingFeatures.runtimeDescriptorArray, robustnessFeatures.nullDescriptor,
++            deviceFeatures.features.shaderInt64, deviceFeatures.features.shaderFloat64, deviceFeatures.features.shaderStorageImageMultisample);
+ 
+         VkResult res = vkCreateDevice(physicalDevice, &createInfo, nullptr, &vk);
+         if (res != VK_SUCCESS) {
+diff --git a/plume_vulkan.h b/plume_vulkan.h
+index 03769c1..4f4e5db 100644
+--- a/plume_vulkan.h
++++ b/plume_vulkan.h
+@@ -140,6 +140,7 @@ namespace plume {
+ 
+     struct VulkanShader : RenderShader {
+         VkShaderModule vk = VK_NULL_HANDLE;
++        uint64_t codeSize = 0;
+         std::string entryPointName;
+         VulkanDevice *device = nullptr;
+         RenderShaderFormat format = RenderShaderFormat::UNKNOWN;

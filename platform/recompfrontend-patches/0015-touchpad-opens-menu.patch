@@ -1,0 +1,16 @@
+--- a/recompinput/src/input_mapping.cpp
++++ b/recompinput/src/input_mapping.cpp
+@@ -54,7 +54,12 @@
+         { GameInput::Y_AXIS_POS,     { InputField::controller_analog( SDL_CONTROLLER_AXIS_LEFTY, false) } },
+         { GameInput::Y_AXIS_NEG,     { InputField::controller_analog( SDL_CONTROLLER_AXIS_LEFTY, true) } },
+ 
+-        { GameInput::TOGGLE_MENU,    { InputField::controller_digital(SDL_CONTROLLER_BUTTON_BACK) } },
++#if defined(__PROSPERO__)
++        // BlitzRecomp: the PS5 keeps the DualSense's Create button for itself; the touchpad click opens the menu.
++        { GameInput::TOGGLE_MENU,    { InputField::controller_digital(SDL_CONTROLLER_BUTTON_TOUCHPAD), InputField::controller_digital(SDL_CONTROLLER_BUTTON_BACK) } },
++#else
++        { GameInput::TOGGLE_MENU,    { InputField::controller_digital(SDL_CONTROLLER_BUTTON_BACK), InputField::controller_digital(SDL_CONTROLLER_BUTTON_TOUCHPAD) } },
++#endif
+         { GameInput::ACCEPT_MENU,    { InputField::controller_digital(SDL_CONTROLLER_BUTTON_SOUTH) } },
+         { GameInput::BACK_MENU,      { InputField::controller_digital(SDL_CONTROLLER_BUTTON_EAST), InputField::controller_digital(SDL_CONTROLLER_BUTTON_WEST) } },  // Blitz '27: Back on ○ / B (east), west still works
+         { GameInput::APPLY_MENU,     { InputField::controller_digital(SDL_CONTROLLER_BUTTON_NORTH), InputField::controller_digital(SDL_CONTROLLER_BUTTON_START) } },

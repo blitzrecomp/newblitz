@@ -1,0 +1,177 @@
+{
+ "format": "blitz-pack/2",
+ "id": "blitz2026-teams",
+ "title": "Blitz 2026 - 32 teams, current names and order",
+ "requires_rom": "blitz2000-teamplus",
+ "order": [
+  "ARI",
+  "ATL",
+  "BAL",
+  "BUF",
+  "CAR",
+  "CHI",
+  "CIN",
+  "CLE",
+  "DAL",
+  "DEN",
+  "DET",
+  "GB",
+  "HOU",
+  "IND",
+  "JAX",
+  "KC",
+  "LV",
+  "LAC",
+  "LAR",
+  "MIA",
+  "MIN",
+  "NE",
+  "NO",
+  "NYG",
+  "NYJ",
+  "PHI",
+  "PIT",
+  "SF",
+  "SEA",
+  "TB",
+  "TEN",
+  "WAS"
+ ],
+ "teams": [
+  {
+   "franchise": "LV",
+   "city": "Las Vegas",
+   "select": "Las Vegas",
+   "abbr": "LV"
+  },
+  {
+   "franchise": "LAC",
+   "city": "Los Angeles",
+   "select": "L.A. Chargers",
+   "abbr": "LAC"
+  },
+  {
+   "franchise": "LAR",
+   "city": "Los Angeles",
+   "select": "L.A. Rams",
+   "abbr": "LAR"
+  },
+  {
+   "franchise": "WAS",
+   "nickname": "Commanders",
+   "abbr": "WAS"
+  },
+  {
+   "franchise": "JAX",
+   "abbr": "JAX"
+  },
+  {
+   "franchise": "ARI",
+   "abbr": "ARI"
+  },
+  {
+   "franchise": "ATL",
+   "abbr": "ATL"
+  },
+  {
+   "franchise": "BAL",
+   "abbr": "BAL"
+  },
+  {
+   "franchise": "BUF",
+   "abbr": "BUF"
+  },
+  {
+   "franchise": "CAR",
+   "abbr": "CAR"
+  },
+  {
+   "franchise": "CHI",
+   "abbr": "CHI"
+  },
+  {
+   "franchise": "CIN",
+   "abbr": "CIN"
+  },
+  {
+   "franchise": "CLE",
+   "abbr": "CLE"
+  },
+  {
+   "franchise": "DAL",
+   "abbr": "DAL"
+  },
+  {
+   "franchise": "DEN",
+   "abbr": "DEN"
+  },
+  {
+   "franchise": "DET",
+   "abbr": "DET"
+  },
+  {
+   "franchise": "GB",
+   "abbr": "GB"
+  },
+  {
+   "franchise": "HOU",
+   "abbr": "HOU"
+  },
+  {
+   "franchise": "IND",
+   "abbr": "IND"
+  },
+  {
+   "franchise": "KC",
+   "abbr": "KC"
+  },
+  {
+   "franchise": "MIA",
+   "abbr": "MIA"
+  },
+  {
+   "franchise": "MIN",
+   "abbr": "MIN"
+  },
+  {
+   "franchise": "NE",
+   "abbr": "NE"
+  },
+  {
+   "franchise": "NO",
+   "abbr": "NO"
+  },
+  {
+   "franchise": "NYG",
+   "abbr": "NYG"
+  },
+  {
+   "franchise": "NYJ",
+   "abbr": "NYJ"
+  },
+  {
+   "franchise": "PHI",
+   "abbr": "PHI"
+  },
+  {
+   "franchise": "PIT",
+   "abbr": "PIT"
+  },
+  {
+   "franchise": "SF",
+   "abbr": "SF"
+  },
+  {
+   "franchise": "SEA",
+   "abbr": "SEA"
+  },
+  {
+   "franchise": "TB",
+   "abbr": "TB"
+  },
+  {
+   "franchise": "TEN",
+   "abbr": "TEN"
+  }
+ ]
+}

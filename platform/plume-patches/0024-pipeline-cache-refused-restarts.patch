@@ -1,0 +1,22 @@
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -4792,7 +4792,17 @@
+             cacheInfo.initialDataSize = saved.size();
+             cacheInfo.pInitialData = saved.empty() ? nullptr : saved.data();
+             VkResult cacheRes = vkCreatePipelineCache(vk, &cacheInfo, nullptr, &pipelineCache);
+-            fprintf(stderr, "[vulkan] pipeline cache: %zu KB from earlier runs, %s\n", saved.size() / 1024, cacheRes == VK_SUCCESS ? "ok" : "refused");
++            fprintf(stderr, "[vulkan] pipeline cache: %zu KB from earlier runs, %s (%d)\n", saved.size() / 1024, cacheRes == VK_SUCCESS ? "ok" : "refused", (int)(cacheRes));
++            // Blitz: a cache the driver turns down (an RG DS's at 8477 KB, 2026-11-03) left the handle null, so it was never
++            // saved again and every launch compiled from nothing: 37 s to the game, and 5-16 fps for a while after a load. It
++            // goes aside as .refused and an empty one starts, which the next save fills.
++            if ((cacheRes != VK_SUCCESS) && !saved.empty()) {
++                std::rename(pipelineCachePath.c_str(), (pipelineCachePath + ".refused").c_str());
++                cacheInfo.initialDataSize = 0;
++                cacheInfo.pInitialData = nullptr;
++                cacheRes = vkCreatePipelineCache(vk, &cacheInfo, nullptr, &pipelineCache);
++                fprintf(stderr, "[vulkan] pipeline cache: started empty, %s (%d)\n", cacheRes == VK_SUCCESS ? "ok" : "refused", (int)(cacheRes));
++            }
+             if (cacheRes != VK_SUCCESS) {
+                 pipelineCache = VK_NULL_HANDLE;
+             }

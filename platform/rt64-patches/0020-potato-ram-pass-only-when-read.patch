@@ -1,0 +1,79 @@
+diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
+index c8bc14d..50b2adc 100644
+--- a/src/hle/rt64_state.cpp
++++ b/src/hle/rt64_state.cpp
+@@ -6,7 +6,7 @@
+ 
+ #include <atomic>
+ #include <chrono>
+-namespace RT64 { extern std::atomic<uint64_t> statGpuWaitMs; extern std::atomic<bool> liteNoRenderToRAM; }
++namespace RT64 { extern std::atomic<uint64_t> statGpuWaitMs, statRamPasses, statRamSkips; extern std::atomic<bool> liteNoRenderToRAM; }
+ 
+ #include <cassert>
+ #include <cinttypes>
+@@ -824,7 +824,7 @@ namespace RT64 {
+ 
+         // Validate all tile copies to be used during the rendering.
+         const bool extendedRenderToRAMSet = (extended.renderToRAM < UINT8_MAX);
+-        const bool renderToRDRAM = !liteNoRenderToRAM.load() && (extendedRenderToRAMSet ? (extended.renderToRAM != 0) : ext.emulatorConfig->framebuffer.renderToRAM);
++        bool renderToRDRAM = extendedRenderToRAMSet ? (extended.renderToRAM != 0) : ext.emulatorConfig->framebuffer.renderToRAM;
+         const bool warningsEnabled = ext.userConfig->developerMode;
+         const bool linearFiltering = !ext.userConfig->threePointFiltering;
+         const size_t callTileCount = workload.drawData.callTiles.size();
+@@ -1140,6 +1140,26 @@ namespace RT64 {
+             { workload.drawData.worldTransforms.data(), workload.drawRanges.worldTransforms, sizeof(interop::float4x4), RenderBufferFlag::STORAGE, { }, &workload.drawBuffers.worldTransformsBuffer},
+         });
+ 
++        // Potato Mode: the second drawing of a frame, into the N64's RAM, only when this frame's textures read a framebuffer.
++        if (renderToRDRAM && liteNoRenderToRAM.load()) {
++            bool readsFramebuffer = false;
++            for (uint32_t f = 0; (f < workload.fbPairCount) && !readsFramebuffer; f++) {
++                readsFramebuffer = workload.fbPairs[f].syncRequired;
++            }
++
++            for (const DrawCallTile &callTile : workload.drawData.callTiles) {
++                if (readsFramebuffer) {
++                    break;
++                }
++
++                readsFramebuffer = callTile.syncRequired || callTile.tileCopyUsed;
++            }
++
++            renderToRDRAM = readsFramebuffer;
++        }
++
++        (renderToRDRAM ? statRamPasses : statRamSkips)++;
++
+         if (renderToRDRAM) {
+             // Run RSP processor.
+             RSPProcessor::ProcessParams rspParams;
+diff --git a/src/render/rt64_raster_shader_cache.cpp b/src/render/rt64_raster_shader_cache.cpp
+index d2d7fa3..00cfe51 100644
+--- a/src/render/rt64_raster_shader_cache.cpp
++++ b/src/render/rt64_raster_shader_cache.cpp
+@@ -11,14 +11,14 @@
+ 
+ namespace RT64 {
+     // Where a weak device's time goes (Potato Mode's log, src/main/fps_counter.cpp).
+-    std::atomic<uint64_t> statQueued{0}, statCompiled{0}, statCompileMs{0}, statDrawsUber{0}, statDrawsFast{0}, statGpuWaitMs{0}, statTextureSlots{0}, statFrameGpuMs{0}, statFrameWaitMs{0};
++    std::atomic<uint64_t> statQueued{0}, statCompiled{0}, statCompileMs{0}, statDrawsUber{0}, statDrawsFast{0}, statGpuWaitMs{0}, statTextureSlots{0}, statFrameGpuMs{0}, statFrameWaitMs{0}, statRamPasses{0}, statRamSkips{0};
+     std::atomic<bool> liteNoRenderToRAM{false};
+ }
+ 
+ // Potato Mode, and live with "RT64 ram 0|1" (dev_input.cpp): the second drawing of each frame, into the N64's own RAM.
+ extern "C" void blitz_rt64_render_to_ram(int on) { RT64::liteNoRenderToRAM = on == 0; }
+ 
+-extern "C" void blitz_rt64_stats(uint64_t *queued, uint64_t *compiled, uint64_t *compileMs, uint64_t *uber, uint64_t *fast, uint64_t *gpuWaitMs, uint64_t *textureSlots, uint64_t *frameGpuMs, uint64_t *frameWaitMs) {
++extern "C" void blitz_rt64_stats(uint64_t *queued, uint64_t *compiled, uint64_t *compileMs, uint64_t *uber, uint64_t *fast, uint64_t *gpuWaitMs, uint64_t *textureSlots, uint64_t *frameGpuMs, uint64_t *frameWaitMs, uint64_t *ramPasses, uint64_t *ramSkips) {
+     *queued = RT64::statQueued.load();
+     *compiled = RT64::statCompiled.load();
+     *compileMs = RT64::statCompileMs.exchange(0);
+@@ -28,6 +28,8 @@ extern "C" void blitz_rt64_stats(uint64_t *queued, uint64_t *compiled, uint64_t
+     *textureSlots = RT64::statTextureSlots.load();
+     *frameGpuMs = RT64::statFrameGpuMs.exchange(0);
+     *frameWaitMs = RT64::statFrameWaitMs.exchange(0);
++    *ramPasses = RT64::statRamPasses.exchange(0);
++    *ramSkips = RT64::statRamSkips.exchange(0);
+ }
+ 
+ #define ENABLE_OPTIMIZED_SHADER_GENERATION

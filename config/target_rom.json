@@ -1,0 +1,16 @@
+{
+  "id": "blitz2000-v11",
+  "title": "NFL Blitz 2000",
+  "region": "USA (NTSC)",
+  "revision": "1.1",
+  "md5": "dd96bb80e652cd1cf23ca4b8294ba7b5",
+  "sha1": "3754c8fdf5cdce5de62685ce9be73e06ba5e3577",
+  "crc": [
+    "5B755842",
+    "6CA39C7A"
+  ],
+  "cic": "6102/7101",
+  "entry_point": "0x80000400",
+  "load_address": "0x80000400",
+  "size_bytes": 16777216
+}

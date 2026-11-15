@@ -1,0 +1,22 @@
+diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
+--- a/librecomp/src/recomp.cpp	2026-10-16 14:31:27
++++ b/librecomp/src/recomp.cpp	2026-10-16 14:31:27
+@@ -508,7 +508,17 @@
+ std::atomic<GameStatus> game_status = GameStatus::None;
+ 
+ void run_thread_function(uint8_t* rdram, uint64_t addr, uint64_t sp, uint64_t arg) {
+-    auto find_it = game_roms.find(current_game.value());
++    // ultramodern::quit() clears current_game while the game may still be starting threads (Blitz
++    // starts several per play): such a thread has nothing to run, so it ends instead of aborting.
++    std::optional<std::u8string> game;
++    {
++        std::lock_guard<std::mutex> lock(current_game_mutex);
++        game = current_game;
++    }
++    if (!game) {
++        return;
++    }
++    auto find_it = game_roms.find(*game);
+     const recomp::GameEntry& game_entry = find_it->second;
+     
+     recomp_context ctx{};

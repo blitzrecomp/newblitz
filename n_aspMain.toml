@@ -1,0 +1,16 @@
+# RSPRecomp config for NFL Blitz 2000's audio microcode (n_aspMain, libultra 2.0I build).
+# Text: ROM 0x2AD30 (VRAM 0x8002A130), 0xC54 bytes of code + padding. Data: ROM 0x2E750.
+# The dispatch table at the start of the data segment lists the command handlers; they are
+# mostly 4 lower than Banjo-Kazooie's n_aspMain (an older build). Two slots are 0 (unused).
+# One slot holds 0x02B0: the RSP PC is 12 bits, so that is IMEM offset 0x2B0 = 0x12B0 here
+# (RSPRecomp normalises jump targets with | 0x1000). Leaving it out made the first audio task
+# fail with "Unhandled jump target 0x02B0".
+text_offset = 0x2AD30
+text_size = 0xC60
+text_address = 0x04001080
+rom_file_path = "build/baserom.z64"
+output_file_path = "build/rsp/n_aspMain.cpp"
+output_function_name = "n_aspMain"
+extra_indirect_branch_targets = [
+    0x10EC, 0x139C, 0x119C, 0x1A64, 0x11C8, 0x17EC, 0x1208, 0x127C, 0x1348, 0x1248, 0x1C84, 0x12D4, 0x12B0, 0x1384
+]

@@ -1,0 +1,14 @@
+diff --git a/recompui/src/composites/ui_prompt.cpp b/recompui/src/composites/ui_prompt.cpp
+--- a/recompui/src/composites/ui_prompt.cpp
++++ b/recompui/src/composites/ui_prompt.cpp
+@@ -423,7 +423,8 @@
+ }
+ 
+ bool recompui::is_prompt_open() {
+-    std::lock_guard lock{ prompt_state.mutex };
+-
++    // Blitz: no prompt_state.mutex here. The prompt's context is set once (init_prompt_context), and taking this
++    // lock before is_context_shown's UI lock deadlocked against the renderer, which holds the UI lock and asks
++    // is_prompt_open (Modal::process_event): main thread prompt -> UI, present thread UI -> prompt.
+ 	return recompui::is_context_shown(prompt_state.ui_context);
+ }

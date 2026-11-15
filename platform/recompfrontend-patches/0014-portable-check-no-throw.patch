@@ -1,0 +1,13 @@
+--- a/recompui/src/util/file.cpp
++++ b/recompui/src/util/file.cpp
+@@ -70,7 +70,9 @@
+ 
+     std::filesystem::path file::get_app_folder_path() {
+         // directly check for portable.txt (windows and native linux binary)
+-        if (std::filesystem::exists("portable.txt")) {
++        // Non-throwing: a sandboxed app (the PS5) may not look in its working folder, which throws (BlitzRecomp).
++        std::error_code portable_ec;
++        if (std::filesystem::exists("portable.txt", portable_ec)) {
+             return std::filesystem::current_path();
+         }
+ 

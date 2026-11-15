@@ -1,0 +1,152 @@
+# Hand-identified functions, applied on top of the signature scan by tools/gen_syms.py.
+# Keys are VRAM addresses; overlay functions are keyed per section because overlays share VRAM.
+# Each entry should say how it was identified.
+
+[boot]
+0x80000400 = "entrypoint"          # IPL3 jumps here: clears bss 0x8002F020+0x2FAA0, sp=0x8005DE70, jr boot_main
+0x80001230 = "boot_main"           # osInitialize, creates idle thread (pri 0x51)
+0x800012C4 = "idle_thread"         # creates thread 7 (game, entry 0x80273D48) and thread 6 (scheduler)
+0x80001388 = "sched_init"          # message queues, VI manager, loads main segment, starts game thread
+0x800014D0 = "sched_thread"        # loop on D_8005DFD0: retrace / gfx done / pre-NMI messages
+0x800016B8 = "dma_read"            # (rom, dest, size): osPiStartDma in 0x4000 chunks, osInvalDCache first
+0x800018E0 = "fs_init"             # "g_finit": reads 16-byte FS header (magic 0x730205), then TOC (40-byte entries)
+0x80004970 = "load_main_segment"   # DMA ROM 0x2FC20-0x93EC0 -> 0x80248F00, bzero bss, fs_init(0x150C40)
+0x8001DC20 = "blitz_debug_printf"    # empty printf stub in retail; implemented in src/game/debug_print.cpp
+0x8001DC34 = "blitz_debug_printf_2"  # identical second stub
+0x80002580 = "heap_error"            # (heap, code 0-6): prints a message, paints both framebuffers, halts
+0x800026A8 = "heap_alloc"            # (size, heap)
+0x800028A8 = "malloc"                # heap_alloc(size, default heap at 0x8005E33C)
+0x800024C4 = "heap_init"             # (base, size); guard words 0xABCDEF98 / 0x89FEDCBA / 0xA1B2C3D4
+0x80026B44 = "srand"               # stores the seed rand() uses (0x8005BAF0)
+0x80026B10 = "rand"                # ANSI LCG: seed * 0x41C64E6D + 0x3039, returns (>> 16) & 0x7FFF
+
+# Nintendo SDK sample scheduler (sched.c): message codes 666-669 = VIDEO/RSP_DONE/RDP_DONE/PRE_NMI.
+0x80005F1C = "osCreateScheduler"   # (sc, stack, pri 0x64, viMode, numFields=1): osViSetEvent every retrace
+0x80006134 = "__scMain"            # scheduler thread entry
+0x80006244 = "__scHandleRetrace"   # VIDEO_MSG (0x29A): notifies clients (OS_SC_RETRACE_MSG)
+0x80006344 = "__scHandleRSP"       # RSP_DONE_MSG (0x29B)
+0x8000D940 = "n_alSynAddPlayer"    # client->next = n_syn->head; n_syn->head = client (osSetIntMask around it)
+0x80004A80 = "sound_init"          # called from sched_init; reaches n_alSynAddPlayer via func_80006B3C
+0x8000A280 = "audio_globals_init"  # (globals 0x8005E7C8, config): sets alGlobals/n_syn, builds the synth
+0x8000AFA0 = "audio_wait_retrace"  # audio thread: recv on its scheduler client queue until a msg of type 1
+
+# Controllers and Controller Pak (the only save medium: no EEPROM/SRAM code is linked).
+0x80000780 = "cont_init"           # osContInit, osContStartQuery, osMotorInit, osPfsInitPak, osPfsFindFile
+0x80000490 = "cont_poll"           # osContStartReadData / osContGetReadData each frame, rumble
+0x80003D08 = "pak_delete_file"     # -> osPfsDeleteFile
+0x80003E04 = "pak_create_write"    # -> osPfsAllocateFile + osPfsReadWriteFile
+0x80003F0C = "pak_read_write_a"    # -> osPfsReadWriteFile
+0x80003FCC = "pak_read_write_b"    # -> osPfsReadWriteFile
+0x8000412C = "pak_init"            # -> osPfsInitPak
+0x800041C8 = "pak_num_files"       # -> osPfsNumFiles
+0x80004250 = "pak_probe"           # osContStartQuery, osMotorInit, osPfsInitPak, osPfsFindFile
+0x800043C8 = "pak_find_file"       # -> osPfsFindFile
+0x8000443C = "pak_free_blocks"     # -> osPfsFreeBlocks
+0x800044B4 = "pak_file_state"      # -> osPfsFileState
+
+# Audio and graphics task plumbing.
+0x8000B0E0 = "audio_init"          # creates the audio thread, osAiSetFrequency
+0x8000B218 = "audio_thread"        # audio thread entry (id 3): waits for retrace, builds the n_aspMain task, osAiSetNextBuffer
+0x80006560 = "gfx_swap"            # osViBlack / osViSwapBuffer
+0x80006698 = "rsp_task_start"      # osSpTaskLoad + osSpTaskStartGo
+
+# Thread control, routed to src/game/threads.cpp instead of the runtime (see the comment there).
+0x8001E8A0 = "blitz_osStopThread"
+0x8001E780 = "blitz_osStartThread"
+0x8001E6B0 = "blitz_osSetThreadPri"
+0x8001E9A0 = "blitz_osYieldThread"
+0x80024C10 = "blitz_osDestroyThread"
+
+# Controller Pak (see src/game/controller_pak.cpp). The game's own libultra file system is recompiled
+# from the ROM (renamed pfs_* so N64Recomp doesn't route it to the runtime's stubs); only the hardware
+# layer below it is replaced in C++ (blitz_*). The SI access-queue helpers above are recompiled too.
+0x8001FCA0 = "pfs_osPfsChecker"
+0x800203C0 = "pfs_osPfsAllocateFile"
+0x800207F0 = "pfs_osPfsDeleteFile"
+0x80020A10 = "pfs_osPfsReadWriteFile"
+0x80020E50 = "pfs_osPfsFileState"
+0x80020FF0 = "pfs_osPfsFindFile"
+0x800211B0 = "pfs_osPfsFreeBlocks"
+0x800212C0 = "pfs_osPfsNumFiles"
+0x800213C0 = "pfs_osPfsInitPak"
+0x800215B8 = "pfs__osPfsCheckRamArea"
+0x80021690 = "pfs_osPfsRepairId"
+0x80021900 = "pfs__osPfsSelectBank"
+0x800219E8 = "pfs__osRepairPackId"
+0x80021CD4 = "pfs__osCheckPackId"
+0x80021E38 = "pfs__osGetId"
+0x80022004 = "pfs__osCheckId"
+0x800220BC = "pfs__osPfsRWInode"
+0x80020100 = "pfs_corrupted_init"   # osPfsChecker helper
+0x80020258 = "pfs_corrupted"   # osPfsChecker helper
+0x80022400 = "blitz_ContRamRead"      # __osContRamRead: 32-byte pak block read
+0x800225F0 = "blitz_ContRamWrite"     # __osContRamWrite
+0x800216F0 = "blitz_PfsGetStatus"     # __osPfsGetStatus
+0x8001FA54 = "blitz_osMotorInit"      # osMotorInit: PFS_ERR_DEVICE when a Controller Pak is inserted
+0x80017B80 = "blitz_osAiGetLength"    # AI FIFO model over the host queue (src/game/ai.cpp)
+0x80017B90 = "blitz_osAiGetStatus"    # reports FIFO full, which paces the audio thread
+
+# Named so the runtime list matches (N64Recomp calls it __createSpeedParam; the signature DB drops the __).
+0x80022AA8 = "__createSpeedParam"
+
+# libultra exception handling (hand-written asm, no signatures). osInitialize copies the 0x10 bytes at
+# 0x80022B60 to each exception vector; its lui/addiu/jr $k0 targets 0x80022B70.
+0x80022B60 = "__osExceptionPreamble"
+0x80022B70 = "__osException"
+0x800230EC = "send_mesg"             # indexes __osEventStateTab (0x8005E958), returns via jr $s2
+0x800231A8 = "handle_CpU"            # right after send_mesg's jr $s2: tests Cause CE == 1
+
+# Identical masked code under two names; settled by callers and the registers/globals they touch.
+0x800179E0 = "__osPiCreateAccessQueue"  # PI trio sits next to osPiStartDma
+0x80017A34 = "__osPiGetAccess"
+0x80017AA0 = "__osPiRelAccess"
+0x8001E4D0 = "pfs__osSiCreateAccessQueue"  # osContStartReadData calls 0x8001E524 / 0x8001E590
+0x8001E524 = "pfs__osSiGetAccess"
+0x8001E590 = "pfs__osSiRelAccess"
+0x80024980 = "__osSpDeviceBusy"         # reads SP_STATUS 0xA4040010
+0x80025E70 = "__osSiDeviceBusy"         # reads SI_STATUS 0xA4800018
+0x8001EEE0 = "osViGetCurrentFramebuffer"  # reads __osViCurr (0x8002CEF0)
+0x8001EF20 = "osViGetNextFramebuffer"     # reads __osViNext (0x8002CEF4)
+0x8001BD7C = "__osContGetInitData"      # called by osContInit / osContGetQuery
+0x800250E0 = "__osPfsGetInitData"       # called by osPfsIsPlug
+
+# Audio: the game links both n_audio (0x8000B000-0x8000E400) and the classic audio library
+# (0x80018000-0x8001B800). Their static helpers share names; the n_audio copies get an n_ prefix.
+0x8000C1FC = "n_pullSubFrame"
+0x8000C41C = "n_getRate"
+0x8000C55C = "n_getVol"
+0x8000CB84 = "n_decodeChunk"
+0x8000E2D8 = "n_allocParam"
+0x8000E304 = "n_freeParam"
+0x8001917C = "alAuxBusParam"
+0x80019FC0 = "alMainBusParam"           # same masked code as alAuxBusParam; libultra link order puts mainbus after auxbus
+
+# Graphics frame (M4): the frame builder, camera and the one 2D sprite path.
+0x80005F00 = "gfx_swaps_off"            # clears the swap-enable flag 0x8002B0B0 (n64sym's "myfree" match was a coincidence)
+0x80005F0C = "gfx_swaps_on"             # sets 0x8002B0B0 = 1
+0x8000F17C = "gfx_set_color_clear"      # stores a0 to 0x8002B684; gfx_build_frame fills the colour buffer when non-zero
+0x8000F188 = "gfx_get_color_clear"
+0x8000F218 = "gfx_build_frame"          # builds each frame's display list (segment 0, init DLs, z clear, camera, sprites)
+0x8000F990 = "gfx_load_camera"          # only caller of guPerspective (0x8000FA20) and guLookAt (0x8000FA80); emits PROJ LOAD+MUL
+0x80013370 = "sprite_draw"              # one 2D sprite; only caller of sprite_texrect
+0x80013DC4 = "sprites_draw_fg"          # foreground sprite lists 0x802A9C20/24 (HUD, after 3D); sets the full-screen scissor
+0x80013F90 = "sprites_draw_bg"          # background sprite list 0x802AA0D0 (before 3D)
+0x80015EB0 = "sprite_texrect"           # the only code that emits G_TEXRECT
+
+[main]
+# Process system (see NOTES "Process system"): the game thread dispatches processes, each with
+# an OSThread at +0x30; 0x802A9B80 = process list head, 0x802A9B88 = current process.
+0x80273D48 = "process_dispatcher"   # game thread entry
+0x80273CCC = "process_sleep"        # current->flags |= a0; osStopThread(self)
+0x80274E0C = "process_kill"         # (proc, ...): osDestroyThread unless it is the running thread
+0x8027B950 = "rand_mod"            # rand() % n; called from hundreds of sites
+# Writes a 33-step brightness ramp to 0xA8000228 (cartridge domain 2: nothing there on N64, so
+# hardware ignores it; likely arcade leftover). Reached through a fade callback pointer.
+# HAZARD for the recompile: must be patched to skip the store (see NOTES "Recompile hazards").
+0x8027B9C0 = "fade_tick_a8000228"
+0x8027BBA0 = "fade_set_a8000228"   # same store; called from ovl_b
+0x80262670 = "load_overlay_b"      # ROM 0xDE350-0x129A90 -> 0x802EFE70 (one of three call sites for B)
+0x802627B8 = "load_overlay_a"      # ROM 0x93EC0-0xDE350  -> 0x802EFE70
+0x802628F8 = "load_overlay_c"      # ROM 0x129A90-0x12E860 -> 0x802EFE70
+0x80262A08 = "load_overlay_b_2"
+0x80262B84 = "load_overlay_b_3"

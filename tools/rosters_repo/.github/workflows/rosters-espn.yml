@@ -1,0 +1,48 @@
+# The backup: the original roster job on ESPN's unofficial API (tag espn-flow), run by hand only. The daily job is
+# rosters.yml (open data). This writes the same files the same way, so the two can be swapped any day.
+name: Rosters (ESPN backup)
+on:
+  workflow_dispatch:
+    inputs:
+      week:
+        description: "Regular-season week number (blank: ESPN's current week)"
+        required: false
+permissions:
+  contents: write
+concurrency: rosters
+jobs:
+  week:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1, pinned to its commit
+      - name: Checkpoint
+        run: python3 tools/roster_season.py week --dir . --source espn ${{ inputs.week && format('--week {0}', inputs.week) || '' }}
+      - name: Publish
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add players.json lineups psp manifest.json
+          if git diff --cached --quiet; then echo "No changes."; exit 0; fi
+          latest=$(python3 -c 'import json; print(json.load(open("manifest.json"))["latest"])')
+          git commit -q -m "Rosters: $latest ($(date -u +%F\ %H:%MZ), ESPN)" && git push
+      - name: Upload to the post office
+        env:
+          URL: ${{ vars.HUB_UPLOAD_URL }}
+          SECRET: ${{ secrets.HUB_UPLOAD_SECRET }}
+        # Every device follows the post office (tools/rosters_hub_worker): the files, the manifest last, so a device
+        # never reads a manifest naming files that haven't arrived. psp/pack.txt is the PSP's copy (docs/PSP_PORT.md §6).
+        run: |
+          [ -n "$URL" ] || { echo "no HUB_UPLOAD_URL: skipped"; exit 0; }
+          # A refused PSP pack must not hold back everyone else's rosters: it's a warning, the PSP keeps its saved pack
+          # (its SHA-1 check fails on the old one). Any other file stops the step before the manifest.
+          for f in players.json lineups/*.json psp/*.txt manifest.json; do
+            [ -f "$f" ] || continue
+            if ! curl -fsS --retry 3 -X PUT -H "Authorization: Bearer $SECRET" --data-binary "@$f" "$URL/$f" > /dev/null; then
+              case "$f" in
+                psp/*) echo "::warning::$f wasn't taken by the post office: the PSP keeps its saved rosters"; continue ;;
+              esac
+              exit 1
+            fi
+            echo "uploaded $f"
+          done

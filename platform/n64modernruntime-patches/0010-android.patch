@@ -1,0 +1,20 @@
+diff --git a/ultramodern/include/ultramodern/renderer_context.hpp b/ultramodern/include/ultramodern/renderer_context.hpp
+index 3402606..fdc562b 100644
+--- a/ultramodern/include/ultramodern/renderer_context.hpp
++++ b/ultramodern/include/ultramodern/renderer_context.hpp
+@@ -60,7 +60,14 @@ namespace ultramodern {
+             void* display = nullptr;
+             auto operator<=>(const WindowHandle&) const = default;
+         };
+-#elif defined(__linux__) || defined(__ANDROID__)
++#elif defined(__ANDROID__)
++        // BlitzRecomp: the ANativeWindow of SDL's surface (Plume's Android RenderWindow); SDL keeps the window for
++        // events. Android replaces it when the app comes back from the background.
++        struct WindowHandle {
++            ANativeWindow* window = nullptr;
++            auto operator<=>(const WindowHandle&) const = default;
++        };
++#elif defined(__linux__)
+         using WindowHandle = SDL_Window*;
+ #elif defined(__APPLE__)
+         struct WindowHandle {

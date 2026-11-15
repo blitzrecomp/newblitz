@@ -1,0 +1,46 @@
+--- a/librecomp/src/pi.cpp
++++ b/librecomp/src/pi.cpp
+@@ -227,7 +227,8 @@
+     std::filesystem::path save_file_path = ultramodern::get_save_file_path();
+ 
+     // Ensure the save file directory exists.
+-    std::filesystem::create_directories(save_file_path.parent_path());
++    std::error_code ec;  // BlitzRecomp: non-throwing (a refusal on a console ended the app)
++    std::filesystem::create_directories(save_file_path.parent_path(), ec);
+ 
+     // Read the save file if it exists.
+     std::ifstream save_file = recomp::open_input_file_with_backup(save_file_path, std::ios_base::binary);
+--- a/librecomp/src/recomp.cpp
++++ b/librecomp/src/recomp.cpp
+@@ -94,8 +94,9 @@
+ 
+ void recomp::mods::initialize_mods() {
+     N64Recomp::live_recompiler_init();
+-    std::filesystem::create_directories(config_path / mods_directory);
+-    std::filesystem::create_directories(config_path / mod_config_directory);
++    std::error_code ec;  // BlitzRecomp: non-throwing (a refusal on a console ended the app)
++    std::filesystem::create_directories(config_path / mods_directory, ec);
++    std::filesystem::create_directories(config_path / mod_config_directory, ec);
+     mod_context->set_mods_config_path(config_path / "mods.json");
+     mod_context->set_mod_config_directory(config_path / mod_config_directory);
+ }
+@@ -228,7 +229,8 @@
+ 
+     if (!rom_matches(game_entry, stored_rom_data)) {
+         // Incorrect hash, remove the stored ROM file if it exists.
+-        std::filesystem::remove(config_path / game_entry.stored_filename());
++        std::error_code ec;
++        std::filesystem::remove(config_path / game_entry.stored_filename(), ec);
+         return false;
+     }
+ 
+@@ -260,7 +262,8 @@
+ 
+     if (!rom_matches(find_it->second, stored_rom_data)) {
+         // The ROM no longer has the right hash, delete it.
+-        std::filesystem::remove(config_path / find_it->second.stored_filename());
++        std::error_code ec;
++        std::filesystem::remove(config_path / find_it->second.stored_filename(), ec);
+         return false;
+     }
+ 

@@ -1,0 +1,166 @@
+diff --git a/include/recomp.h b/include/recomp.h
+--- a/include/recomp.h
++++ b/include/recomp.h
+@@ -33,8 +33,93 @@
+     #define SET_FENV_ACCESS()
+ #else
+     #error "No RECOMP_FUNC definition for this compiler"
++#endif
++
++// BlitzRecomp: 32-bit registers (the PSP port, docs/PSP_PORT.md section 3). With RECOMP_GPR32 defined, a gpr is
++// the low 32 bits of the MIPS register rather than its 64-bit sign extension. The game uses no 64-bit integer
++// instruction (tools/psp/gpr32.py fails the build if one appears), so every register's upper half is a copy of
++// bit 31 and 32 bits carry the same information. RECOMP_GPR32 changes recomp_context's layout, so it must be
++// defined for every translation unit. Without it this header is the stock one.
++#if defined(RECOMP_GPR32)
++
++typedef uint32_t gpr;
++
++#define SIGNED(val) \
++    ((int32_t)(val))
++
++#define ADD32(a, b) \
++    ((gpr)(int32_t)((a) + (b)))
++
++#define SUB32(a, b) \
++    ((gpr)(int32_t)((a) - (b)))
++
++// A guest address to an offset into rdram. RECOMP_RDRAM_MASK (the PSP: 8 MB of RDRAM, a power of two) folds
++// KSEG0, KSEG1 and physical addresses onto RDRAM, so no access can land outside it. Without the mask the offset
++// is the 64-bit build's own, for every 32-bit address (validation on a 64-bit host).
++#ifndef RDRAM_OFF
++#  ifdef RECOMP_RDRAM_MASK
++#    define RDRAM_OFF(addr) ((uint32_t)(addr) & 0x007FFFFFu)
++#  else
++#    define RDRAM_OFF(addr) ((uint32_t)(addr) - 0x80000000u)
++#  endif
++#endif
++
++#define MEM_W(offset, reg) \
++    (*(int32_t*)(rdram + RDRAM_OFF((reg) + (offset))))
++
++#define MEM_H(offset, reg) \
++    (*(int16_t*)(rdram + RDRAM_OFF(((reg) + (offset)) ^ 2)))
++
++#define MEM_B(offset, reg) \
++    (*(int8_t*)(rdram + RDRAM_OFF(((reg) + (offset)) ^ 3)))
++
++#define MEM_HU(offset, reg) \
++    (*(uint16_t*)(rdram + RDRAM_OFF(((reg) + (offset)) ^ 2)))
++
++#define MEM_BU(offset, reg) \
++    (*(uint8_t*)(rdram + RDRAM_OFF(((reg) + (offset)) ^ 3)))
++
++// sdc1 is the only doubleword store left (an fpr's 64 bits). The stock macro's (gpr)(val) >> 32 would drop the
++// high word with a 32-bit gpr.
++#define SD(val, offset, reg) { \
++    *(uint32_t*)(rdram + RDRAM_OFF((reg) + (offset) + 4)) = (uint32_t)((uint64_t)(val) >> 0); \
++    *(uint32_t*)(rdram + RDRAM_OFF((reg) + (offset) + 0)) = (uint32_t)((uint64_t)(val) >> 32); \
++}
++
++// MIPS div (VR4300 results): x / 0 gives lo = x < 0 ? 1 : -1, hi = x; INT_MIN / -1 gives lo = INT_MIN, hi = 0.
++// gpr32.py rewrites the generator's 64-bit division into this, so a 32-bit host divides in one instruction
++// and never meets C's undefined cases.
++#define DIV32(a, b, lo_out, hi_out) do { \
++    int32_t _a = (int32_t)(a), _b = (int32_t)(b); \
++    if (_b == 0)       { *(lo_out) = (_a < 0) ? 1u : 0xFFFFFFFFu; *(hi_out) = (uint32_t)_a; } \
++    else if (_b == -1) { *(lo_out) = 0u - (uint32_t)_a; *(hi_out) = 0u; } \
++    else               { *(lo_out) = (uint32_t)(_a / _b); *(hi_out) = (uint32_t)(_a % _b); } \
++} while (0)
++
++// Restrict on the recompiled functions' rdram and ctx (gpr32.py adds it to each signature). Empty until the
++// inline hooks that reach memory without rdram or ctx are audited.
++#ifndef RECOMP_RESTRICT
++#  define RECOMP_RESTRICT
+ #endif
+ 
++// 64-bit integer operations: the game has none. If one is ever generated it stops the game with a message
++// (the runtime defines recomp_unsupported_64bit) rather than computing a wrong value.
++#ifdef __cplusplus
++extern "C"
++#endif
++void recomp_unsupported_64bit(const char* op)
++#if defined(__GNUC__) || defined(__clang__)
++    __attribute__((noreturn, cold))
++#endif
++    ;
++
++#define DMULT(a, b, lo64, hi64)    recomp_unsupported_64bit("dmult")
++#define DMULTU(a, b, lo64, hi64)   recomp_unsupported_64bit("dmultu")
++#define DDIV(a, b, quot, rem)      recomp_unsupported_64bit("ddiv")
++#define DDIVU(a, b, quot, rem)     recomp_unsupported_64bit("ddivu")
++
++#else // !RECOMP_GPR32: the stock 64-bit registers
++
+ // Implementation of 64-bit multiply and divide instructions
+ #if defined(__SIZEOF_INT128__)
+ 
+@@ -67,7 +152,24 @@
+ }
+ 
+ #else
+-#error "128-bit integer type not found"
++// BlitzRecomp: no 128-bit type (a 32-bit compiler such as psp-gcc): 64x64 -> 128 by 32-bit halves.
++static inline void DMULTU(uint64_t a, uint64_t b, uint64_t* lo64, uint64_t* hi64) {
++    uint64_t al = (uint32_t)a, ah = a >> 32, bl = (uint32_t)b, bh = b >> 32;
++    uint64_t p0 = al * bl, p1 = al * bh, p2 = ah * bl, p3 = ah * bh;
++    uint64_t mid = (p0 >> 32) + (uint32_t)p1 + (uint32_t)p2;
++    *lo64 = (mid << 32) | (uint32_t)p0;
++    *hi64 = p3 + (p1 >> 32) + (p2 >> 32) + (mid >> 32);
++}
++
++static inline void DMULT(int64_t a, int64_t b, int64_t* lo64, int64_t* hi64) {
++    // The signed product's high half is the unsigned one less b for a negative a and a for a negative b.
++    uint64_t lo, hi;
++    DMULTU((uint64_t)a, (uint64_t)b, &lo, &hi);
++    if (a < 0) hi -= (uint64_t)b;
++    if (b < 0) hi -= (uint64_t)a;
++    *lo64 = (int64_t)lo;
++    *hi64 = (int64_t)hi;
++}
+ #endif
+ 
+ static inline void DDIV(int64_t a, int64_t b, int64_t* quot, int64_t* rem) {
+@@ -112,6 +214,8 @@
+     *(uint32_t*)(rdram + ((((reg) + (offset) + 0)) - 0xFFFFFFFF80000000)) = (uint32_t)((gpr)(val) >> 32); \
+ }
+ 
++#endif // RECOMP_GPR32
++
+ static inline uint64_t load_doubleword(uint8_t* rdram, gpr reg, gpr offset) {
+     uint64_t ret = 0;
+     uint64_t lo = (uint64_t)(uint32_t)MEM_W(reg, offset + 4);
+@@ -187,6 +291,13 @@
+     MEM_W(0, word_address) = masked_initial_value | shifted_input_value;
+ }
+ 
++#if defined(RECOMP_GPR32)
++// BlitzRecomp: ldl, ldr, sdl and sdr move a 64-bit gpr; with 32-bit registers they are unsupported.
++#define do_ldl(rdram, initial_value, offset, reg) (recomp_unsupported_64bit("ldl"), (gpr)0)
++#define do_ldr(rdram, initial_value, offset, reg) (recomp_unsupported_64bit("ldr"), (gpr)0)
++#define do_sdl(rdram, offset, reg, val) recomp_unsupported_64bit("sdl")
++#define do_sdr(rdram, offset, reg, val) recomp_unsupported_64bit("sdr")
++#else
+ static inline gpr do_ldl(uint8_t* rdram, gpr initial_value, gpr offset, gpr reg) {
+     // Calculate the overall address
+     gpr address = (offset + reg);
+@@ -260,6 +371,7 @@
+     MEM_W(0, dword_address + 4) = lo;
+     MEM_W(0, dword_address + 0) = hi;
+ }
++#endif // RECOMP_GPR32
+ 
+ static inline uint32_t get_cop1_cs() {
+     uint32_t rounding_mode = 0;
+@@ -420,7 +532,11 @@
+         f8,  f9,  f10, f11, f12, f13, f14, f15,
+         f16, f17, f18, f19, f20, f21, f22, f23,
+         f24, f25, f26, f27, f28, f29, f30, f31;
++#if defined(RECOMP_GPR32)
++    uint32_t hi, lo;
++#else
+     uint64_t hi, lo;
++#endif
+     uint32_t* f_odd;
+     uint32_t status_reg;
+     uint8_t mips3_float_mode;

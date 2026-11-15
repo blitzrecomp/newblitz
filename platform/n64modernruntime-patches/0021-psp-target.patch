@@ -1,0 +1,267 @@
+diff --git a/ultramodern/include/ultramodern/renderer_context.hpp b/ultramodern/include/ultramodern/renderer_context.hpp
+--- a/ultramodern/include/ultramodern/renderer_context.hpp
++++ b/ultramodern/include/ultramodern/renderer_context.hpp
+@@ -60,6 +60,12 @@
+             void* display = nullptr;
+             auto operator<=>(const WindowHandle&) const = default;
+         };
++#elif defined(__PSP__)
++        // BlitzRecomp (PSP, docs/PSP_PORT.md §4.5): no window; the renderer owns the display (sceDisplay / sceGu).
++        struct WindowHandle {
++            void* display = nullptr;
++            auto operator<=>(const WindowHandle&) const = default;
++        };
+ #elif defined(__ANDROID__)
+         // BlitzRecomp: the ANativeWindow of SDL's surface (Plume's Android RenderWindow); SDL keeps the window for
+         // events. Android replaces it when the app comes back from the background.
+diff --git a/ultramodern/src/error_handling.cpp b/ultramodern/src/error_handling.cpp
+--- a/ultramodern/src/error_handling.cpp
++++ b/ultramodern/src/error_handling.cpp
+@@ -18,11 +18,19 @@
+     }
+ }
+ 
++#if defined(__PSP__)
++extern "C" [[noreturn]] void blitz_psp_fatal_exit(int status);  // BlitzRecomp: the PSP layer (src/psp/psp_main.cpp)
++#endif
++
+ void ultramodern::error_handling::quick_exit(const char* filename, int line, const char *func, int exit_status) {
+     fprintf(stderr, "Exiting with exit status '%i'. Function %s, at file %s:%i\n", exit_status, func, filename, line);
+ 
+ #ifdef __APPLE__
+     std::_Exit(exit_status);
++#elif defined(__PSP__)
++    // BlitzRecomp (PSP): no quick_exit in newlib. The platform flushes its log (keeping the run's marker, so the next
++    // launch reports this run as dead) and leaves through the kernel.
++    blitz_psp_fatal_exit(exit_status);
+ #else
+     std::quick_exit(exit_status);
+ #endif
+diff --git a/ultramodern/src/threads.cpp b/ultramodern/src/threads.cpp
+--- a/ultramodern/src/threads.cpp
++++ b/ultramodern/src/threads.cpp
+@@ -147,6 +147,12 @@
+ #elif defined(__PROSPERO__)
+ // PS5 homebrew (BlitzRecomp): names and priorities stay the system's.
+ void ultramodern::set_native_thread_name(const std::string& name) { (void)name; }
++void ultramodern::set_native_thread_priority(ThreadPriority pri) { (void)pri; }
++#elif defined(__PSP__)
++// BlitzRecomp (PSP): a kernel thread's name is fixed when it is made, and its priority comes from host_thread's
++// attributes (docs/PSP_PORT.md §4.1). The platform keeps the name for its thread report.
++extern "C" void blitz_psp_thread_name(const char* name);
++void ultramodern::set_native_thread_name(const std::string& name) { blitz_psp_thread_name(name.c_str()); }
+ void ultramodern::set_native_thread_priority(ThreadPriority pri) { (void)pri; }
+ #endif
+ 
+diff --git a/librecomp/include/librecomp/mods.hpp b/librecomp/include/librecomp/mods.hpp
+--- a/librecomp/include/librecomp/mods.hpp
++++ b/librecomp/include/librecomp/mods.hpp
+@@ -50,12 +50,17 @@
+ struct std::hash<recomp::mods::HookDefinition>
+ {
+     std::size_t operator()(const recomp::mods::HookDefinition& def) const {
++#if defined(__PSP__)
++        // BlitzRecomp (PSP: a 32-bit size_t; no mods are built there, the type is only declared).
++        return size_t(def.section_rom) * 0x9E3779B1u ^ size_t(def.function_vram) ^ size_t(def.at_return ? 1 : 0);
++#else
+         // This hash packing only works if the resulting value is 64 bits.
+         static_assert(sizeof(std::size_t) == 8);
+         // Combine the three values into a single 64-bit value.
+         // The lower 2 bits of a function address will always be zero, so pack
+         // the value of at_return into the lowest bit.
+         return (size_t(def.section_rom) << 32) | size_t(def.function_vram) | size_t(def.at_return ? 1 : 0);
++#endif
+     }
+ };
+ 
+diff --git a/librecomp/src/files.cpp b/librecomp/src/files.cpp
+--- a/librecomp/src/files.cpp
++++ b/librecomp/src/files.cpp
+@@ -36,12 +36,20 @@
+     temp_path += temp_suffix;
+ 
+     std::error_code ec;
++#if defined(__PSP__)
++    // BlitzRecomp (PSP): stat has no inode numbers there, so libstdc++'s copy_file takes any existing target for the source
++    // itself and refuses to overwrite it (EEXIST). Remove each target first; the .bak covers the moment the file is gone.
++    std::filesystem::remove(backup_path, ec);
++#endif
+     if (std::filesystem::exists(filepath, ec)) {
+         std::filesystem::copy_file(filepath, backup_path, std::filesystem::copy_options::overwrite_existing, ec);
+         if (ec) {
+             return false;
+         }
+     }
++#if defined(__PSP__)
++    std::filesystem::remove(filepath, ec);
++#endif
+     std::filesystem::copy_file(temp_path, filepath, std::filesystem::copy_options::overwrite_existing, ec);
+     if (ec) {
+         return false;
+diff --git a/librecomp/src/pi.cpp b/librecomp/src/pi.cpp
+--- a/librecomp/src/pi.cpp
++++ b/librecomp/src/pi.cpp
+@@ -12,7 +12,7 @@
+ #include <ultramodern/ultra64.h>
+ #include <ultramodern/ultramodern.hpp>
+ 
+-#if !defined(_WIN32) && !defined(__PROSPERO__)
++#if !defined(_WIN32) && !defined(__PROSPERO__) && !defined(__PSP__)  // BlitzRecomp: the PSP has no mmap (rom_provider, game.hpp)
+ #    define RECOMP_ROM_MAP 1
+ #    include <algorithm>
+ #    include <cerrno>
+diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
+--- a/librecomp/src/recomp.cpp
++++ b/librecomp/src/recomp.cpp
+@@ -33,7 +33,7 @@
+ #ifdef _WIN32
+ #    define WIN32_LEAN_AND_MEAN
+ #    include <Windows.h>
+-#else
++#elif !defined(__PSP__)  // BlitzRecomp: the PSP has no mmap (its RDRAM is RECOMP_SMALL_RDRAM's platform block)
+ #    include <sys/mman.h>
+ #endif
+ #ifdef __PROSPERO__
+@@ -565,6 +565,12 @@
+ std::string current_game_mode_id;
+ std::optional<std::u8string> current_game = std::nullopt;
+ std::atomic<GameStatus> game_status = GameStatus::None;
++#if defined(ULTRAMODERN_HOST_SEM_PLATFORM)
++// BlitzRecomp (PSP, docs/PSP_PORT.md §14.10 open problem 7): std::atomic::wait/notify_all fall back to a condition variable
++// in a libstdc++ without futexes (psp-gcc's), and the PSP probe found that one loses notifies. Every change of
++// game_status signals this semaphore instead, and the game start thread waits on it.
++ultramodern::host_sem game_status_changed;
++#endif
+ 
+ void run_thread_function(uint8_t* rdram, uint64_t addr, uint64_t sp, uint64_t arg) {
+     // ultramodern::quit() clears current_game while the game may still be starting threads (Blitz
+@@ -649,7 +655,11 @@
+     current_game_mode_id = game_mode_id;
+     current_game = game_id;
+     game_status.store(GameStatus::Running);
++#if defined(ULTRAMODERN_HOST_SEM_PLATFORM)
++    game_status_changed.signal();
++#else
+     game_status.notify_all();
++#endif
+ #if !defined(RECOMP_NO_MODS)
+     mods::set_latest_game_mode_id(game_mode_id);
+ #endif
+@@ -666,7 +676,11 @@
+     exited.store(true);
+     GameStatus desired = GameStatus::None;
+     game_status.compare_exchange_strong(desired, GameStatus::Quit);
++#if defined(ULTRAMODERN_HOST_SEM_PLATFORM)
++    game_status_changed.signal();
++#else
+     game_status.notify_all();
++#endif
+     std::lock_guard<std::mutex> lock(current_game_mutex);
+     current_game.reset();
+ }
+@@ -812,7 +826,13 @@
+ #endif
+ 
+ bool wait_for_game_started(uint8_t* rdram, recomp_context* context) {
++#if defined(ULTRAMODERN_HOST_SEM_PLATFORM)
++    while (game_status.load() == GameStatus::None) {
++        game_status_changed.wait();
++    }
++#else
+     game_status.wait(GameStatus::None);
++#endif
+ 
+     switch (game_status.load()) {
+         // TODO refactor this to allow a project to specify what entrypoint function to run for a give game.
+diff --git a/librecomp/src/rsp.cpp b/librecomp/src/rsp.cpp
+--- a/librecomp/src/rsp.cpp
++++ b/librecomp/src/rsp.cpp
+@@ -25,9 +25,20 @@
+ 
+     for (u16 index = 0; index < 512; index++) {
+         u64 a = (index + 512) >> ((index % 2 == 1) ? 1 : 0);
++#if defined(__PSP__)
++        // BlitzRecomp (PSP): the same b by binary search (the test is monotonic in b). The loop below is about 28 million
++        // 64-bit multiplies, 1.9 s of the boot on a 32-bit CPU; the results are identical for every index (checked).
++        u64 lo = u64(1) << 17, hi = u64(1) << 19;
++        while (lo < hi) {
++            u64 mid = (lo + hi) / 2;
++            if (a * (mid + 1) * (mid + 1) < (u64(1) << 44)) lo = mid + 1; else hi = mid;
++        }
++        u64 b = lo;
++#else
+         u64 b = 1 << 17;
+         //find the largest b where b < 1.0 / sqrt(a)
+         while (a * (b + 1) * (b + 1) < (u64(1) << 44)) b++;
++#endif
+         rspInverseSquareRoots[index] = u16(b >> 1);
+     }
+ }
+diff --git a/thirdparty/concurrentqueue/lightweightsemaphore.h b/thirdparty/concurrentqueue/lightweightsemaphore.h
+--- a/thirdparty/concurrentqueue/lightweightsemaphore.h
++++ b/thirdparty/concurrentqueue/lightweightsemaphore.h
+@@ -24,6 +24,10 @@
+ }
+ #elif defined(__MACH__)
+ #include <mach/mach.h>
++#elif defined(__PSP__)
++// BlitzRecomp (PSP): kernel semaphores (docs/PSP_PORT.md §4.1); newlib's POSIX layer there is not used.
++#include <pspkerneltypes.h>
++#include <pspthreadman.h>
+ #elif defined(__unix__)
+ #include <semaphore.h>
+ 
+@@ -163,7 +167,53 @@
+ 		{
+ 			while (semaphore_signal(m_sema) != KERN_SUCCESS);
+ 		}
++	}
++};
++#elif defined(__PSP__)
++//---------------------------------------------------------
++// Semaphore (PSP kernel; BlitzRecomp)
++//---------------------------------------------------------
++class Semaphore
++{
++private:
++	SceUID m_sema;
++
++	Semaphore(const Semaphore& other) MOODYCAMEL_DELETE_FUNCTION;
++	Semaphore& operator=(const Semaphore& other) MOODYCAMEL_DELETE_FUNCTION;
++
++public:
++	Semaphore(int initialCount = 0)
++	{
++		assert(initialCount >= 0);
++		m_sema = sceKernelCreateSema("moodycamel", 0, initialCount, 0x7fffffff, nullptr);
++		assert(m_sema >= 0);
++	}
++
++	~Semaphore()
++	{
++		sceKernelDeleteSema(m_sema);
++	}
++
++	bool wait()
++	{
++		return sceKernelWaitSema(m_sema, 1, nullptr) >= 0;
++	}
++
++	bool try_wait()
++	{
++		return sceKernelPollSema(m_sema, 1) >= 0;
+ 	}
++
++	bool timed_wait(std::uint64_t usecs)
++	{
++		SceUInt t = usecs > 0x7fffffffu ? 0x7fffffffu : (SceUInt)usecs;
++		return sceKernelWaitSema(m_sema, 1, &t) >= 0;
++	}
++
++	void signal(int count = 1)
++	{
++		if (count > 0) sceKernelSignalSema(m_sema, count);
++	}
+ };
+ #elif defined(__unix__)
+ //---------------------------------------------------------

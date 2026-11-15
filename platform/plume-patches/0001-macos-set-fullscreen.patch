@@ -1,0 +1,41 @@
+diff --git a/plume_apple.h b/plume_apple.h
+index 731d3c4..63bc3f2 100644
+--- a/plume_apple.h
++++ b/plume_apple.h
+@@ -39,5 +39,9 @@ namespace plume {
+ 
+         // Toggle fullscreen
+         void toggleFullscreen();
++
++        // Enter or leave fullscreen; nothing when the window is already in that state (checked on the
++        // main thread, so leaving fullscreen with the green button or Escape keeps it in step).
++        void setFullscreen(bool fullscreen);
+     };
+ }
+diff --git a/plume_apple.mm b/plume_apple.mm
+index 1384fe9..91b5406 100644
+--- a/plume_apple.mm
++++ b/plume_apple.mm
+@@ -164,6 +164,22 @@ namespace plume {
+         }
+     }
+ 
++    void CocoaWindow::setFullscreen(bool fullscreen) {
++        void *handle = windowHandle;
++        void (^apply)(void) = ^{
++            NSWindow *nsWindow = (__bridge NSWindow *)handle;
++            bool now = ([nsWindow styleMask] & NSWindowStyleMaskFullScreen) != 0;
++            if (now != fullscreen) {
++                [nsWindow toggleFullScreen:NULL];
++            }
++        };
++        if ([NSThread isMainThread]) {
++            apply();
++        } else {
++            dispatch_async(dispatch_get_main_queue(), apply);
++        }
++    }
++
+     void CocoaWindow::toggleFullscreen() {
+         if ([NSThread isMainThread]) {
+             NSWindow *nsWindow = (__bridge NSWindow *)windowHandle;

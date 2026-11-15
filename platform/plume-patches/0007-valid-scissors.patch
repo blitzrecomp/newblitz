@@ -1,0 +1,43 @@
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index 39136a3..898cf57 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -3314,13 +3314,28 @@ namespace plume {
+         }
+     }
+ 
++    // Vulkan forbids a negative scissor offset. Desktop drivers let it through; Adreno appears to draw nothing, which took
++    // RT64's left-anchored HUD (a clip widened past the 4:3 picture's edge) off the screen on a Retroid Pocket 5.
++    static VkRect2D validScissor(const RenderRect &rect) {
++        const int32_t left = std::max(rect.left, 0);
++        const int32_t top = std::max(rect.top, 0);
++        if ((left != rect.left) || (top != rect.top)) {
++            static bool logged = false;
++            if (!logged) {
++                logged = true;
++                fprintf(stderr, "[vulkan] negative scissor clamped: left %d, top %d, right %d, bottom %d\n", rect.left, rect.top, rect.right, rect.bottom);
++            }
++        }
++        return VkRect2D{ VkOffset2D{ left, top }, VkExtent2D{ uint32_t(std::max(rect.right - left, 0)), uint32_t(std::max(rect.bottom - top, 0)) } };
++    }
++
+     void VulkanCommandList::setScissors(const RenderRect *scissorRects, uint32_t count) {
+         if (count > 1) {
+             thread_local std::vector<VkRect2D> scissorVector;
+             scissorVector.clear();
+ 
+             for (uint32_t i = 0; i < count; i++) {
+-                scissorVector.emplace_back(VkRect2D{ VkOffset2D{ scissorRects[i].left, scissorRects[i].top }, VkExtent2D{ uint32_t(scissorRects[i].right - scissorRects[i].left), uint32_t(scissorRects[i].bottom - scissorRects[i].top) } });
++                scissorVector.emplace_back(validScissor(scissorRects[i]));
+             }
+ 
+             if (!scissorVector.empty()) {
+@@ -3329,7 +3344,7 @@ namespace plume {
+         }
+         else {
+             // Single element fast path.
+-            VkRect2D scissor = VkRect2D{ VkOffset2D{ scissorRects[0].left, scissorRects[0].top }, VkExtent2D{ uint32_t(scissorRects[0].right - scissorRects[0].left), uint32_t(scissorRects[0].bottom - scissorRects[0].top) } };
++            VkRect2D scissor = validScissor(scissorRects[0]);
+             vkCmdSetScissor(vk, 0, 1, &scissor);
+         }
+     }

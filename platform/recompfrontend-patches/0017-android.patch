@@ -1,0 +1,51 @@
+diff --git a/recompui/src/renderer/rt64_render_context.cpp b/recompui/src/renderer/rt64_render_context.cpp
+index a4ff441..d5c0cac 100644
+--- a/recompui/src/renderer/rt64_render_context.cpp
++++ b/recompui/src/renderer/rt64_render_context.cpp
+@@ -225,7 +225,9 @@ renderer::RT64Context::RT64Context(uint8_t* rdram, ultramodern::renderer::Window
+     RT64::Application::Core appCore{};
+ #if defined(_WIN32)
+     appCore.window = window_handle.window;
+-#elif defined(__linux__) || defined(__ANDROID__)
++#elif defined(__ANDROID__)
++    appCore.window = window_handle.window;  // BlitzRecomp: Plume's ANativeWindow*
++#elif defined(__linux__)
+     appCore.window = window_handle;
+ #elif defined(__APPLE__)
+     appCore.window.window = window_handle.window;
+diff --git a/recompui/src/util/file.cpp b/recompui/src/util/file.cpp
+index deb6a6b..849d7a3 100644
+--- a/recompui/src/util/file.cpp
++++ b/recompui/src/util/file.cpp
+@@ -1,7 +1,7 @@
+ #include "file.h"
+ 
+ #include <SDL.h>
+-#if !defined(BLITZ_IOS)
++#if !defined(BLITZ_IOS) && !defined(__ANDROID__)
+ #include "nfd.h"
+ #endif
+ #include "RmlUi/Core.h"
+@@ -22,7 +22,21 @@
+ #endif
+ 
+ namespace recompui {
+-#if defined(__PROSPERO__) || defined(BLITZ_IOS)
++#if defined(__ANDROID__)
++}
++// BlitzRecomp: Android's system file picker (the Storage Access Framework, src/main/platform_android.cpp). It blocks,
++// like the desktop dialogs; the picked files are copied into the app's cache, so the import reads them as local files.
++std::vector<std::filesystem::path> blitz_android_pick_files(bool multiple);
++namespace recompui {
++    static void perform_file_dialog_operation(const std::function<void(bool, const std::filesystem::path&)>& callback) {
++        std::vector<std::filesystem::path> paths = blitz_android_pick_files(false);
++        callback(!paths.empty(), paths.empty() ? std::filesystem::path{} : paths.front());
++    }
++    static void perform_file_dialog_operation_multiple(const std::function<void(bool, const std::list<std::filesystem::path>&)>& callback) {
++        std::vector<std::filesystem::path> paths = blitz_android_pick_files(true);
++        callback(!paths.empty(), std::list<std::filesystem::path>(paths.begin(), paths.end()));
++    }
++#elif defined(__PROSPERO__) || defined(BLITZ_IOS)
+     // PS5 homebrew (BlitzRecomp): no file dialog; files come from fixed folders (docs/PS5_HOMEBREW.md). iOS uses the
+     // system document picker instead (support_apple.mm), so these desktop dialogs aren't built there either.
+     static void perform_file_dialog_operation(const std::function<void(bool, const std::filesystem::path&)>& callback) {

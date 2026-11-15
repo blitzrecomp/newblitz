@@ -1,0 +1,49 @@
+diff --git a/src/render/rt64_texture_cache.cpp b/src/render/rt64_texture_cache.cpp
+index 36521db..0efccad 100644
+--- a/src/render/rt64_texture_cache.cpp
++++ b/src/render/rt64_texture_cache.cpp
+@@ -1,3 +1,4 @@
++#include <algorithm>
+ //
+ // RT64
+ //
+@@ -225,12 +226,20 @@ namespace RT64 {
+         // Check for free spaces on the LIFO queue first.
+         uint32_t textureIndex;
+         if (!freeSpaces.empty()) {
+-            textureIndex = freeSpaces.back();
++            // Potato Mode: the lowest slot, as Mali-G52 reads black or noise past 256.
++            static const bool lowSlots = getenv("BLITZ_LEAN") != nullptr;
++            if (lowSlots) {
++                auto lowest = std::min_element(freeSpaces.begin(), freeSpaces.end());
++                textureIndex = *lowest;
++                *lowest = freeSpaces.back();
++            }
++            else {
++                textureIndex = freeSpaces.back();
++            }
+             freeSpaces.pop_back();
+         }
+         else {
+             textureIndex = static_cast<uint32_t>(textures.size());
+-            statTextureSlots = textureIndex + 1;
+             textures.push_back(nullptr);
+             cachedTextureDimensions.emplace_back();
+             textureReplacements.push_back(nullptr);
+@@ -244,6 +253,7 @@ namespace RT64 {
+             listIterators.push_back(accessList.end());
+         }
+ 
++        statTextureSlots = textureIndex + 1;  // the slot most recently handed out: past 256 is the trouble
+         hashMap[hash] = textureIndex;
+         textures[textureIndex] = texture;
+         cachedTextureDimensions[textureIndex] = interop::float3(float(texture->width), float(texture->height), 1.0f);
+@@ -347,7 +357,7 @@ namespace RT64 {
+ 
+             // Mali-G52 can sample 256 textures per stage, and past that reads black, so a weak device keeps fewer around.
+             static const bool fewerTextures = getenv("BLITZ_LEAN") != nullptr;
+-            if (fewerTextures && (hashMap.size() > 180)) {
++            if (fewerTextures && (hashMap.size() > 120)) {
+                 maxAge = MinimumMaxAge;
+             }
+ 

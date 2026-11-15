@@ -1,0 +1,37 @@
+name: Bug report
+description: Something doesn't work as it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks! Please never attach a ROM, a save, a save state or links to either.
+  - type: dropdown
+    id: device
+    attributes:
+      label: Device
+      options: [Mac, Windows, Linux, iPhone or iPad, Android, Dual-screen Android, PS5, Exported ROM (N64 or emulator)]
+    validations:
+      required: true
+  - type: textarea
+    id: debug
+    attributes:
+      label: Debug info
+      description: Settings → General → Copy Debug Info, then paste it here (version, build, ROM check, controllers).
+      render: text
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to make it happen again
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: blitz.log from the app folder, if it crashed (the call stack is at the end).
+      render: text

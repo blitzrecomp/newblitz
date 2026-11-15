@@ -1,0 +1,208 @@
+diff --git a/recompui/include/recompui/recompui.h b/recompui/include/recompui/recompui.h
+index 50fdac6..9619fbe 100644
+--- a/recompui/include/recompui/recompui.h
++++ b/recompui/include/recompui/recompui.h
+@@ -125,6 +125,10 @@ namespace recompui {
+ 
+     Rml::ElementPtr create_custom_element(Rml::Element* parent, std::string tag);
+     Rml::ElementDocument* load_document(const std::filesystem::path& path);
++    void ds_panel_set(const std::string& rml);  // BLITZ DS: the second screen's content, as RML (any thread)
++    // Elements with ids b0, b1, ... in it, moved without parsing anything (0-1 of the screen). None on: no UI pass at all.
++    struct DsMover { bool on = false; float x = 0.0f, y = 0.0f; };
++    void ds_panel_move(const DsMover* movers, int count);
+     Rml::ElementDocument* create_empty_document();
+     Rml::Element* get_child_by_tag(Rml::Element* parent, const std::string& tag);
+ 
+diff --git a/recompui/src/base/ui_state.cpp b/recompui/src/base/ui_state.cpp
+index 31818af..8867bbd 100644
+--- a/recompui/src/base/ui_state.cpp
++++ b/recompui/src/base/ui_state.cpp
+@@ -914,15 +914,106 @@ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer*
+         prev_height = height;
+ 
+         ui_state->context->Update();
++        ui_state->context->GetRenderManager().SetViewport({ width, height });  // BLITZ DS: the second screen's context shares it
+         ui_state->context->Render();
+         ui_state->render_interface.end(command_list, swap_chain_framebuffer);
+     }
+ }
+ 
++// BLITZ DS: the second screen's UI, its own small RmlUi context of plain RML that the game writes (src/game/ds_view.cpp).
++extern "C" void (*blitz_ds_second_hook)(plume::RenderCommandList*, plume::RenderFramebuffer*);
++namespace {
++    Rml::Context* ds_context = nullptr;
++    Rml::ElementDocument* ds_document = nullptr;
++    std::mutex ds_panel_mutex;
++    std::string ds_panel_pending;
++    std::vector<recompui::DsMover> ds_movers;
++    std::vector<recompui::DsMover> ds_movers_applied;
++}
++
++extern "C" volatile int blitz_ds_second_dirty;  // rt64_present_queue.cpp: an idle second screen isn't redrawn
++
++// On the UI tick, like every other element made or destroyed: RmlUi's element pools aren't safe from two threads.
++void recompui::ds_panel_set(const std::string& rml) {
++    {
++        std::lock_guard lock{ ds_panel_mutex };
++        if (ds_panel_pending == rml) return;
++        ds_panel_pending = rml;
++        ds_movers.clear();
++    }
++    std::lock_guard ui_lock{ ui_state_mutex };
++    if (!ui_state) {
++        return;
++    }
++    if (ds_context == nullptr) {
++        ds_context = Rml::CreateContext("ds", Rml::Vector2i(640, 480));
++        ds_document = ds_context->LoadDocumentFromMemory(
++            "<rml><head><style>body{position:absolute;left:0;right:0;top:0;bottom:0;font-family:\"Inter Variable\";color:#fff;}"
++            "div{display:block;}</style></head><body></body></rml>");
++        if (ds_document != nullptr) {
++            ds_document->Show();
++        }
++    }
++    if (ds_document != nullptr) {
++        ds_document->SetInnerRML(rml);
++    }
++    ds_movers_applied.clear();
++    blitz_ds_second_dirty = 1;
++}
++
++void recompui::ds_panel_move(const DsMover* movers, int count) {
++    std::lock_guard lock{ ds_panel_mutex };
++    ds_movers.assign(movers, movers + count);
++}
++
++static void ds_draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer* framebuffer) {
++    std::vector<recompui::DsMover> movers;
++    {
++        std::lock_guard panel_lock{ ds_panel_mutex };
++        movers = ds_movers;
++    }
++    // During a play with no icon up, there's nothing to draw over the picture: skip the whole pass.
++    if (!movers.empty()) {
++        bool any = false;
++        for (const recompui::DsMover& m : movers) any = any || m.on;
++        if (!any) return;
++    }
++    std::lock_guard lock{ ui_state_mutex };
++    if (!ui_state || (ds_document == nullptr)) {
++        return;
++    }
++    int width = framebuffer->getWidth();
++    int height = framebuffer->getHeight();
++    ds_movers_applied.resize(movers.size());
++    for (size_t i = 0; i < movers.size(); i++) {
++        recompui::DsMover& was = ds_movers_applied[i];
++        const recompui::DsMover& now = movers[i];
++        if (was.on == now.on && was.x == now.x && was.y == now.y) continue;
++        was = now;
++        Rml::Element* element = ds_document->GetElementById("b" + std::to_string(i));
++        if (element == nullptr) continue;
++        element->SetProperty("display", now.on ? "block" : "none");
++        if (now.on) {
++            element->SetProperty("left", std::to_string(now.x * 100.0f) + "%");
++            element->SetProperty("top", std::to_string(now.y * 100.0f) + "%");
++        }
++    }
++    ds_context->SetDensityIndependentPixelRatio(height / 1080.0f);
++    ui_state->render_interface.start(command_list, width, height);
++    ds_context->SetDimensions({ width, height });
++    ds_context->Update();
++    ds_context->GetRenderManager().SetViewport({ width, height });
++    ds_context->Render();
++    ui_state->render_interface.end(command_list, framebuffer);
++}
++
+ void deinit_hook() {
++    blitz_ds_second_hook = nullptr;
+     recompui::destroy_all_contexts();
+ 
+     std::lock_guard lock {ui_state_mutex};
++    ds_context = nullptr;
++    ds_document = nullptr;
+     Rml::Debugger::Shutdown();
+     Rml::Shutdown();
+     ui_state->unload();
+@@ -931,6 +1022,7 @@ void deinit_hook() {
+ 
+ void recompui::set_render_hooks() {
+     RT64::SetRenderHooks(init_hook, draw_hook, deinit_hook);
++    blitz_ds_second_hook = ds_draw_hook;
+ }
+ 
+ void recompui::message_box(const char* msg) {
+diff --git a/recompui/src/renderer/ui_renderer.cpp b/recompui/src/renderer/ui_renderer.cpp
+index 5ca5349..9f4a6c6 100644
+--- a/recompui/src/renderer/ui_renderer.cpp
++++ b/recompui/src/renderer/ui_renderer.cpp
+@@ -4,6 +4,7 @@
+ #endif
+ 
+ #include <fstream>
++#include <map>
+ #include <filesystem>
+ 
+ #include <concurrentqueue.h>
+@@ -163,7 +164,8 @@ public:
+ 
+         // Enable 4X MSAA if supported by the device.
+         const plume::RenderSampleCounts desired_sample_count = plume::RenderSampleCount::COUNT_8;
+-        if (device_->getSampleCountsSupported(SwapChainFormat) & desired_sample_count) {
++        // BLITZ DS: BLITZ_UI_NO_MSAA on a device short of memory (BlitzActivity): UI targets are the screen's size, eight times over.
++        if (getenv("BLITZ_UI_NO_MSAA") == nullptr && (device_->getSampleCountsSupported(SwapChainFormat) & desired_sample_count)) {
+             multisampling_.sampleCount = desired_sample_count;
+         }
+ 
+@@ -582,11 +584,50 @@ public:
+         mvp_ = projection_mtx_ * transform_;
+     }
+ 
++    // BLITZ DS: one set of MSAA targets per screen size, since two differently sized screens take turns every frame.
++    struct ScreenTargets {
++        std::unique_ptr<plume::RenderTexture> ms, resolved;
++        std::unique_ptr<plume::RenderFramebuffer> framebuffer;
++        std::unique_ptr<plume::RenderDescriptorSet> set;
++    };
++    std::map<std::pair<int, int>, ScreenTargets> other_targets_;
++    int targets_width_ = 0, targets_height_ = 0;
++
++    void swap_screen_targets(int width, int height) {
++        ScreenTargets& parked = other_targets_[{ targets_width_, targets_height_ }];
++        parked.ms = std::move(screen_texture_ms_);
++        parked.resolved = std::move(screen_texture_);
++        parked.framebuffer = std::move(screen_framebuffer_);
++        parked.set = std::move(screen_descriptor_set_);
++        targets_width_ = width;
++        targets_height_ = height;
++        auto found = other_targets_.find({ width, height });
++        if (found != other_targets_.end() && found->second.framebuffer != nullptr) {
++            screen_texture_ms_ = std::move(found->second.ms);
++            screen_texture_ = std::move(found->second.resolved);
++            screen_framebuffer_ = std::move(found->second.framebuffer);
++            screen_descriptor_set_ = std::move(found->second.set);
++            return;
++        }
++        plume::RenderDescriptorRange screen_descriptor_range(plume::RenderDescriptorRangeType::TEXTURE, 2, 1);
++        screen_descriptor_set_ = device_->createDescriptorSet(plume::RenderDescriptorSetDesc(&screen_descriptor_range, 1));
++        screen_texture_ = device_->createTexture(plume::RenderTextureDesc::ColorTarget(width, height, SwapChainFormat));
++        screen_texture_ms_ = device_->createTexture(plume::RenderTextureDesc::ColorTarget(width, height, SwapChainFormat, multisampling_));
++        const plume::RenderTexture *color_attachment = screen_texture_ms_.get();
++        screen_framebuffer_ = device_->createFramebuffer(plume::RenderFramebufferDesc(&color_attachment, 1));
++        screen_descriptor_set_->setTexture(0, screen_texture_.get(), plume::RenderTextureLayout::SHADER_READ);
++    }
++
+     void start(plume::RenderCommandList* list, int image_width, int image_height) {
+         list_ = list;
+ 
+         if (multisampling_.sampleCount > 1) {
+-            if (window_width_ != image_width || window_height_ != image_height) {
++            if ((targets_width_ != image_width || targets_height_ != image_height) && targets_width_ != 0) {
++                swap_screen_targets(image_width, image_height);
++            }
++            else if (window_width_ != image_width || window_height_ != image_height) {
++                targets_width_ = image_width;
++                targets_height_ = image_height;
+                 screen_framebuffer_.reset();
+                 screen_texture_ = device_->createTexture(plume::RenderTextureDesc::ColorTarget(image_width, image_height, SwapChainFormat));
+                 screen_texture_ms_ = device_->createTexture(plume::RenderTextureDesc::ColorTarget(image_width, image_height, SwapChainFormat, multisampling_));

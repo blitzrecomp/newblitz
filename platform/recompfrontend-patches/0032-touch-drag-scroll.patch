@@ -1,0 +1,94 @@
+diff --git a/recompui/src/base/ui_state.cpp b/recompui/src/base/ui_state.cpp
+--- a/recompui/src/base/ui_state.cpp
++++ b/recompui/src/base/ui_state.cpp
+@@ -5,6 +5,7 @@
+ #include <SDL2/SDL_video.h>
+ #endif
+ #include <chrono>
++#include <cstdlib>
+ 
+ #include "rt64_render_hooks.h"
+ 
+@@ -747,6 +748,82 @@
+         bool context_capturing_input = recompui::is_context_capturing_input();
+         bool context_capturing_mouse = recompui::is_context_capturing_mouse();
+ 
++        // BlitzRecomp: a finger dragged on a menu scrolls it. RmlUi scrolls only by the wheel, the middle button or its 6dp
++        // bar, so on a phone the settings below the fold couldn't be reached (team, iPhone). Past a slop of 2.5% of the
++        // screen's height, the nearest element that scrolls that way (from where the finger came down; not a slider's drag)
++        // follows the finger, and the press is called off so the release clicks nothing.
++        {
++            static bool td_down = false, td_drag = false, td_vert = true;
++            static int td_x0 = 0, td_y0 = 0, td_lx = 0, td_ly = 0;
++            static Rml::ObserverPtr<Rml::Element> td_sc;
++            const bool touch = (cur_event.type == SDL_MOUSEBUTTONDOWN || cur_event.type == SDL_MOUSEBUTTONUP)
++                ? cur_event.button.which == SDL_TOUCH_MOUSEID
++                : (cur_event.type == SDL_MOUSEMOTION && cur_event.motion.which == SDL_TOUCH_MOUSEID);
++            if (touch && context_capturing_mouse && !all_input_is_disabled) {
++                Rml::Context* ctx = ui_state->context;
++                if (cur_event.type == SDL_MOUSEBUTTONDOWN && cur_event.button.button == SDL_BUTTON_LEFT) {
++                    td_down = true;
++                    td_drag = false;
++                    td_sc.reset();
++                    td_x0 = cur_event.button.x;
++                    td_y0 = cur_event.button.y;
++                }
++                else if (cur_event.type == SDL_MOUSEMOTION && td_down) {
++                    const int mx = cur_event.motion.x, my = cur_event.motion.y;
++                    if (!td_drag) {
++                        const int dx = mx - td_x0, dy = my - td_y0;
++                        const float slop = 0.025f * float(ctx->GetDimensions().y);
++                        if (float(std::abs(dx)) > slop || float(std::abs(dy)) > slop) {
++                            td_vert = std::abs(dy) >= std::abs(dx);
++                            Rml::Element* sc = nullptr;
++                            for (Rml::Element* e = ctx->GetElementAtPoint(Rml::Vector2f(float(td_x0), float(td_y0))); e != nullptr; e = e->GetParentNode()) {
++                                const auto& cv = e->GetComputedValues();
++                                if (cv.drag() != Rml::Style::Drag::None) break;  // sliders, the mod list's reordering keep their drag
++                                const auto ov = td_vert ? cv.overflow_y() : cv.overflow_x();
++                                const bool room = td_vert ? e->GetScrollHeight() > e->GetClientHeight() + 0.5f
++                                                          : e->GetScrollWidth() > e->GetClientWidth() + 0.5f;
++                                if ((ov == Rml::Style::Overflow::Auto || ov == Rml::Style::Overflow::Scroll) && room) {
++                                    sc = e;
++                                    break;
++                                }
++                            }
++                            if (sc != nullptr) {
++                                td_drag = true;
++                                td_sc = sc->GetObserverPtr();
++                                td_lx = td_x0;
++                                td_ly = td_y0;
++                                ctx->ProcessMouseMove(-100000, -100000, 0);  // hover off the pressed element...
++                                ctx->ProcessMouseButtonUp(0, 0);             // ...so the release clicks nothing
++                                SDL_CaptureMouse(SDL_FALSE);
++                            }
++                            else {
++                                td_down = false;  // not a scroll: RmlUi keeps the gesture
++                            }
++                        }
++                    }
++                    if (td_drag) {
++                        if (Rml::Element* sc = td_sc.get()) {
++                            if (td_vert) sc->SetScrollTop(sc->GetScrollTop() - float(my - td_ly));
++                            else sc->SetScrollLeft(sc->GetScrollLeft() - float(mx - td_lx));
++                            blitz_ds_ui_wake();
++                        }
++                        td_lx = mx;
++                        td_ly = my;
++                        continue;
++                    }
++                }
++                else if (cur_event.type == SDL_MOUSEBUTTONUP && td_down) {
++                    td_down = false;
++                    if (td_drag) {
++                        td_drag = false;
++                        td_sc.reset();
++                        ctx->ProcessMouseMove(cur_event.button.x, cur_event.button.y, 0);
++                        continue;
++                    }
++                }
++            }
++        }
++
+         // Handle up button events even when input is disabled to avoid missing them during binding.
+         if (cur_event.type == SDL_EventType::SDL_CONTROLLERBUTTONUP) {
+             int sdl_key = cont_button_to_key(cur_event.cbutton);

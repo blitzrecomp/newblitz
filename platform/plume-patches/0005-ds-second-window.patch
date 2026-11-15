@@ -1,0 +1,59 @@
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index cbadaaa..558fa01 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -2193,6 +2193,8 @@ namespace plume {
+     // that sees it change rebuilds its surface on the new window at its next resize.
+     static std::atomic<ANativeWindow *> androidCurrentWindow{ nullptr };
+     static std::atomic<bool> androidWindowReported{ false };
++    // BLITZ DS: a second screen's window has its own life (BlitzActivity's Presentation); it never follows the app's.
++    static std::atomic<ANativeWindow *> androidSecondWindow{ nullptr };
+ 
+     static VkResult createAndroidSurface(VkInstance instance, ANativeWindow *window, VkSurfaceKHR *surface) {
+         VkAndroidSurfaceCreateInfoKHR surfaceCreateInfo = {};
+@@ -2203,6 +2205,10 @@ namespace plume {
+ 
+     // True when the swap chain's surface is on the current window (rebuilding it first if the window changed).
+     bool VulkanSwapChain::refreshAndroidSurface() {
++        if ((desc.renderWindow != nullptr) && (desc.renderWindow == androidSecondWindow.load())) {
++            return surface != VK_NULL_HANDLE;
++        }
++
+         if (!androidWindowReported.load()) {
+             return surface != VK_NULL_HANDLE;
+         }
+@@ -2594,7 +2600,7 @@ namespace plume {
+ 
+     bool VulkanSwapChain::needsResize() const {
+ #   if defined(__ANDROID__)
+-        if (androidWindowReported.load() && (androidCurrentWindow.load() != desc.renderWindow)) {
++        if (androidWindowReported.load() && (androidCurrentWindow.load() != desc.renderWindow) && (desc.renderWindow != androidSecondWindow.load())) {
+             return true;
+         }
+ 
+@@ -2699,7 +2705,13 @@ namespace plume {
+         assert(signalSemaphore != nullptr);
+ 
+         VulkanCommandSemaphore *interfaceSemaphore = static_cast<VulkanCommandSemaphore *>(signalSemaphore);
+-        VkResult res = vkAcquireNextImageKHR(commandQueue->device->vk, vk, UINT64_MAX, interfaceSemaphore->vk, VK_NULL_HANDLE, textureIndex);
++#   if defined(__ANDROID__)
++        // BLITZ DS: a second screen that's stopped taking frames mustn't stop the game with it.
++        const uint64_t acquireTimeout = (desc.renderWindow == androidSecondWindow.load()) ? 100000000ull : UINT64_MAX;
++#   else
++        const uint64_t acquireTimeout = UINT64_MAX;
++#   endif
++        VkResult res = vkAcquireNextImageKHR(commandQueue->device->vk, vk, acquireTimeout, interfaceSemaphore->vk, VK_NULL_HANDLE, textureIndex);
+         if ((res != VK_SUCCESS) && (res != VK_SUBOPTIMAL_KHR)) {
+             return false;
+         }
+@@ -4869,6 +4881,10 @@ namespace plume {
+ 
+ #if defined(__ANDROID__)
+ // BlitzRecomp: the app's current window (SDL's ANativeWindow), or nullptr while the app is in the background.
++extern "C" void plume_android_second_window(ANativeWindow *window) {
++    plume::androidSecondWindow.store(window);
++}
++
+ extern "C" void plume_android_set_window(ANativeWindow *window) {
+     plume::androidCurrentWindow.store(window);
+     plume::androidWindowReported.store(true);

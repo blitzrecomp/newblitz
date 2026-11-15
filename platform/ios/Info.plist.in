@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key><string>en</string>
+	<key>CFBundleDisplayName</key><string>@BLITZ_BUNDLE_NAME@</string>
+	<key>CFBundleExecutable</key><string>BlitzRecompiled</string>
+	<key>CFBundleIdentifier</key><string>@BLITZ_IOS_BUNDLE_ID@</string>
+	<key>CFBundleName</key><string>@BLITZ_BUNDLE_NAME@</string>
+	<key>CFBundlePackageType</key><string>APPL</string>
+	<key>CFBundleShortVersionString</key><string>@BLITZ_VERSION@</string>
+	<key>CFBundleVersion</key><string>@BLITZ_BUILD@</string>
+	<key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
+	<key>CFBundleIcons</key>
+	<dict>
+		<key>CFBundlePrimaryIcon</key>
+		<dict>
+			<key>CFBundleIconFiles</key><array><string>AppIcon60x60</string></array>
+			<key>CFBundleIconName</key><string>AppIcon</string>
+		</dict>
+	</dict>
+	<key>DTPlatformName</key><string>iphoneos</string>
+	<key>MinimumOSVersion</key><string>17.0</string>
+	<key>LSRequiresIPhoneOS</key><true/>
+	<key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
+	<key>UIRequiredDeviceCapabilities</key><array><string>arm64</string><string>metal</string></array>
+	<key>UILaunchScreen</key><dict><key>UIColorName</key><string></string></dict>
+	<key>UIRequiresFullScreen</key><true/>
+	<!-- ProMotion iPhones: present at the display's real rate (iOS caps apps at 60 fps without this, while the
+	     screen reports 120 Hz to RT64: uneven frame pacing). -->
+	<key>CADisableMinimumFrameDurationOnPhone</key><true/>
+	<key>UIStatusBarHidden</key><true/>
+	<key>UIViewControllerBasedStatusBarAppearance</key><false/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+	</array>
+	<key>UIFileSharingEnabled</key><true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key><true/>
+	<key>NSLocalNetworkUsageDescription</key><string>Phones on your network can join as controllers, and open the Roster Room.</string>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key><false/>
+		<key>UISceneConfigurations</key>
+		<dict>
+			<key>UIWindowSceneSessionRoleApplication</key>
+			<array>
+				<dict>
+					<key>UISceneConfigurationName</key><string>Default</string>
+					<key>UISceneDelegateClassName</key><string>BlitzSceneDelegate</string>
+				</dict>
+			</array>
+		</dict>
+	</dict>
+</dict>
+</plist>

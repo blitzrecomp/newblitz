@@ -1,0 +1,472 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 12f9e28..96a5307 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -377,6 +377,7 @@ set (SOURCES
+     "${PROJECT_SOURCE_DIR}/src/hle/rt64_interpreter.cpp"
+     "${PROJECT_SOURCE_DIR}/src/hle/rt64_light_manager.cpp"
+     "${PROJECT_SOURCE_DIR}/src/hle/rt64_present_queue.cpp"
++    "${PROJECT_SOURCE_DIR}/src/hle/rt64_blitz_replay.cpp"
+     "${PROJECT_SOURCE_DIR}/src/hle/rt64_projection.cpp"
+     "${PROJECT_SOURCE_DIR}/src/hle/rt64_rdp.cpp"
+     "${PROJECT_SOURCE_DIR}/src/hle/rt64_rdp_tmem.cpp"
+diff --git a/src/hle/rt64_blitz_replay.cpp b/src/hle/rt64_blitz_replay.cpp
+new file mode 100644
+index 0000000..3d19912
+--- /dev/null
++++ b/src/hle/rt64_blitz_replay.cpp
+@@ -0,0 +1,304 @@
++//
++// Instant Replay: the ring. A frame is the VI's picture drawn small, so it costs one full-screen triangle at a low
++// resolution, no readback, and works the same on Metal, Vulkan and D3D12 (the BLITZ DS clip's way). The game's side says
++// how big (blitz_replay_width and friends, before enabling), when to keep frames, and which to show.
++//
++
++#include "rt64_blitz_replay.h"
++
++#include <algorithm>
++#include <chrono>
++#include <cstdio>
++#include <cstring>
++#include <memory>
++#include <mutex>
++#include <vector>
++
++extern "C" {
++    extern volatile int blitz_ds_mode;
++    extern volatile float blitz_ds_split;
++    extern volatile int blitz_ds_second_on_top;
++
++    volatile int blitz_replay_enabled = 0;         // the ring exists; 0 frees its memory
++    volatile int blitz_replay_capture_on = 0;      // keep frames now (a play's on)
++    volatile int blitz_replay_width = 480;         // read when the ring's made
++    volatile int blitz_replay_height = 270;
++    volatile int blitz_replay_length = 160;
++    volatile int blitz_replay_interval_ms = 50;    // read at each frame: slowing down needs no new ring
++    volatile int blitz_replay_mark_next = 0;       // the next frame kept starts a play
++    volatile int blitz_replay_show = 0;            // show frame blitz_replay_frame in place of the game
++    volatile int blitz_replay_frame = 0;           // 0 the oldest
++    volatile int blitz_replay_keep_presenting = 0; // the game has stopped: present anyway (rt64_state.cpp)
++    volatile int blitz_replay_hold = 0;            // Save is reading: no new frames, nothing freed
++
++    int blitz_replay_count(void);
++    int blitz_replay_frame_info(int index, float *aspect, int *ms, int *mark);
++    int blitz_replay_is_bgra(void);
++    void blitz_replay_read_start(int index, unsigned char *out);
++    int blitz_replay_read_done(void);
++}
++
++namespace RT64 {
++    namespace {
++#   if defined(__ANDROID__)
++        const RenderFormat ringFormat = RenderFormat::R8G8B8A8_UNORM;
++#   else
++        const RenderFormat ringFormat = RenderFormat::B8G8R8A8_UNORM;
++#   endif
++
++        struct Frame {
++            std::unique_ptr<RenderTexture> texture;
++            std::unique_ptr<RenderFramebuffer> framebuffer;
++            float aspect = 1.0f;
++            int64_t ms = 0;
++            bool mark = false;
++        };
++
++        struct Ring {
++            std::mutex mutex;  // head, count and each frame's facts, which the game's side reads
++            std::vector<Frame> frames;
++            uint32_t width = 0;
++            uint32_t height = 0;
++            uint32_t length = 0;
++            uint32_t head = 0;
++            uint32_t count = 0;
++            std::unique_ptr<VIRenderer> renderer;
++            std::chrono::steady_clock::time_point lastCapture;
++            std::chrono::steady_clock::time_point firstCapture;
++            RenderDevice *device = nullptr;
++            // Save: one frame at a time.
++            int readIndex = -1;
++            unsigned char *readOut = nullptr;
++            bool readDone = true;
++            std::unique_ptr<RenderBuffer> readBuffer;
++            uint32_t readRowBytes = 0;
++
++            uint32_t physical(uint32_t logical) const {
++                const uint32_t oldest = (count == length) ? head : 0;
++                return (oldest + logical) % length;
++            }
++
++            // Nothing's using them: the last submit has finished, and this frame's hasn't touched them yet.
++            void release() {
++                std::scoped_lock lock(mutex);
++                frames.clear();
++                readBuffer.reset();
++                renderer.reset();
++                head = 0;
++                count = 0;
++                length = 0;
++            }
++        };
++
++        // Lives as long as the process: at exit the device goes first.
++        Ring &ring() {
++            static Ring *r = new Ring();
++            return *r;
++        }
++    }
++
++    bool blitzReplayShowing() {
++        return (blitz_replay_show != 0) && (blitz_replay_count() > 0);
++    }
++
++    void blitzReplayFrame(RenderDevice *device, RenderCommandList *commandList, RenderSwapChain *swapChain, const ShaderLibrary *shaderLibrary, const VI &vi,
++        UserConfiguration::Filtering filtering, bool removeBlackBorders, bool twoScreens, VIRenderer::RenderParams &p)
++    {
++        Ring &r = ring();
++        const bool hold = (blitz_replay_hold != 0);
++        if (((blitz_replay_enabled == 0) && !hold) || (r.device != device)) {
++            if (!r.frames.empty() && (r.device == device)) {
++                r.release();
++                fprintf(stderr, "[replay] ring freed\n");
++            }
++
++            r.device = device;
++        }
++
++        if (blitz_replay_enabled != 0) {
++            const uint32_t width = uint32_t(blitz_replay_width);
++            const uint32_t height = uint32_t(blitz_replay_height);
++            const uint32_t length = uint32_t(blitz_replay_length);
++            if (!hold && ((r.width != width) || (r.height != height) || (r.length != length))) {
++                if (!r.frames.empty()) {
++                    r.release();
++                }
++
++                r.width = width;
++                r.height = height;
++                r.length = length;
++                fprintf(stderr, "[replay] ring: %u frames at %ux%u (%u MB of textures)\n", length, width, height, (length * width * height * 4) >> 20);
++            }
++
++            // Made a few at a time, so starting up costs no hitch.
++            if (r.frames.size() < r.length) {
++                for (int i = 0; (i < 4) && (r.frames.size() < r.length); i++) {
++                    Frame frame;
++                    frame.texture = device->createTexture(RenderTextureDesc::ColorTarget(r.width, r.height, ringFormat));
++                    const RenderTexture *attachment = frame.texture.get();
++                    frame.framebuffer = device->createFramebuffer(RenderFramebufferDesc(&attachment, 1));
++                    std::scoped_lock lock(r.mutex);
++                    r.frames.emplace_back(std::move(frame));
++                }
++
++                if (r.renderer == nullptr) {
++                    r.renderer = std::make_unique<VIRenderer>();
++                }
++            }
++        }
++
++        const bool showing = blitzReplayShowing();
++        const auto now = std::chrono::steady_clock::now();
++        if ((blitz_replay_enabled != 0) && (blitz_replay_capture_on != 0) && !showing && !hold && (p.texture != nullptr) && (p.vi != nullptr) &&
++            (r.head < r.frames.size()) && ((now - r.lastCapture) >= std::chrono::milliseconds(blitz_replay_interval_ms)))
++        {
++            r.lastCapture = now;
++            Frame &frame = r.frames[r.head];
++            commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(frame.texture.get(), RenderTextureLayout::COLOR_WRITE));
++            commandList->setFramebuffer(frame.framebuffer.get());
++
++            // The shape of what the window shows of this picture: it's stretched into the frame, and back when shown.
++            RenderViewport viewport;
++            RenderRect scissor;
++            VIRenderer::getViewportAndScissor(p.swapChain, *p.vi, p.resolutionScale, p.downsamplingScale, p.removeBlackBorders, viewport, scissor);
++
++            VIRenderer::RenderParams c = p;
++            c.part = true;
++            c.partTop = 0.0f;
++            c.partBottom = 1.0f;
++            c.targetWidth = r.width;
++            c.targetHeight = r.height;
++            commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(c.texture, RenderTextureLayout::SHADER_READ));
++            r.renderer->render(c);
++            commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(frame.texture.get(), RenderTextureLayout::SHADER_READ));
++
++            std::scoped_lock lock(r.mutex);
++            if (r.count == 0) {
++                r.firstCapture = now;
++            }
++
++            frame.aspect = float(std::max(scissor.right - scissor.left, 1)) / float(std::max(scissor.bottom - scissor.top, 1));
++            frame.ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - r.firstCapture).count();
++            frame.mark = (blitz_replay_mark_next != 0);
++            blitz_replay_mark_next = 0;
++            r.head = (r.head + 1) % r.length;
++            r.count = std::min(r.count + 1, r.length);
++        }
++
++        if (showing) {
++            const uint32_t logical = uint32_t(std::clamp(int(blitz_replay_frame), 0, std::max(blitz_replay_count() - 1, 0)));
++            Frame &frame = r.frames[r.physical(logical)];
++            p = VIRenderer::RenderParams();
++            p.device = device;
++            p.commandList = commandList;
++            p.swapChain = swapChain;
++            p.shaderLibrary = shaderLibrary;
++            p.textureFormat = ringFormat;
++            p.resolutionScale = { 1.0f, 1.0f };
++            p.downsamplingScale = 1;
++            p.filtering = (filtering == UserConfiguration::Filtering::Nearest) ? UserConfiguration::Filtering::Linear : filtering;
++            p.vi = &vi;
++            p.removeBlackBorders = removeBlackBorders;
++            p.texture = frame.texture.get();
++            p.textureWidth = r.width;
++            p.textureHeight = r.height;
++            p.stored = true;
++            p.storedAspect = frame.aspect;
++            if ((blitz_ds_mode == 1) && twoScreens) {
++                p.part = true;
++                p.partTop = (blitz_ds_second_on_top != 0) ? blitz_ds_split : 0.0f;
++                p.partBottom = (blitz_ds_second_on_top != 0) ? 1.0f : blitz_ds_split;
++            }
++        }
++    }
++
++    void blitzReplayRead(RenderWorker *worker) {
++        Ring &r = ring();
++        int index;
++        unsigned char *out;
++        {
++            std::scoped_lock lock(r.mutex);
++            if (r.readDone || (r.readIndex < 0) || (r.readIndex >= int(r.count))) {
++                r.readDone = true;
++                return;
++            }
++
++            index = r.readIndex;
++            out = r.readOut;
++        }
++
++        // D3D12 wants rows on 256 bytes; the others take any.
++        const uint32_t rowBytes = ((r.width * 4) + 255) & ~255u;
++        if (r.readBuffer == nullptr) {
++            r.readRowBytes = rowBytes;
++            r.readBuffer = worker->device->createBuffer(RenderBufferDesc::ReadbackBuffer(uint64_t(rowBytes) * r.height));
++        }
++
++        RenderTexture *texture = r.frames[r.physical(uint32_t(index))].texture.get();
++        RenderCommandList *commandList = worker->commandList.get();
++        commandList->begin();
++        commandList->barriers(RenderBarrierStage::COPY, RenderBufferBarrier(r.readBuffer.get(), RenderBufferAccess::WRITE), RenderTextureBarrier(texture, RenderTextureLayout::COPY_SOURCE));
++        commandList->copyTextureRegion(
++            RenderTextureCopyLocation::PlacedFootprint(r.readBuffer.get(), ringFormat, r.width, r.height, 1, rowBytes / 4),
++            RenderTextureCopyLocation::Subresource(texture));
++        commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(texture, RenderTextureLayout::SHADER_READ));
++        commandList->end();
++        worker->execute();
++        worker->wait();
++
++        const RenderRange range(0, uint64_t(rowBytes) * r.height);
++        const unsigned char *mapped = reinterpret_cast<const unsigned char *>(r.readBuffer->map(0, &range));
++        if (mapped != nullptr) {
++            for (uint32_t y = 0; y < r.height; y++) {
++                std::memcpy(out + (size_t(y) * r.width * 4), mapped + (size_t(y) * rowBytes), size_t(r.width) * 4);
++            }
++
++            r.readBuffer->unmap();
++        }
++
++        std::scoped_lock lock(r.mutex);
++        r.readDone = true;
++    }
++};
++
++extern "C" {
++    int blitz_replay_count(void) {
++        RT64::Ring &r = RT64::ring();
++        std::scoped_lock lock(r.mutex);
++        return int(r.count);
++    }
++
++    // A frame's facts: its shape, when it was kept, and whether it starts a play. Index 0 is the oldest.
++    int blitz_replay_frame_info(int index, float *aspect, int *ms, int *mark) {
++        RT64::Ring &r = RT64::ring();
++        std::scoped_lock lock(r.mutex);
++        if ((index < 0) || (index >= int(r.count))) {
++            return 0;
++        }
++
++        const RT64::Frame &frame = r.frames[r.physical(uint32_t(index))];
++        *aspect = frame.aspect;
++        *ms = int(frame.ms);
++        *mark = frame.mark ? 1 : 0;
++        return 1;
++    }
++
++    int blitz_replay_is_bgra(void) {
++        return (RT64::ringFormat == RenderFormat::B8G8R8A8_UNORM) ? 1 : 0;
++    }
++
++    // Ask for a frame: out takes width x height x 4 bytes, top row first. Hold blitz_replay_hold meanwhile.
++    void blitz_replay_read_start(int index, unsigned char *out) {
++        RT64::Ring &r = RT64::ring();
++        std::scoped_lock lock(r.mutex);
++        r.readIndex = index;
++        r.readOut = out;
++        r.readDone = false;
++    }
++
++    int blitz_replay_read_done(void) {
++        RT64::Ring &r = RT64::ring();
++        std::scoped_lock lock(r.mutex);
++        return r.readDone ? 1 : 0;
++    }
++}
+diff --git a/src/hle/rt64_blitz_replay.h b/src/hle/rt64_blitz_replay.h
+new file mode 100644
+index 0000000..26e4ed2
+--- /dev/null
++++ b/src/hle/rt64_blitz_replay.h
+@@ -0,0 +1,24 @@
++//
++// Instant Replay (the game's src/main/replay_screen.cpp, docs/REPLAY.md): the last seconds on screen, a ring of small
++// GPU textures. All on the present thread.
++//
++
++#pragma once
++
++#include "render/rt64_render_worker.h"
++#include "render/rt64_shader_library.h"
++#include "render/rt64_vi_renderer.h"
++
++namespace RT64 {
++    // Whether a ring frame is shown in place of the game's picture.
++    bool blitzReplayShowing();
++
++    // With the frame's command list open, before the swap chain's framebuffer is bound. p is the game's picture, if it
++    // has one: its frame goes into the ring when one is due. While showing, p becomes the ring's frame (and the second
++    // screen, which starts from p, shows it too).
++    void blitzReplayFrame(RenderDevice *device, RenderCommandList *commandList, RenderSwapChain *swapChain, const ShaderLibrary *shaderLibrary, const VI &vi,
++        UserConfiguration::Filtering filtering, bool removeBlackBorders, bool twoScreens, VIRenderer::RenderParams &p);
++
++    // After the frame's been submitted and waited for: one frame read back for Save, if one was asked for.
++    void blitzReplayRead(RenderWorker *worker);
++};
+diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
+index 57eb0f4..4ffbea3 100644
+--- a/src/hle/rt64_present_queue.cpp
++++ b/src/hle/rt64_present_queue.cpp
+@@ -8,6 +8,7 @@
+ #include "rhi/rt64_render_hooks.h"
+ 
+ #include "rt64_workload_queue.h"
++#include "rt64_blitz_replay.h"
+ 
+ #include <chrono>
+ #include <condition_variable>
+@@ -189,7 +190,7 @@ namespace RT64 {
+         // Present the VI specified by the event.
+         // Attempt to find the matching framebuffer for the VI based on the origin address.
+         // If that fails, we look at the shared storage.
+-        if (present.screenVI.visible()) {
++        if (present.screenVI.visible() && !blitzReplayShowing()) {
+             Framebuffer *viFb = nullptr;
+             if (!viewRDRAM) {
+                 viFb = fbManager.find(present.screenVI.fbAddress());
+@@ -399,6 +400,9 @@ namespace RT64 {
+                     }
+                 }
+                 
++                // Instant Replay: this frame into the ring, or a frame from it in place of the game's.
++                blitzReplayFrame(ext.device, commandList, ext.swapChain, ext.shaderLibrary, present.screenVI, filtering, removeBlackBorders, (secondChain != nullptr) && secondValid, renderParams);
++
+                 commandList->setFramebuffer(swapChainFramebuffer);
+                 commandList->clearColor();
+ 
+@@ -428,6 +432,8 @@ namespace RT64 {
+                     ext.presentGraphicsWorker->wait();
+                 }
+ 
++                blitzReplayRead(ext.presentGraphicsWorker);
++
+                 // Also reached with no game frame to show (renderParams without a VI): the hook still draws.
+                 secondPresent = secondDraw(renderParams, secondIndex);
+             }
+@@ -603,7 +609,7 @@ namespace RT64 {
+             }
+             fprintf(stderr, "[ds] clip memory made: %u frames at %ux%u\n", ClipLength, ClipWidth, ClipHeight);
+         }
+-        if ((blitz_ds_clip_enabled != 0) && (mode == 1) && (first.texture != nullptr) && ((start - clipLastCapture) > std::chrono::milliseconds(62))) {
++        if ((blitz_ds_clip_enabled != 0) && (mode == 1) && (first.texture != nullptr) && !first.stored && ((start - clipLastCapture) > std::chrono::milliseconds(62))) {
+             clipLastCapture = start;
+             RenderTexture *clipTexture = clipTextures[clipHead].get();
+             commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(clipTexture, RenderTextureLayout::COLOR_WRITE));
+diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
+index 54dd338..270fe0e 100644
+--- a/src/hle/rt64_state.cpp
++++ b/src/hle/rt64_state.cpp
+@@ -27,6 +27,8 @@
+ #define MI_INTR_DP          0x00000020
+ #define MI_INTR_SP          0x00000001
+ 
++extern "C" { extern volatile int blitz_replay_keep_presenting; }  // rt64_blitz_replay.cpp
++
+ namespace RT64 {
+     const float ShiftScaleMap[] = {
+         1.0f,
+@@ -1867,6 +1869,16 @@ namespace RT64 {
+         present.fbOperations.clear();
+         present.storage.clear();
+ 
++        // Instant Replay (rt64_blitz_replay.cpp): the game has stopped, so nothing below would ever present; the replay and
++        // its controls are drawn by presents, so one goes in for every VI.
++        if (!fromEarlyPresent && (blitz_replay_keep_presenting != 0)) {
++            lastScreenVI = newVI;
++            present.screenVI = newVI;
++            advancePresent(present, false);
++            ext.presentQueue->advanceToNextPresent();
++            return;
++        }
++
+         const bool presentEarly = !ext.presentQueue->viewRDRAM && (ext.enhancementConfig->presentation.mode == EnhancementConfiguration::Presentation::Mode::PresentEarly);
+         const uint32_t screenFbAddress = newVI.fbAddress();
+         const hlslpp::uint2 screenFbSize = newVI.fbSize();
+diff --git a/src/render/rt64_vi_renderer.cpp b/src/render/rt64_vi_renderer.cpp
+index 67bdc53..3a9a618 100644
+--- a/src/render/rt64_vi_renderer.cpp
++++ b/src/render/rt64_vi_renderer.cpp
+@@ -90,7 +90,21 @@ namespace RT64 {
+             viewport = part;
+             scissor = RenderRect(0, 0, int32_t(targetWidth), int32_t(targetHeight));
+         }
+-        if (p.stored) {
++        if (p.stored && (p.storedAspect > 0.0f)) {
++            const float targetWidth = float((p.targetWidth > 0) ? p.targetWidth : p.swapChain->getWidth());
++            const float targetHeight = float((p.targetHeight > 0) ? p.targetHeight : p.swapChain->getHeight());
++            const float canvasHeight = p.part ? (targetHeight / std::max(p.partBottom - p.partTop, 0.01f)) : targetHeight;
++            const float width = std::min(targetWidth, canvasHeight * p.storedAspect);
++            const float height = width / p.storedAspect;
++            const float x = (targetWidth - width) * 0.5f;
++            const float y = (canvasHeight - height) * 0.5f - (p.part ? (p.partTop * canvasHeight) : 0.0f);
++            viewport = RenderViewport(x, y, width, height);
++            scissor = RenderRect(lround(std::max(x, 0.0f)), lround(std::max(y, 0.0f)), lround(std::min(x + width, targetWidth)), lround(std::min(y + height, targetHeight)));
++            if ((scissor.right <= scissor.left) || (scissor.bottom <= scissor.top)) {
++                return;  // Nothing of it on this screen.
++            }
++        }
++        else if (p.stored) {
+             scissor = p.storedRect;
+             viewport = RenderViewport(float(scissor.left), float(scissor.top), float(scissor.right - scissor.left), float(scissor.bottom - scissor.top));
+         }
+diff --git a/src/render/rt64_vi_renderer.h b/src/render/rt64_vi_renderer.h
+index d0524d3..3afb8c8 100644
+--- a/src/render/rt64_vi_renderer.h
++++ b/src/render/rt64_vi_renderer.h
+@@ -39,6 +39,9 @@ namespace RT64 {
+             // Show the whole texture in this rectangle of the target, as stored (a clip frame already through the VI).
+             bool stored = false;
+             RenderRect storedRect;
++            // Instant Replay (the game's src/main/replay_screen.cpp): a stored frame of this shape, as big as it fits on the
++            // target (with part: on all the screens together). storedRect isn't used.
++            float storedAspect = 0.0f;
+         };
+ 
+         VIRenderer();

@@ -1,0 +1,31 @@
+diff --git a/recompui/src/util/file.h b/recompui/src/util/file.h
+--- a/recompui/src/util/file.h
++++ b/recompui/src/util/file.h
+@@ -26,7 +26,8 @@
+             // Blitz: an open panel as an ordinary window (beginWithCompletionHandler), not a blocking runModal.
+             // Run from a main-queue block inside SDL's event pump, runModal stopped getting keyboard and mouse
+             // events and could neither finish nor cancel (the team's "file picker won't go away").
+-            void open_panel(bool multiple, std::function<void(bool success, const std::vector<std::filesystem::path>& paths)> callback);
++            void open_panel(bool multiple, std::function<void(bool success, const std::vector<std::filesystem::path>& paths)> callback,
++                            bool folders = false);
+         }
+         #endif
+     }
+diff --git a/recompui/src/util/support_apple.mm b/recompui/src/util/support_apple.mm
+--- a/recompui/src/util/support_apple.mm
++++ b/recompui/src/util/support_apple.mm
+@@ -7,11 +7,12 @@
+ #include "nfd.h"
+ 
+ namespace recompui::file {
+-    void apple::open_panel(bool multiple, std::function<void(bool success, const std::vector<std::filesystem::path>& paths)> callback) {
++    void apple::open_panel(bool multiple, std::function<void(bool success, const std::vector<std::filesystem::path>& paths)> callback,
++                           bool folders) {
+         dispatch_async(dispatch_get_main_queue(), ^{
+             NSOpenPanel* panel = [NSOpenPanel openPanel];
+             [panel setCanChooseFiles:YES];
+-            [panel setCanChooseDirectories:NO];
++            [panel setCanChooseDirectories:folders ? YES : NO];
+             [panel setAllowsMultipleSelection:multiple ? YES : NO];
+             [NSApp activateIgnoringOtherApps:YES];
+             auto cb = callback;  // copied into the block

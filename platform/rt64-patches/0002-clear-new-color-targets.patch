@@ -1,0 +1,20 @@
+diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
+--- a/src/hle/rt64_workload_queue.cpp
++++ b/src/hle/rt64_workload_queue.cpp
+@@ -714,6 +714,16 @@
+             for (uint32_t f = 0; f < fbPairCount; f++) {
+                 const FramebufferPair &fbPair = workload.fbPairs[f];
+                 bool validTargets = getTargetsFromPair(f);
++
++                // A newly created colour target starts out undefined (magenta on Metal). Clear it once, before anything
++                // is recorded into it this frame, so pixels the game never draws (NFL Blitz scissors off the last column
++                // of its 512-wide buffer) show what RDRAM holds there, as on hardware. The resize reset readHeight, so
++                // the RDRAM contents are still read back in below. A target grown only by a tile copy's setup keeps its
++                // readHeight and was already cleared and reloaded by createTileCopyRecord, so it is left alone.
++                if (validTargets && (colorTarget != nullptr) && (colorFb != nullptr) && (resizedTargets.erase(colorTarget) > 0) && (colorFb->readHeight == 0)) {
++                    colorTarget->clearColorTarget(ext.workloadGraphicsWorker);
++                }
++
+                 fbManager.recordOperations(ext.workloadGraphicsWorker, &workload.fbChangePool, &workload.fbStorage, ext.shaderLibrary, ext.textureCache,
+                     fbPair.startFbOperations, targetManager, fixedResScale, f, workload.submissionFrame);
+ 

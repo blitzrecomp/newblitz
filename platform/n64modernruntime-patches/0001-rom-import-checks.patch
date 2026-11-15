@@ -1,0 +1,65 @@
+diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
+index 1200f77..b5902e9 100644
+--- a/librecomp/src/recomp.cpp
++++ b/librecomp/src/recomp.cpp
+@@ -182,14 +182,32 @@ static std::vector<uint8_t> read_file(const std::filesystem::path& path) {
+     return ret;
+ }
+ 
++// Writes through a temporary file and renames it into place, so a failed or partial write never
++// truncates an existing file. Returns false unless every step succeeded.
+ bool write_file(const std::filesystem::path& path, const std::vector<uint8_t>& data) {
+-    std::ofstream out_file{ path, std::ios::binary };
++    std::filesystem::path tmp_path = path;
++    tmp_path += ".tmp";
++    std::error_code ec;
++    {
++        std::ofstream out_file{ tmp_path, std::ios::binary };
+ 
+-    if (!out_file.good()) {
+-        return false;
++        if (!out_file.good()) {
++            return false;
++        }
++
++        out_file.write(reinterpret_cast<const char*>(data.data()), data.size());
++        out_file.close();
++        if (!out_file) {
++            std::filesystem::remove(tmp_path, ec);
++            return false;
++        }
+     }
+ 
+-    out_file.write(reinterpret_cast<const char*>(data.data()), data.size());
++    std::filesystem::rename(tmp_path, path, ec);
++    if (ec) {
++        std::filesystem::remove(tmp_path, ec);
++        return false;
++    }
+ 
+     return true;
+ }
+@@ -375,6 +393,11 @@ recomp::RomValidationError recomp::select_rom(const std::filesystem::path& rom_p
+     // Pad the rom to the nearest multiple of 4 bytes.
+     rom_data.resize((rom_data.size() + 3) & ~3);
+ 
++    // Everything below reads the 0x40-byte header (internal name at 0x20).
++    if (rom_data.size() < 0x40) {
++        return recomp::RomValidationError::NotARom;
++    }
++
+     ByteswapType byteswap_type = check_rom_start(rom_data);
+ 
+     switch (byteswap_type) {
+@@ -405,7 +428,10 @@ recomp::RomValidationError recomp::select_rom(const std::filesystem::path& rom_p
+         }
+     }
+ 
+-    write_file(config_path / game_entry.stored_filename(), rom_data);
++    // Only report success once the stored copy is really there and intact.
++    if (!write_file(config_path / game_entry.stored_filename(), rom_data) || !check_stored_rom(game_entry)) {
++        return recomp::RomValidationError::OtherError;
++    }
+     
+     return recomp::RomValidationError::Good;
+ }

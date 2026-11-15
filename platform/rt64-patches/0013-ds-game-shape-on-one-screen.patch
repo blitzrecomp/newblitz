@@ -1,0 +1,26 @@
+diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
+index 6332dc5..819e881 100644
+--- a/src/hle/rt64_workload_queue.cpp
++++ b/src/hle/rt64_workload_queue.cpp
+@@ -13,7 +13,7 @@
+ // Tall view experiment (the game's src/game/tall_view.cpp): nonzero makes Expand a 2:3 picture, whatever the window;
+ // VIRenderer::render puts its two halves at the window's top and bottom.
+ extern "C" { extern volatile int blitz_ds_mode; extern volatile float blitz_ds_split; extern volatile int blitz_ds_second_on_top; }
+-extern "C" { volatile float blitz_tall_aspect_on = 0.0f; volatile float blitz_tall_ratio = 2.0f / 3.0f; }
++extern "C" { volatile float blitz_ds_second_ratio = 0.0f; volatile float blitz_tall_aspect_on = 0.0f; volatile float blitz_tall_ratio = 2.0f / 3.0f; }
+ 
+ namespace RT64 {
+     // WorkloadQueue
+@@ -147,7 +147,11 @@ namespace RT64 {
+         switch (ratioMode) {
+         case UserConfiguration::AspectRatio::Expand:
+             if ((ext.sharedResources->swapChainWidth > 0) && (ext.sharedResources->swapChainHeight > 0)) {
+-                const float derivedRatioTarget = (float(ext.sharedResources->swapChainWidth) / float(ext.sharedResources->swapChainHeight)) * pixelAspect;
++                float derivedRatioTarget = (float(ext.sharedResources->swapChainWidth) / float(ext.sharedResources->swapChainHeight)) * pixelAspect;
++                // BLITZ DS: the game on one screen keeps at least its 4:3 on a squarer one, and on the second window takes that
++                // screen's shape (a wide top screen).
++                if ((blitz_ds_mode == 3) && (blitz_ds_second_ratio > 0.0f)) derivedRatioTarget = blitz_ds_second_ratio * pixelAspect;
++                if ((blitz_ds_mode == 2) || (blitz_ds_mode == 3)) derivedRatioTarget = std::max(derivedRatioTarget, workloadConfig.aspectRatioSource);
+                 workloadConfig.aspectRatioTarget = (blitz_tall_aspect_on != 0.0f) ? blitz_tall_ratio * pixelAspect : std::max(derivedRatioTarget, workloadConfig.aspectRatioSource);
+             }
+             else {

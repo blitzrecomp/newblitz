@@ -1,0 +1,81 @@
+diff --git a/ultramodern/include/ultramodern/ultra64.h b/ultramodern/include/ultramodern/ultra64.h
+--- a/ultramodern/include/ultramodern/ultra64.h
++++ b/ultramodern/include/ultramodern/ultra64.h
+@@ -39,7 +39,20 @@
+ #  define RDRAM_ARG1 uint8_t *rdram
+ #  define PASS_RDRAM rdram, 
+ #  define PASS_RDRAM1 rdram
++#  if defined(RECOMP_GPR32)
++     // BlitzRecomp (PSP, 32-bit registers): an address has no 0xFFFFFFFF upper half, so map it in 32 bits, the
++     // same way as recomp.h's MEM_W (RDRAM_OFF; masked onto RDRAM with RECOMP_RDRAM_MASK).
++#    ifndef RDRAM_OFF
++#      ifdef RECOMP_RDRAM_MASK
++#        define RDRAM_OFF(addr) ((uint32_t)(addr) & 0x007FFFFFu)
++#      else
++#        define RDRAM_OFF(addr) ((uint32_t)(addr) - 0x80000000u)
++#      endif
++#    endif
++#    define TO_PTR(type, var) ((type*)(&rdram[RDRAM_OFF(var)]))
++#  else
+ #  define TO_PTR(type, var) ((type*)(&rdram[(uint64_t)var - 0xFFFFFFFF80000000]))
++#  endif
+ #  define GET_MEMBER(type, addr, member) (addr + (intptr_t)&(((type*)nullptr)->member))
+ #  ifdef __cplusplus
+ #    define NULLPTR (PTR(void))0
+diff --git a/librecomp/src/heap.cpp b/librecomp/src/heap.cpp
+--- a/librecomp/src/heap.cpp
++++ b/librecomp/src/heap.cpp
+@@ -12,7 +12,7 @@
+ 
+ extern "C" void recomp_alloc(uint8_t* rdram, recomp_context* ctx) {
+     uint32_t offset = reinterpret_cast<uint8_t*>(recomp::alloc(rdram, ctx->r4)) - rdram;
+-    ctx->r2 = offset + 0xFFFFFFFF80000000ULL;
++    ctx->r2 = (gpr)(int32_t)(offset + 0x80000000u);  // BlitzRecomp: KSEG0, sign-extended through 32 bits (any gpr width)
+ }
+ 
+ extern "C" void recomp_free(uint8_t* rdram, recomp_context* ctx) {
+diff --git a/librecomp/src/mod_config_api.cpp b/librecomp/src/mod_config_api.cpp
+--- a/librecomp/src/mod_config_api.cpp
++++ b/librecomp/src/mod_config_api.cpp
+@@ -39,7 +39,7 @@
+     // Allocate space in the recomp heap to hold the string, including the null terminator.
+     size_t alloc_size = (str.size() + 1 + 15) & ~15;
+     gpr offset = reinterpret_cast<uint8_t*>(recomp::alloc(rdram, alloc_size)) - rdram;
+-    gpr addr = offset + 0xFFFFFFFF80000000ULL;
++    gpr addr = (gpr)(int32_t)((uint32_t)offset + 0x80000000u);  // BlitzRecomp: width-safe (32-bit gpr)
+ 
+     // Copy the string's data into the allocated memory and null terminate it.
+     for (size_t i = 0; i < str.size(); i++) {
+@@ -63,7 +63,7 @@
+ 
+ void recomp_free_config_string(uint8_t* rdram, recomp_context* ctx) {
+     gpr str_rdram = (gpr)_arg<0, PTR(char)>(rdram, ctx);
+-    gpr offset = str_rdram - 0xFFFFFFFF80000000ULL;
++    gpr offset = (uint32_t)str_rdram - 0x80000000u;  // BlitzRecomp: width-safe (32-bit gpr)
+ 
+     recomp::free(rdram, rdram + offset);
+ }
+diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
+--- a/librecomp/src/recomp.cpp
++++ b/librecomp/src/recomp.cpp
+@@ -528,7 +528,20 @@
+     assert(false);
+     exit(EXIT_FAILURE);
+ }
++
++#if defined(RECOMP_GPR32)
++// BlitzRecomp (PSP): 32-bit registers. RECOMP_GPR32 changes recomp_context, so the runtime and the game's code
++// must agree on it (a global compile definition).
++static_assert(sizeof(gpr) == 4 && sizeof(((recomp_context*)nullptr)->hi) == 4, "RECOMP_GPR32: 32-bit gpr, hi and lo");
+ 
++// recomp.h maps the 64-bit integer operations here; tools/psp/gpr32.py makes sure the game's code has none.
++extern "C" void recomp_unsupported_64bit(const char* op) {
++    printf("Unsupported 64-bit integer operation %s with 32-bit registers\n", op);
++    assert(false);
++    exit(EXIT_FAILURE);
++}
++#endif
++
+ std::string current_game_mode_id;
+ std::optional<std::u8string> current_game = std::nullopt;
+ std::atomic<GameStatus> game_status = GameStatus::None;

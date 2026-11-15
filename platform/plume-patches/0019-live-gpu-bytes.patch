@@ -1,0 +1,168 @@
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index 4b585ab..0083720 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -68,6 +68,103 @@ namespace plume {
+         fprintf(stderr, "[vulkan] alloc %s %llu KB (%u %u %u), memory type %u%s\n", kind, (unsigned long long)(size >> 10), a, b, c, memoryType, dedicated ? ", dedicated" : "");
+     }
+ 
++    // Live bytes by kind, under the same switches: render and depth targets, storage textures (mostly the texture cache), other
++    // textures, and buffers by heap, each split into allocations inside a VMA block and ones with their own memory. Plus the most
++    // upload memory held at once since the last report, which catches staging buffers made and freed between two reports.
++    enum BlitzLiveKind {
++        BlitzLiveTarget,
++        BlitzLiveStorage,
++        BlitzLiveSampled,
++        BlitzLiveDefault,
++        BlitzLiveUpload,
++        BlitzLiveReadback,
++        BlitzLiveGpuUpload,
++        BlitzLiveKindCount
++    };
++
++    static const char *BlitzLiveNames[BlitzLiveKindCount] = { "rt", "storage", "sampled", "default", "upload", "readback", "gpu-upload" };
++    static std::atomic<uint64_t> blitzLiveBytes[BlitzLiveKindCount][2];  // [kind][dedicated]
++    static std::atomic<uint32_t> blitzLiveCount[BlitzLiveKindCount][2];
++    static std::atomic<uint64_t> blitzUploadPeak{ 0 };
++
++    static int blitzTextureKind(RenderTextureFlags flags) {
++        if (flags & (RenderTextureFlag::RENDER_TARGET | RenderTextureFlag::DEPTH_TARGET)) {
++            return BlitzLiveTarget;
++        }
++
++        if (flags & (RenderTextureFlag::STORAGE | RenderTextureFlag::UNORDERED_ACCESS)) {
++            return BlitzLiveStorage;
++        }
++
++        return BlitzLiveSampled;
++    }
++
++    static int blitzBufferKind(RenderHeapType heapType) {
++        switch (heapType) {
++        case RenderHeapType::UPLOAD:
++            return BlitzLiveUpload;
++        case RenderHeapType::READBACK:
++            return BlitzLiveReadback;
++        case RenderHeapType::GPU_UPLOAD:
++            return BlitzLiveGpuUpload;
++        default:
++            return BlitzLiveDefault;
++        }
++    }
++
++    // Counts an allocation and returns the slot to take it back out of when it's freed, or -1 with the log off.
++    static int8_t blitzLiveAdd(VmaAllocator allocator, VmaAllocation allocation, int kind, VkDeviceSize size) {
++        if (!blitzMemoryLog()) {
++            return -1;
++        }
++
++        VmaAllocationInfo2 info = {};
++        vmaGetAllocationInfo2(allocator, allocation, &info);
++        const int dedicated = info.dedicatedMemory ? 1 : 0;
++        blitzLiveBytes[kind][dedicated].fetch_add(size);
++        blitzLiveCount[kind][dedicated].fetch_add(1);
++        if (kind == BlitzLiveUpload) {
++            const uint64_t upload = blitzLiveBytes[kind][0].load() + blitzLiveBytes[kind][1].load();
++            uint64_t peak = blitzUploadPeak.load();
++            while ((upload > peak) && !blitzUploadPeak.compare_exchange_weak(peak, upload)) {
++            }
++        }
++
++        return int8_t(kind * 2 + dedicated);
++    }
++
++    static void blitzLiveRemove(int8_t slot, VkDeviceSize size) {
++        if (slot < 0) {
++            return;
++        }
++
++        blitzLiveBytes[slot / 2][slot % 2].fetch_sub(size);
++        blitzLiveCount[slot / 2][slot % 2].fetch_sub(1);
++    }
++
++    // One write, so a line from another thread can't land in the middle of it.
++    static void blitzReportLive() {
++        char line[1024];
++        int length = snprintf(line, sizeof(line), "[vulkan] live:");
++        uint64_t total = 0;
++        for (int k = 0; (k < BlitzLiveKindCount) && (length > 0) && (length < int(sizeof(line))); k++) {
++            const uint64_t blockBytes = blitzLiveBytes[k][0].load();
++            const uint64_t dedicatedBytes = blitzLiveBytes[k][1].load();
++            total += blockBytes + dedicatedBytes;
++            length += snprintf(line + length, sizeof(line) - length, "%s %s %llu KB (%u) + %llu KB (%u) dedicated", (k > 0) ? "," : "", BlitzLiveNames[k],
++                (unsigned long long)(blockBytes >> 10), blitzLiveCount[k][0].load(), (unsigned long long)(dedicatedBytes >> 10), blitzLiveCount[k][1].load());
++        }
++
++        // The peak starts again from what's held now.
++        const uint64_t uploadNow = blitzLiveBytes[BlitzLiveUpload][0].load() + blitzLiveBytes[BlitzLiveUpload][1].load();
++        const uint64_t uploadPeak = std::max(blitzUploadPeak.exchange(uploadNow), uploadNow);
++        if ((length > 0) && (length < int(sizeof(line)))) {
++            snprintf(line + length, sizeof(line) - length, ", total %llu KB, peak upload since last %llu KB.", (unsigned long long)(total >> 10), (unsigned long long)(uploadPeak >> 10));
++        }
++
++        fprintf(stderr, "%s\n", line);
++    }
++
+     static void blitzReportMemory(VmaAllocator allocator, const char *why) {
+         VmaTotalStatistics stats = {};
+         vmaCalculateStatistics(allocator, &stats);
+@@ -82,6 +179,7 @@ namespace plume {
+         }
+ 
+         fprintf(stderr, "\n");
++        blitzReportLive();
+     }
+ 
+     // PS5 homebrew (BlitzRecomp, from Nazky/plume-ps5): the static RADV's loader, and a display-plane surface.
+@@ -1065,6 +1163,7 @@ namespace plume {
+ 
+         if (res == VK_SUCCESS) {
+             blitzNoteAllocation("buffer", allocationInfo.size, uint32_t(desc.flags), uint32_t(desc.heapType), 0, allocationInfo.memoryType, desc.committed);
++            blitzLiveSlot = blitzLiveAdd(device->allocator, allocation, blitzBufferKind(desc.heapType), allocationInfo.size);
+         }
+ 
+         if (res != VK_SUCCESS) {
+@@ -1075,6 +1174,7 @@ namespace plume {
+ 
+     VulkanBuffer::~VulkanBuffer() {
+         if (vk != VK_NULL_HANDLE) {
++            blitzLiveRemove(blitzLiveSlot, allocationInfo.size);
+             vmaDestroyBuffer(device->allocator, vk, allocation);
+         }
+     }
+@@ -1194,6 +1294,7 @@ namespace plume {
+         VkResult res = vmaCreateImage(device->allocator, &imageInfo, &createInfo, &vk, &allocation, &allocationInfo);
+         if (res == VK_SUCCESS) {
+             blitzNoteAllocation("texture", allocationInfo.size, desc.width, desc.height, uint32_t(desc.format) | (desc.arraySize << 16), allocationInfo.memoryType, desc.committed);
++            blitzLiveSlot = blitzLiveAdd(device->allocator, allocation, blitzTextureKind(desc.flags), allocationInfo.size);
+         }
+ 
+         if (res != VK_SUCCESS) {
+@@ -1218,6 +1319,7 @@ namespace plume {
+         }
+ 
+         if (ownership && (vk != VK_NULL_HANDLE)) {
++            blitzLiveRemove(blitzLiveSlot, allocationInfo.size);
+             vmaDestroyImage(device->allocator, vk, allocation);
+         }
+     }
+diff --git a/plume_vulkan.h b/plume_vulkan.h
+index 30cb35c..18df53a 100644
+--- a/plume_vulkan.h
++++ b/plume_vulkan.h
+@@ -54,6 +54,7 @@ namespace plume {
+         VulkanPool *pool = nullptr;
+         VmaAllocation allocation = VK_NULL_HANDLE;
+         VmaAllocationInfo allocationInfo = {};
++        int8_t blitzLiveSlot = -1;  // BlitzRecomp: where the memory log counts this allocation, -1 for nowhere
+         RenderBufferDesc desc;
+         RenderBarrierStages barrierStages = RenderBarrierStage::NONE;
+ 
+@@ -84,6 +85,7 @@ namespace plume {
+         VulkanPool *pool = nullptr;
+         VmaAllocation allocation = VK_NULL_HANDLE;
+         VmaAllocationInfo allocationInfo = {};
++        int8_t blitzLiveSlot = -1;  // BlitzRecomp: where the memory log counts this allocation, -1 for nowhere
+         RenderTextureLayout textureLayout = RenderTextureLayout::UNKNOWN;
+         RenderBarrierStages barrierStages = RenderBarrierStage::NONE;
+         bool ownership = false;

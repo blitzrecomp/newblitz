@@ -1,0 +1,333 @@
+diff --git a/ultramodern/include/ultramodern/host_thread.hpp b/ultramodern/include/ultramodern/host_thread.hpp
+new file mode 100644
+--- /dev/null
++++ b/ultramodern/include/ultramodern/host_thread.hpp
+@@ -0,0 +1,123 @@
++#ifndef __ULTRAMODERN_HOST_THREAD_HPP__
++#define __ULTRAMODERN_HOST_THREAD_HPP__
++
++// BlitzRecomp (PSP port, docs/PSP_PORT.md §4.1): every host thread the runtime starts goes through here, so a
++// platform where std::thread's defaults don't fit (no stack size or priority, a broken condition variable) can start
++// them its own way. The attributes say what each thread is; the default backend ignores them.
++//
++// Default backend (every platform unless ULTRAMODERN_HOST_THREAD_PLATFORM is defined): host_thread_t is std::thread,
++// host_thread(attrs, f, args...) is std::thread{f, args...}, and host_sem is moodycamel's LightweightSemaphore, the
++// type every one of these sites used before. Nothing changes there.
++//
++// ULTRAMODERN_HOST_THREAD_PLATFORM (PSP, psp-host): the platform implements host_thread_create/join/detach below.
++// ULTRAMODERN_HOST_SEM_PLATFORM: the platform also provides class ultramodern::host_sem (wait(), wait(usecs),
++// tryWait(), signal(n)) in "ultramodern_host_sem_platform.hpp".
++// Both change the layout of UltraThreadContext, so they must be global compile definitions.
++
++#include <cstdint>
++#include <thread>
++#include <utility>
++
++#if defined(ULTRAMODERN_HOST_THREAD_PLATFORM)
++#include <functional>
++#include <tuple>
++#include <type_traits>
++#endif
++
++#if defined(ULTRAMODERN_HOST_SEM_PLATFORM)
++#include "ultramodern_host_sem_platform.hpp"
++#else
++#undef MOODYCAMEL_DELETE_FUNCTION
++#define MOODYCAMEL_DELETE_FUNCTION = delete
++#include "lightweightsemaphore.h"
++#endif
++
++namespace ultramodern {
++    // What a host thread is for. The platform picks the stack and priority from these (stack_bytes 0: its default
++    // for that kind).
++    enum class HostThreadKind : uint8_t {
++        Runtime,    // VI, gfx, SP task, timer, thread cleaner, saving
++        GameStart,  // recomp::start's game start thread (runs bootproc and becomes the first game thread)
++        Game,       // one per osCreateThread
++    };
++
++    struct host_thread_attrs {
++        const char* name;
++        HostThreadKind kind;
++        uint32_t stack_bytes;  // 0: the platform's default for the kind
++        int priority;          // PSP-style: lower runs first (docs/PSP_PORT.md §4.1)
++        int game_id;           // Game threads: the OSThread's id and priority (else 0)
++        int game_pri;
++    };
++
++    // The runtime's threads (docs/PSP_PORT.md §4.1 table).
++    namespace host_threads {
++        inline constexpr host_thread_attrs vi{ "VI", HostThreadKind::Runtime, 64 * 1024, 0x10, 0, 0 };
++        inline constexpr host_thread_attrs timer{ "Timer", HostThreadKind::Runtime, 64 * 1024, 0x10, 0, 0 };
++        inline constexpr host_thread_attrs gfx{ "Gfx", HostThreadKind::Runtime, 64 * 1024, 0x18, 0, 0 };
++        inline constexpr host_thread_attrs sp_task{ "SP Task", HostThreadKind::Runtime, 64 * 1024, 0x18, 0, 0 };
++        inline constexpr host_thread_attrs cleaner{ "Cleaner", HostThreadKind::Runtime, 64 * 1024, 0x20, 0, 0 };
++        inline constexpr host_thread_attrs saving{ "Saving", HostThreadKind::Runtime, 64 * 1024, 0x30, 0, 0 };
++        inline constexpr host_thread_attrs game_start{ "Game Start", HostThreadKind::GameStart, 0, 0x20, 0, 0 };
++        inline host_thread_attrs game(int id, int pri) { return { "Game", HostThreadKind::Game, 0, 0x20, id, pri }; }
++    }
++
++#if defined(ULTRAMODERN_HOST_THREAD_PLATFORM)
++    struct host_thread_handle;
++    // Implemented by the platform. host_thread_create runs (*body)() on a new thread and deletes body afterwards;
++    // it never returns null (a platform that can't start a thread reports it and ends the program).
++    host_thread_handle* host_thread_create(const host_thread_attrs& attrs, std::function<void()>* body);
++    void host_thread_join(host_thread_handle* handle);    // waits, then frees the handle
++    void host_thread_detach(host_thread_handle* handle);  // frees the handle once the thread ends
++
++    // The subset of std::thread the runtime uses.
++    class host_thread_t {
++    public:
++        host_thread_t() = default;
++        explicit host_thread_t(host_thread_handle* h) : handle(h) {}
++        host_thread_t(host_thread_t&& other) noexcept : handle(std::exchange(other.handle, nullptr)) {}
++        host_thread_t& operator=(host_thread_t&& other) noexcept {
++            if (handle != nullptr) {
++                std::terminate();  // as std::thread: assigning over a joinable thread
++            }
++            handle = std::exchange(other.handle, nullptr);
++            return *this;
++        }
++        host_thread_t(const host_thread_t&) = delete;
++        host_thread_t& operator=(const host_thread_t&) = delete;
++        ~host_thread_t() {
++            if (handle != nullptr) {
++                std::terminate();  // as std::thread: destroying a joinable thread
++            }
++        }
++        bool joinable() const { return handle != nullptr; }
++        void join() { host_thread_join(std::exchange(handle, nullptr)); }
++        void detach() { host_thread_detach(std::exchange(handle, nullptr)); }
++    private:
++        host_thread_handle* handle = nullptr;
++    };
++
++    template <class F, class... Args>
++    host_thread_t host_thread(const host_thread_attrs& attrs, F&& f, Args&&... args) {
++        // Arguments are decayed copies, as std::thread makes them.
++        auto* body = new std::function<void()>(
++            [fn = std::decay_t<F>(std::forward<F>(f)), tup = std::make_tuple(std::decay_t<Args>(std::forward<Args>(args))...)]() mutable {
++                std::apply(std::move(fn), std::move(tup));
++            });
++        return host_thread_t{ host_thread_create(attrs, body) };
++    }
++#else
++    using host_thread_t = std::thread;
++
++    template <class F, class... Args>
++    inline std::thread host_thread(const host_thread_attrs&, F&& f, Args&&... args) {
++        return std::thread{ std::forward<F>(f), std::forward<Args>(args)... };
++    }
++#endif
++
++#if !defined(ULTRAMODERN_HOST_SEM_PLATFORM)
++    using host_sem = moodycamel::LightweightSemaphore;
++#endif
++}
++
++#endif
+diff --git a/ultramodern/include/ultramodern/ultramodern.hpp b/ultramodern/include/ultramodern/ultramodern.hpp
+--- a/ultramodern/include/ultramodern/ultramodern.hpp
++++ b/ultramodern/include/ultramodern/ultramodern.hpp
+@@ -20,11 +20,12 @@
+ #include "ultramodern/renderer_context.hpp"
+ #include "ultramodern/rsp.hpp"
+ #include "ultramodern/threads.hpp"
++#include "ultramodern/host_thread.hpp"
+ 
+ struct UltraThreadContext {
+-    std::thread host_thread;
+-    moodycamel::LightweightSemaphore running;
+-    moodycamel::LightweightSemaphore initialized;
++    ultramodern::host_thread_t host_thread;  // BlitzRecomp: std::thread and LightweightSemaphore unless a platform backend
++    ultramodern::host_sem running;           // is compiled in (host_thread.hpp)
++    ultramodern::host_sem initialized;
+ };
+ 
+ namespace ultramodern {
+diff --git a/ultramodern/src/threads.cpp b/ultramodern/src/threads.cpp
+--- a/ultramodern/src/threads.cpp
++++ b/ultramodern/src/threads.cpp
+@@ -263,7 +263,7 @@
+     // Pass the context as an argument to the thread function to ensure that it can't get cleared before the thread captures its value.
+     UltraThreadContext* context = new UltraThreadContext{};
+     t->context = context;
+-    context->host_thread = std::thread{_thread_func, PASS_RDRAM t_, entrypoint, arg, t->context};
++    context->host_thread = ultramodern::host_thread(ultramodern::host_threads::game(id, pri), _thread_func, PASS_RDRAM t_, entrypoint, arg, t->context);
+ 
+     // Wait until the thread is initialized to indicate that it's ready to be started.
+     context->initialized.wait();
+@@ -341,7 +341,7 @@
+     return thread_self;
+ }
+ 
+-static std::thread thread_cleaner_thread;
++static ultramodern::host_thread_t thread_cleaner_thread;
+ static moodycamel::BlockingConcurrentQueue<UltraThreadContext*> deleted_threads{};
+ extern std::atomic_bool exited;
+ 
+@@ -359,7 +359,7 @@
+ }
+ 
+ void ultramodern::init_thread_cleanup() {
+-    thread_cleaner_thread = std::thread{thread_cleaner_func};
++    thread_cleaner_thread = ultramodern::host_thread(ultramodern::host_threads::cleaner, thread_cleaner_func);
+ }
+ 
+ void ultramodern::cleanup_thread(UltraThreadContext *cur_context) {
+diff --git a/ultramodern/src/timer.cpp b/ultramodern/src/timer.cpp
+--- a/ultramodern/src/timer.cpp
++++ b/ultramodern/src/timer.cpp
+@@ -40,7 +40,7 @@
+ using Action = std::variant<AddTimerAction, RemoveTimerAction>;
+ 
+ struct {
+-    std::thread thread;
++    ultramodern::host_thread_t thread;
+     moodycamel::BlockingConcurrentQueue<Action> action_queue{};
+ } timer_context;
+ 
+@@ -141,7 +141,7 @@
+ }
+ 
+ void ultramodern::init_timers(RDRAM_ARG1) {
+-    timer_context.thread = std::thread{ timer_thread, PASS_RDRAM1 };
++    timer_context.thread = ultramodern::host_thread(ultramodern::host_threads::timer, timer_thread, PASS_RDRAM1);
+     timer_context.thread.detach();
+ }
+ 
+diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
+--- a/ultramodern/src/events.cpp
++++ b/ultramodern/src/events.cpp
+@@ -56,7 +56,7 @@
+ 
+ static struct {
+     struct {
+-        std::thread thread;
++        ultramodern::host_thread_t thread;
+         int cur_state;
+         int field;
+         ViState states[2];
+@@ -112,8 +112,8 @@
+         }
+     } vi;
+     struct {
+-        std::thread gfx_thread;
+-        std::thread task_thread;
++        ultramodern::host_thread_t gfx_thread;
++        ultramodern::host_thread_t task_thread;
+         PTR(OSMesgQueue) mq = NULLPTR;
+         OSMesg msg = (OSMesg)0;
+     } sp;
+@@ -175,7 +175,7 @@
+ 
+ 
+ extern std::atomic_bool exited;
+-extern moodycamel::LightweightSemaphore graphics_shutdown_ready;
++extern ultramodern::host_sem graphics_shutdown_ready;
+ 
+ void set_dummy_vi(bool odd);
+ 
+@@ -274,7 +274,7 @@
+     return rsp_tasks_in_flight.load();
+ }
+ 
+-void task_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_ready) {
++void task_thread_func(uint8_t* rdram, ultramodern::host_sem* thread_ready) {
+     ultramodern::set_native_thread_name("SP Task Thread");
+     ultramodern::set_native_thread_priority(ultramodern::ThreadPriority::Normal);
+ 
+@@ -333,7 +333,7 @@
+ std::atomic<ultramodern::renderer::SetupResult> renderer_setup_result = ultramodern::renderer::SetupResult::Success;
+ std::atomic<ultramodern::renderer::GraphicsApi> renderer_chosen_api = ultramodern::renderer::GraphicsApi::Auto;
+ 
+-void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_ready, ultramodern::renderer::WindowHandle window_handle) {
++void gfx_thread_func(uint8_t* rdram, ultramodern::host_sem* thread_ready, ultramodern::renderer::WindowHandle window_handle) {
+     bool enabled_instant_present = false;
+     using namespace std::chrono_literals;
+ 
+@@ -586,11 +586,11 @@
+ }
+ 
+ void ultramodern::init_events(RDRAM_ARG ultramodern::renderer::WindowHandle window_handle) {
+-    moodycamel::LightweightSemaphore gfx_thread_ready;
+-    moodycamel::LightweightSemaphore task_thread_ready;
++    ultramodern::host_sem gfx_thread_ready;
++    ultramodern::host_sem task_thread_ready;
+     events_context.rdram = rdram;
+-    events_context.sp.gfx_thread = std::thread{ gfx_thread_func, rdram, &gfx_thread_ready, window_handle };
+-    events_context.sp.task_thread = std::thread{ task_thread_func, rdram, &task_thread_ready };
++    events_context.sp.gfx_thread = ultramodern::host_thread(ultramodern::host_threads::gfx, gfx_thread_func, rdram, &gfx_thread_ready, window_handle);
++    events_context.sp.task_thread = ultramodern::host_thread(ultramodern::host_threads::sp_task, task_thread_func, rdram, &task_thread_ready);
+ 
+     // Wait for the two sp threads to be ready before continuing to prevent the game from
+     // running before we're able to handle RSP tasks.
+@@ -625,7 +625,7 @@
+         throw std::runtime_error("Failed to initialize the renderer");
+     }
+ 
+-    events_context.vi.thread = std::thread{ vi_thread_func };
++    events_context.vi.thread = ultramodern::host_thread(ultramodern::host_threads::vi, vi_thread_func);
+ }
+ 
+ void ultramodern::join_event_threads() {
+diff --git a/librecomp/src/pi.cpp b/librecomp/src/pi.cpp
+--- a/librecomp/src/pi.cpp
++++ b/librecomp/src/pi.cpp
+@@ -233,13 +233,13 @@
+ 
+ struct {
+     std::vector<char> save_buffer;
+-    std::thread saving_thread;
++    ultramodern::host_thread_t saving_thread;
+     std::filesystem::path save_file_path;
+-    moodycamel::LightweightSemaphore write_sempahore;
++    ultramodern::host_sem write_sempahore;
+     // Used to tell the saving thread that a file swap is pending.
+-    moodycamel::LightweightSemaphore swap_file_pending_sempahore;
++    ultramodern::host_sem swap_file_pending_sempahore;
+     // Used to tell the consumer thread that the saving thread is ready for a file swap.
+-    moodycamel::LightweightSemaphore swap_file_ready_sempahore;
++    ultramodern::host_sem swap_file_ready_sempahore;
+     std::mutex save_buffer_mutex;
+ } save_context;
+ 
+@@ -395,7 +395,7 @@
+ 
+     read_save_file();
+ 
+-    save_context.saving_thread = std::thread{saving_thread_func, PASS_RDRAM};
++    save_context.saving_thread = ultramodern::host_thread(ultramodern::host_threads::saving, saving_thread_func, PASS_RDRAM1);
+ }
+ 
+ void ultramodern::change_save_file(const std::u8string& subfolder, const std::u8string& name) {
+diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
+--- a/librecomp/src/recomp.cpp
++++ b/librecomp/src/recomp.cpp
+@@ -632,7 +632,7 @@
+ }
+ 
+ std::atomic_bool exited = false;
+-moodycamel::LightweightSemaphore graphics_shutdown_ready;
++ultramodern::host_sem graphics_shutdown_ready;
+ 
+ void ultramodern::quit() {
+     exited.store(true);
+@@ -986,7 +986,7 @@
+     recomp::mods::register_config_exports();
+     recomp::mods::register_hook_exports();
+ 
+-    std::thread game_thread{[](ultramodern::renderer::WindowHandle window_handle, uint8_t* rdram) {
++    ultramodern::host_thread_t game_thread = ultramodern::host_thread(ultramodern::host_threads::game_start, [](ultramodern::renderer::WindowHandle window_handle, uint8_t* rdram) {
+         debug_printf("[Recomp] Starting\n");
+ 
+         ultramodern::set_native_thread_name("Game Start Thread");
+@@ -997,7 +997,7 @@
+ 
+         // Loop until the game starts.
+         while (!wait_for_game_started(rdram, &context)) {}
+-    }, window_handle, rdram};
++    }, window_handle, rdram);
+ 
+     while (!exited) {
+         ultramodern::sleep_milliseconds(1);

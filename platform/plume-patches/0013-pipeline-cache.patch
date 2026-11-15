@@ -1,0 +1,128 @@
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index 236263b..e0d5638 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -1396,6 +1396,8 @@ namespace plume {
+ 
+     // VulkanShader
+ 
++    static VulkanDevice *savedCacheDevice = nullptr;
++
+     // A driver without descriptor indexing (Mali-G52) refuses pipelines from SPIR-V that asks for non-uniform indexing, though a
+     // draw's texture index is the same for all of it: drop the capability, the extension and the decorations.
+     static std::vector<uint32_t> withoutNonUniform(const void *data, uint64_t size) {
+@@ -1548,7 +1550,7 @@ namespace plume {
+         pipelineInfo.layout = pipelineLayout->vk;
+         pipelineInfo.stage = stageInfo;
+ 
+-        VkResult res = vkCreateComputePipelines(device->vk, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &vk);
++        VkResult res = vkCreateComputePipelines(device->vk, device->pipelineCache, 1, &pipelineInfo, nullptr, &vk);
+         if (res != VK_SUCCESS) {
+             fprintf(stderr, "vkCreateComputePipelines failed with error code 0x%X (shader of %llu bytes).\n", res, (unsigned long long)(computeShader->codeSize));
+             return;
+@@ -1807,7 +1809,7 @@ namespace plume {
+         pipelineInfo.layout = pipelineLayout->vk;
+         pipelineInfo.renderPass = renderPass;
+ 
+-        VkResult res = vkCreateGraphicsPipelines(device->vk, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &vk);
++        VkResult res = vkCreateGraphicsPipelines(device->vk, device->pipelineCache, 1, &pipelineInfo, nullptr, &vk);
+         if (res != VK_SUCCESS) {
+             fprintf(stderr, "vkCreateGraphicsPipelines failed with error code 0x%X: %u stages, first '%s', %d samples.\n", res, pipelineInfo.stageCount,
+                 pipelineInfo.stageCount > 0 ? pipelineInfo.pStages[0].pName : "", (int)pipelineInfo.pMultisampleState->rasterizationSamples);
+@@ -4433,6 +4435,27 @@ namespace plume {
+             return;
+         }
+ 
++        // Potato Mode: the driver's compiled pipelines, kept between launches (a weak CPU spends a minute on them).
++        if (const char *folder = (getenv("BLITZ_LEAN") != nullptr) ? getenv("APP_FOLDER_PATH") : nullptr) {
++            pipelineCachePath = std::string(folder) + "/pipeline_cache.bin";
++            std::vector<char> saved;
++            if (FILE *f = fopen(pipelineCachePath.c_str(), "rb")) {
++                char chunk[1 << 16];
++                for (size_t n; (n = fread(chunk, 1, sizeof(chunk), f)) > 0; ) saved.insert(saved.end(), chunk, chunk + n);
++                fclose(f);
++            }
++            VkPipelineCacheCreateInfo cacheInfo = {};
++            cacheInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
++            cacheInfo.initialDataSize = saved.size();
++            cacheInfo.pInitialData = saved.empty() ? nullptr : saved.data();
++            VkResult cacheRes = vkCreatePipelineCache(vk, &cacheInfo, nullptr, &pipelineCache);
++            fprintf(stderr, "[vulkan] pipeline cache: %zu KB from earlier runs, %s\n", saved.size() / 1024, cacheRes == VK_SUCCESS ? "ok" : "refused");
++            if (cacheRes != VK_SUCCESS) {
++                pipelineCache = VK_NULL_HANDLE;
++            }
++            savedCacheDevice = this;
++        }
++
+         // Find the biggest device local memory available on the device.
+         VkDeviceSize memoryHeapSize = 0;
+         const VkPhysicalDeviceMemoryProperties *memoryProps = nullptr;
+@@ -4492,6 +4515,32 @@ namespace plume {
+         }
+     }
+ 
++    void VulkanDevice::savePipelineCache() {
++        if (pipelineCache == VK_NULL_HANDLE) {
++            return;
++        }
++
++        size_t size = 0;
++        if ((vkGetPipelineCacheData(vk, pipelineCache, &size, nullptr) != VK_SUCCESS) || (size == 0)) {
++            return;
++        }
++
++        std::vector<char> data(size);
++        if (vkGetPipelineCacheData(vk, pipelineCache, &size, data.data()) != VK_SUCCESS) {
++            return;
++        }
++
++        const std::string temporary = pipelineCachePath + ".new";
++        if (FILE *f = fopen(temporary.c_str(), "wb")) {
++            const bool written = fwrite(data.data(), 1, size, f) == size;
++            fclose(f);
++            if (written) {
++                rename(temporary.c_str(), pipelineCachePath.c_str());
++                fprintf(stderr, "[vulkan] pipeline cache saved: %zu KB\n", size / 1024);
++            }
++        }
++    }
++
+     VulkanDevice::~VulkanDevice() {
+         release();
+     }
+@@ -4774,6 +4823,11 @@ namespace plume {
+         }
+ 
+         if (vk != VK_NULL_HANDLE) {
++            if (pipelineCache != VK_NULL_HANDLE) {
++                savePipelineCache();
++                vkDestroyPipelineCache(vk, pipelineCache, nullptr);
++            }
++
+             vkDestroyDevice(vk, nullptr);
+             vk = VK_NULL_HANDLE;
+         }
+@@ -4998,3 +5052,9 @@ extern "C" void plume_android_set_window(ANativeWindow *window) {
+     plume::androidWindowReported.store(true);
+ }
+ #endif
++
++extern "C" void plume_save_pipeline_cache() {
++    if (plume::savedCacheDevice != nullptr) {
++        plume::savedCacheDevice->savePipelineCache();
++    }
++}
+diff --git a/plume_vulkan.h b/plume_vulkan.h
+index 6d29695..a2b4540 100644
+--- a/plume_vulkan.h
++++ b/plume_vulkan.h
+@@ -413,6 +413,9 @@ namespace plume {
+         VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+         VkPhysicalDeviceProperties physicalDeviceProperties = {};
+         VmaAllocator allocator = VK_NULL_HANDLE;
++        VkPipelineCache pipelineCache = VK_NULL_HANDLE;
++        std::string pipelineCachePath;
++        void savePipelineCache();
+         uint32_t queueFamilyIndices[3] = {};
+         std::vector<VulkanQueueFamily> queueFamilies;
+         RenderDeviceCapabilities capabilities;

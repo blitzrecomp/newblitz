@@ -1,0 +1,150 @@
+diff --git a/src/render/rt64_framebuffer_renderer.cpp b/src/render/rt64_framebuffer_renderer.cpp
+index d495c44..0b2b273 100644
+--- a/src/render/rt64_framebuffer_renderer.cpp
++++ b/src/render/rt64_framebuffer_renderer.cpp
+@@ -7,8 +7,21 @@
+ #include <cstdio>
+ 
+ #include <atomic>
++#include <cstdlib>
+ namespace RT64 { extern std::atomic<uint64_t> statDrawsUber, statDrawsFast; }
+ 
++// BLITZ_FAST_FILTER=1: a filtered texture the GPU's own sampler can address (decoded, not raw TMEM, a wrap/mirror/clamp it has)
++// takes one hardware bilinear fetch in place of the four the N64's three-point filter is built from (TextureSampler.hlsli).
++// 2: the same, but rectangles (2D art, text) keep the exact filter. On (1) in Potato Mode (BLITZ_LEAN), off elsewhere unless
++// asked for; live with "RT64 filter 0|1|2" (dev_input.cpp). Read at the first frame, not at load, so the env set by the activity
++// counts. It reaches the shader in FrameParams, so it's one branch on a constant and no new pipelines. On an RG DS (Mali-G52),
++// two screens at 1.5x: frame pass GPU 2539 -> 2088 ms per 5 s, 23.6 -> 26.8 fps.
++namespace RT64 {
++    std::atomic<int> fastFilterMode{ -1 };  // -1: not read yet
++}
++
++extern "C" void blitz_rt64_fast_filter(int mode) { RT64::fastFilterMode = mode; }
++
+ #include "../include/rt64_extended_gbi.h"
+ 
+ #include "common/rt64_blitz_watch.h"
+@@ -154,6 +167,7 @@ namespace RT64 {
+         frameParams.frameCount = 0;
+         frameParams.viewUbershaders = false;
+         frameParams.ditherNoiseStrength = 1.0f;
++        frameParams.fastFilter = 0;
+ 
+         shaderUploader = std::make_unique<BufferUploader>(worker->device);
+         descCommonSet = std::make_unique<FramebufferRendererDescriptorCommonSet>(shaderLibrary->samplerLibrary, worker->device->getCapabilities().raytracing, worker->device);
+@@ -182,6 +196,16 @@ namespace RT64 {
+         rspSmoothNormalVector.clear();
+         frameParams.viewUbershaders = ubershadersVisible;
+         frameParams.ditherNoiseStrength = ditherNoiseStrength;
++        int fastFilter = fastFilterMode.load(std::memory_order_relaxed);
++        if (fastFilter < 0) {
++            const char *v = getenv("BLITZ_FAST_FILTER");
++            fastFilter = (v != nullptr) ? atoi(v) : ((getenv("BLITZ_LEAN") != nullptr) ? 1 : 0);
++            int expected = -1;
++            fastFilterMode.compare_exchange_strong(expected, fastFilter);
++            fastFilter = fastFilterMode.load(std::memory_order_relaxed);
++        }
++
++        frameParams.fastFilter = ((fastFilter == 1) || (fastFilter == 2)) ? uint32_t(fastFilter) : 0;
+         framebufferCount = 0;
+ 
+         // Create dummy color target if it hasn't been created yet.
+diff --git a/src/shaders/TextureSampler.hlsli b/src/shaders/TextureSampler.hlsli
+index 1ceb2ce..77f5c71 100644
+--- a/src/shaders/TextureSampler.hlsli
++++ b/src/shaders/TextureSampler.hlsli
+@@ -139,7 +139,37 @@ float4 sampleTextureNative(Texture2D texture, uint nativeSampler, int2 texelBase
+     }
+ }
+ 
+-float4 sampleTextureLevel(const RDPTile rdpTile, const GPUTile gpuTile, bool filterBilerp, bool filterAverage, bool linearFiltering, float2 uvCoord, uint tlut, bool canDecodeTMEM, uint mipLevel, bool usesHDR) {
++// BLITZ_FAST_FILTER (FrameParams.fastFilter): one hardware bilinear fetch in place of the four nearest ones below and their
++// blend. Same texture, same wrap/mirror/clamp, same four texels: the exact path takes texel floor(uvCoord) and leans towards
++// the next one by frac(uvCoord), which is where the sampler's own bilinear lands for uvCoord + 0.5 over the size. What changes
++// is the blend: the N64's three-point triangle becomes a four-point square (identical when linearFiltering already asks for
++// bilinear, and for G_TF_AVERAGE's middle-of-four case), and the fraction is the sampler's (8 bits on most GPUs).
++float4 sampleTextureNativeBilinear(Texture2D texture, uint nativeSampler, float2 uvCoord, float2 textureSize) {
++    float2 nativeUVCoord = (uvCoord + 0.5f) / textureSize;
++    switch (nativeSampler) {
++        case NATIVE_SAMPLER_WRAP_WRAP:
++            return texture.SampleLevel(gLinearWrapWrapSampler, nativeUVCoord, 0.0f);
++        case NATIVE_SAMPLER_WRAP_MIRROR:
++            return texture.SampleLevel(gLinearWrapMirrorSampler, nativeUVCoord, 0.0f);
++        case NATIVE_SAMPLER_WRAP_CLAMP:
++            return texture.SampleLevel(gLinearWrapClampSampler, nativeUVCoord, 0.0f);
++        case NATIVE_SAMPLER_MIRROR_WRAP:
++            return texture.SampleLevel(gLinearMirrorWrapSampler, nativeUVCoord, 0.0f);
++        case NATIVE_SAMPLER_MIRROR_MIRROR:
++            return texture.SampleLevel(gLinearMirrorMirrorSampler, nativeUVCoord, 0.0f);
++        case NATIVE_SAMPLER_MIRROR_CLAMP:
++            return texture.SampleLevel(gLinearMirrorClampSampler, nativeUVCoord, 0.0f);
++        case NATIVE_SAMPLER_CLAMP_WRAP:
++            return texture.SampleLevel(gLinearClampWrapSampler, nativeUVCoord, 0.0f);
++        case NATIVE_SAMPLER_CLAMP_MIRROR:
++            return texture.SampleLevel(gLinearClampMirrorSampler, nativeUVCoord, 0.0f);
++        case NATIVE_SAMPLER_CLAMP_CLAMP:
++        default:
++            return texture.SampleLevel(gLinearClampClampSampler, nativeUVCoord, 0.0f);
++    }
++}
++
++float4 sampleTextureLevel(const RDPTile rdpTile, const GPUTile gpuTile, bool filterBilerp, bool filterAverage, bool linearFiltering, bool fastFilter, float2 uvCoord, uint tlut, bool canDecodeTMEM, uint mipLevel, bool usesHDR) {
+     float2 tcScale = gpuTile.tcScale;
+     float mipScale = float(1U << mipLevel);
+     uvCoord /= mipScale;
+@@ -169,6 +199,13 @@ float4 sampleTextureLevel(const RDPTile rdpTile, const GPUTile gpuTile, bool fil
+     }
+     else {
+         Texture2D texture = gTextures[NonUniformResourceIndex(gpuTile.textureIndex)];
++
++        // Only here: raw TMEM (decoded per texel, palette included) and NATIVE_SAMPLER_NONE (tile copies, clamps the sampler
++        // can't place, modes it doesn't have) keep the four fetches above, and an unfiltered texture is one fetch already.
++        if (filtering && fastFilter) {
++            return sampleTextureNativeBilinear(texture, nativeSampler, uvCoord, gpuTile.textureDimensions.xy);
++        }
++
+ #if USE_FOR_LOOPS
+         int numSamples = select_uint(filtering, 4, 1);
+         [unroll]
+@@ -249,6 +286,7 @@ float4 sampleTexture(OtherMode otherMode, RenderFlags renderFlags, float2 inputU
+     const bool filterBilerp = (filter != G_TF_POINT) && (cycleType != G_CYC_COPY);
+     const bool filterAverage = (filter == G_TF_AVERAGE);
+     const bool linearFiltering = renderFlagLinearFiltering(renderFlags);
++    const bool fastFilter = (FrParams.fastFilter == 1) || ((FrParams.fastFilter == 2) && !renderFlagRect(renderFlags));
+     
+ #if FIX_UPSCALING_PRECISION
+     // Account for the fact that scaling can result in less than perfect results that affect the quality of point filtering.
+@@ -326,13 +364,15 @@ float4 sampleTexture(OtherMode otherMode, RenderFlags renderFlags, float2 inputU
+ #if USE_FOR_LOOPS
+     [unroll]
+     for (uint i = 0; i < numRDPSamples; i++) {
+-        textureSamples[i] = sampleTextureLevel(rdpTile, gpuTile, filterBilerp, filterAverage, linearFiltering, uvCoord, tlut, canDecodeTMEM, RDPMipLevels[i], usesHDR);
++        textureSamples[i] = sampleTextureLevel(rdpTile, gpuTile, filterBilerp, filterAverage, linearFiltering, fastFilter, uvCoord, tlut, canDecodeTMEM, RDPMipLevels[i], usesHDR);
+     }
+ #else
+-    textureSamples[0] = sampleTextureLevel(rdpTile, gpuTile, filterBilerp, filterAverage, linearFiltering, uvCoord, tlut, canDecodeTMEM, RDPMipLevels[0], usesHDR);
++    textureSamples[0] = sampleTextureLevel(rdpTile, gpuTile, filterBilerp, filterAverage, linearFiltering, fastFilter, uvCoord, tlut, canDecodeTMEM, RDPMipLevels[0], usesHDR);
+     
+     if (numRDPSamples > 1) {
+-        textureSamples[1] = sampleTextureLevel(rdpTile, gpuTile, filterBilerp, filterAverage, linearFiltering, uvCoord, tlut, canDecodeTMEM, RDPMipLevels[1], usesHDR);
++        // A second level only comes with NATIVE_SAMPLER_NONE (a native sampler's mipmaps returned above), so never the fast filter:
++        // false here drops its dead copy from every specialized shader.
++        textureSamples[1] = sampleTextureLevel(rdpTile, gpuTile, filterBilerp, filterAverage, linearFiltering, false, uvCoord, tlut, canDecodeTMEM, RDPMipLevels[1], usesHDR);
+     }
+ #endif
+ 
+diff --git a/src/shared/rt64_frame_params.h b/src/shared/rt64_frame_params.h
+index 2e62aaf..7a22579 100644
+--- a/src/shared/rt64_frame_params.h
++++ b/src/shared/rt64_frame_params.h
+@@ -13,6 +13,10 @@ namespace interop {
+         uint frameCount;
+         uint viewUbershaders;
+         float ditherNoiseStrength;
++
++        // BLITZ_FAST_FILTER (rt64_framebuffer_renderer.cpp): 0 the exact N64 filter everywhere, 1 one hardware bilinear fetch
++        // where TextureSampler.hlsli says it can stand in, 2 the same but rectangles (2D art, text) keep the exact filter.
++        uint fastFilter;
+     };
+ #ifdef HLSL_CPU
+ };

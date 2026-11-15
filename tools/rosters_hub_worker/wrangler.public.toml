@@ -1,0 +1,13 @@
+# The public season server (2026-11-13): the same code as the private rosters post office (src/index.js), on the
+# public project's own Cloudflare account, so it can be switched off without touching the private one. The app finds
+# it at https://newblitz.<account>.workers.dev/paks/ (build/pak_server, never in source).
+# Deploy (logged in to the public account only: XDG_CONFIG_HOME=build/wrangler_public):
+#   XDG_CONFIG_HOME=<repo>/build/wrangler_public npx wrangler@4 deploy -c wrangler.public.toml
+# Secrets: UPLOAD_SECRET (tools/publish_pak.sh's key, kept in build/pak_upload_secret); HUB_KEY (unused here: random).
+name = "newblitz"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+[[kv_namespaces]]
+binding = "ROSTERS"
+id = "23eebe0246f24cb680c7e9157a73eb20"

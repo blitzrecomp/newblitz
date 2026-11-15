@@ -1,0 +1,132 @@
+diff --git a/librecomp/include/librecomp/game.hpp b/librecomp/include/librecomp/game.hpp
+--- a/librecomp/include/librecomp/game.hpp
++++ b/librecomp/include/librecomp/game.hpp
+@@ -107,6 +107,19 @@
+     // While set, a ROM from set_rom_contents (a mod's ROM patch) replaces a mapped ROM with a copy. The old mapping
+     // stays readable until it is cleared (load_mods still reads the ROM it started with).
+     void set_rom_from_mods(bool from_mods);
++    // BlitzRecomp (PSP, docs/PSP_PORT.md §4.3): a ROM that isn't held whole in memory, read through a provider.
++    // With none set (the default) the ROM is the in-memory copy or mapping, as before. With one set, do_rom_read and
++    // do_rom_pio read through it, the stored ROM file isn't read or hashed at start (the platform has checked it),
++    // and get_rom() is empty.
++    class rom_provider {
++    public:
++        virtual ~rom_provider() = default;
++        virtual size_t size() const = 0;
++        // Copies len bytes from rom_offset (the stored, big-endian byte order) to dst. Bytes past the end read as zero.
++        virtual void read(uint32_t rom_offset, uint8_t* dst, size_t len) = 0;
++    };
++    void set_rom_provider(rom_provider* provider);  // before recomp::start; the provider lives for the whole run
++    rom_provider* get_rom_provider();
+     std::span<const uint8_t> get_rom();
+     void do_rom_read(uint8_t* rdram, gpr ram_address, uint32_t physical_addr, size_t num_bytes);
+     void do_rom_pio(uint8_t* rdram, gpr ram_address, uint32_t physical_addr);
+diff --git a/librecomp/src/pi.cpp b/librecomp/src/pi.cpp
+--- a/librecomp/src/pi.cpp
++++ b/librecomp/src/pi.cpp
+@@ -1,3 +1,4 @@
++#include <algorithm>
+ #include <memory>
+ #include <fstream>
+ #include <array>
+@@ -51,7 +52,7 @@
+ #endif
+ 
+ bool recomp::is_rom_loaded() {
+-    return !rom_view.empty();
++    return !rom_view.empty() || recomp::get_rom_provider() != nullptr;
+ }
+ 
+ void recomp::set_rom_contents(std::vector<uint8_t>&& new_rom) {
+@@ -172,6 +173,16 @@
+     return rom_view;
+ }
+ 
++static recomp::rom_provider* rom_source = nullptr;  // BlitzRecomp: null unless a platform reads the ROM through one
++
++void recomp::set_rom_provider(recomp::rom_provider* provider) {
++    rom_source = provider;
++}
++
++recomp::rom_provider* recomp::get_rom_provider() {
++    return rom_source;
++}
++
+ constexpr uint32_t k1_to_phys(uint32_t addr) {
+     return addr & 0x1FFFFFFF;
+ }
+@@ -206,6 +217,20 @@
+ 
+ extern "C" void osCreatePiManager_recomp(uint8_t* rdram, recomp_context* ctx) {
+     ;
++}
++
++// Through the provider, a block at a time (BlitzRecomp, PSP). Out of line, so do_rom_read's own frame stays as it was.
++[[gnu::noinline]] static void rom_read_through_provider(uint8_t* rdram, gpr ram_address, uint32_t physical_addr, size_t num_bytes) {
++    uint8_t block[4096];
++    uint32_t rom_offset = physical_addr - recomp::rom_base;
++    for (size_t done = 0; done < num_bytes;) {
++        size_t n = std::min(sizeof(block), num_bytes - done);
++        rom_source->read(rom_offset + (uint32_t)done, block, n);
++        for (size_t i = 0; i < n; i++) {
++            MEM_B(done + i, ram_address) = block[i];
++        }
++        done += n;
++    }
+ }
+ 
+ void recomp::do_rom_read(uint8_t* rdram, gpr ram_address, uint32_t physical_addr, size_t num_bytes) {
+@@ -214,6 +239,10 @@
+     // TODO handle misaligned DMA
+     assert((physical_addr & 0x1) == 0 && "Only PI DMA from aligned ROM addresses is currently supported");
+     assert((ram_address & 0x7) == 0 && "Only PI DMA to aligned RDRAM addresses is currently supported");
++    if (rom_source != nullptr) {
++        rom_read_through_provider(rdram, ram_address, physical_addr, num_bytes);
++        return;
++    }
+     const uint8_t* rom_addr = rom_view.data() + physical_addr - recomp::rom_base;
+     for (size_t i = 0; i < num_bytes; i++) {
+         MEM_B(i, ram_address) = *rom_addr;
+@@ -224,6 +253,15 @@
+ void recomp::do_rom_pio(uint8_t* rdram, gpr ram_address, uint32_t physical_addr) {
+     assert((physical_addr & 0x3) == 0 && "PIO not 4-byte aligned in device, currently unsupported");
+     assert((ram_address & 0x3) == 0 && "PIO not 4-byte aligned in RDRAM, currently unsupported");
++    if (rom_source != nullptr) {
++        uint8_t word[4];
++        rom_source->read(physical_addr - recomp::rom_base, word, sizeof(word));
++        MEM_B(0, ram_address) = word[0];
++        MEM_B(1, ram_address) = word[1];
++        MEM_B(2, ram_address) = word[2];
++        MEM_B(3, ram_address) = word[3];
++        return;
++    }
+     const uint8_t* rom_addr = rom_view.data() + physical_addr - recomp::rom_base;
+     MEM_B(0, ram_address) = *rom_addr++;
+     MEM_B(1, ram_address) = *rom_addr++;
+diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
+--- a/librecomp/src/recomp.cpp
++++ b/librecomp/src/recomp.cpp
+@@ -255,6 +255,13 @@
+ }
+ 
+ void recomp::check_all_stored_roms() {
++    if (recomp::get_rom_provider() != nullptr) {
++        // BlitzRecomp (PSP): the platform's ROM provider was checked when it was opened; the file is never read whole.
++        for (const auto& cur_rom_entry: game_roms) {
++            valid_game_roms.insert(cur_rom_entry.first);
++        }
++        return;
++    }
+     for (const auto& cur_rom_entry: game_roms) {
+         if (check_stored_rom(cur_rom_entry.second)) {
+             valid_game_roms.insert(cur_rom_entry.first);
+@@ -267,6 +274,9 @@
+ 
+     if (find_it == game_roms.end()) {
+         return false;
++    }
++    if (recomp::get_rom_provider() != nullptr) {
++        return true;  // BlitzRecomp (PSP): read through the provider (game.hpp)
+     }
+ 
+     // BlitzRecomp: on Android the stored file is mapped rather than read into memory, and checked as mapped (pi.cpp).

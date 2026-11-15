@@ -1,0 +1,167 @@
+diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
+index 2970e71..54dd338 100644
+--- a/src/hle/rt64_state.cpp
++++ b/src/hle/rt64_state.cpp
+@@ -1621,6 +1621,7 @@ namespace RT64 {
+ 
+         if (viHistory.top().vi.visible()) {
+             workload.viFbSize = viHistory.top().vi.fbSize();
++            workload.viAspectRatio = viHistory.top().vi.displayAspectRatio();
+         }
+ 
+         // Log and reset profilers.
+diff --git a/src/hle/rt64_vi.cpp b/src/hle/rt64_vi.cpp
+index a870166..0934773 100644
+--- a/src/hle/rt64_vi.cpp
++++ b/src/hle/rt64_vi.cpp
+@@ -124,6 +124,33 @@ namespace RT64 {
+         }
+     }
+ 
++    // Shape of the framebuffer image on a 4:3 screen, from the VI scale registers. A non-interlaced 320x240
++    // buffer at the usual scales gives exactly 4:3, but a game can stretch a differently shaped buffer to
++    // fill the screen (NFL Blitz renders 512x256 and scales it to about 594x225 of the 640x240 frame).
++    // Only non-interlaced modes are accounted for (the height is compared with 240 lines); interlaced
++    // 480-line modes would come out wrong. This port only uses Blitz's own mode. Falls back to the
++    // buffer's own width/height when the registers give an implausible result.
++    float VI::displayAspectRatio() const {
++        const hlslpp::uint2 size = fbSize();
++        if ((size.x == 0) || (size.y == 0)) {
++            return 4.0f / 3.0f;
++        }
++
++        const float bufferRatio = float(size.x) / float(size.y);
++        if ((xTransform.xScale == 0) || (yTransform.yScale == 0)) {
++            return bufferRatio;
++        }
++
++        const float screenWidthFraction = (float(size.x) * xScaleFloat()) / 640.0f;
++        const float screenHeightFraction = (float(size.y) * yScaleFloat()) / 240.0f;
++        const float ratio = (screenWidthFraction / screenHeightFraction) * (4.0f / 3.0f);
++        if (!(ratio >= 0.5f) || !(ratio <= 4.0f)) {
++            return bufferRatio;
++        }
++
++        return ratio;
++    }
++
+     float VI::xScaleFloat() const {
+         return (1024.0f / xTransform.xScale);
+     }
+diff --git a/src/hle/rt64_vi.h b/src/hle/rt64_vi.h
+index 5b70e01..e7f9c7c 100644
+--- a/src/hle/rt64_vi.h
++++ b/src/hle/rt64_vi.h
+@@ -141,6 +141,7 @@ namespace RT64 {
+         uint8_t fbSiz() const;
+         uint32_t fbAddress() const;
+         hlslpp::uint2 fbSize() const;
++        float displayAspectRatio() const;
+         float xScaleFloat() const;
+         float xOffsetFloat() const;
+         float yScaleFloat() const;
+diff --git a/src/hle/rt64_workload.h b/src/hle/rt64_workload.h
+index 8ea27d5..96be09a 100644
+--- a/src/hle/rt64_workload.h
++++ b/src/hle/rt64_workload.h
+@@ -226,6 +226,7 @@ namespace RT64 {
+         FramebufferStorage fbStorage;
+         uint32_t viOriginalRate;
+         hlslpp::uint2 viFbSize = {};
++        float viAspectRatio = 0.0f;
+         DebuggerRenderer debuggerRenderer;
+         DebuggerCamera debuggerCamera;
+         std::multimap<uint32_t, uint32_t> transformIdMap;
+diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
+index 5a331aa..7efb598 100644
+--- a/src/hle/rt64_workload_queue.cpp
++++ b/src/hle/rt64_workload_queue.cpp
+@@ -120,7 +120,7 @@ namespace RT64 {
+         framebufferRenderer->updateMultisampling();
+     }
+ 
+-    void WorkloadQueue::threadConfigurationUpdate(hlslpp::uint2 viFbSize, WorkloadConfiguration &workloadConfig) {
++    void WorkloadQueue::threadConfigurationUpdate(hlslpp::uint2 viFbSize, float viAspectRatio, WorkloadConfiguration &workloadConfig) {
+         const std::scoped_lock lock(ext.sharedResources->configurationMutex);
+         const bool sizeChanged = ext.sharedResources->swapChainSizeChanged;
+         ext.sharedResources->swapChainSizeChanged = false;
+@@ -131,13 +131,18 @@ namespace RT64 {
+         const uint32_t referenceHeight = (viFbSize[1] > 0) ? std::max(viFbSize[1], MinimumReferenceHeight) : 240;
+ 
+         // Compute the aspect ratio to be used for the frame.
+-        workloadConfig.aspectRatioSource = (viFbSize[1] > 0) ? float(viFbSize[0]) / float(viFbSize[1]) : (4.0f / 3.0f);
++        // Ratios are kept in buffer pixels, the space the framebuffer renderer compares scissor shapes in. When the VI
++        // shows the buffer's pixels non-square (NFL Blitz: 512x256 stretched over a 4:3 screen, see
++        // VI::displayAspectRatio), window and user ratios are converted into that space with the pixel aspect.
++        const float bufferRatio = (viFbSize[1] > 0) ? float(viFbSize[0]) / float(viFbSize[1]) : (4.0f / 3.0f);
++        const float pixelAspect = (viAspectRatio > 0.0f) ? (bufferRatio / viAspectRatio) : 1.0f;
++        workloadConfig.aspectRatioSource = bufferRatio;
+ 
+         const auto ratioMode = ext.sharedResources->userConfig.aspectRatio;
+         switch (ratioMode) {
+         case UserConfiguration::AspectRatio::Expand:
+             if ((ext.sharedResources->swapChainWidth > 0) && (ext.sharedResources->swapChainHeight > 0)) {
+-                const float derivedRatioTarget = float(ext.sharedResources->swapChainWidth) / float(ext.sharedResources->swapChainHeight);
++                const float derivedRatioTarget = (float(ext.sharedResources->swapChainWidth) / float(ext.sharedResources->swapChainHeight)) * pixelAspect;
+                 workloadConfig.aspectRatioTarget = std::max(derivedRatioTarget, workloadConfig.aspectRatioSource);
+             }
+             else {
+@@ -146,7 +151,7 @@ namespace RT64 {
+ 
+             break;
+         case UserConfiguration::AspectRatio::Manual:
+-            workloadConfig.aspectRatioTarget = float(ext.sharedResources->userConfig.aspectTarget);
++            workloadConfig.aspectRatioTarget = float(ext.sharedResources->userConfig.aspectTarget) * pixelAspect;
+             break;
+         case UserConfiguration::AspectRatio::Original:
+         default:
+@@ -162,7 +167,7 @@ namespace RT64 {
+             break;
+         case UserConfiguration::AspectRatio::Manual:
+             if ((ext.sharedResources->swapChainWidth > 0) && (ext.sharedResources->swapChainHeight > 0)) {
+-                const float reducedExtTarget = float(ext.sharedResources->userConfig.extAspectTarget) - workloadConfig.aspectRatioSource;
++                const float reducedExtTarget = (float(ext.sharedResources->userConfig.extAspectTarget) * pixelAspect) - workloadConfig.aspectRatioSource;
+                 const float reducedDisplayTarget = workloadConfig.aspectRatioTarget - workloadConfig.aspectRatioSource;
+                 if ((reducedExtTarget > 0.0f) && (reducedDisplayTarget > 0.0f)) {
+                     workloadConfig.extAspectPercentage = std::clamp((reducedExtTarget / reducedDisplayTarget), 0.0f, 1.0f);
+@@ -912,7 +917,7 @@ namespace RT64 {
+ 
+                 ElapsedTimer workloadTimer;
+                 workloadProfiler.start();
+-                threadConfigurationUpdate(workload.viFbSize, workloadConfig);
++                threadConfigurationUpdate(workload.viFbSize, workload.viAspectRatio, workloadConfig);
+ 
+                 // FIXME: This is a very hacky way to find out if we need to advance the frame if the workload was paused for the first time.
+                 if (!workload.paused || (!gameFrames[curFrameIndex].workloads.empty() && (gameFrames[curFrameIndex].workloads[0] != (uint32_t)processCursor))) {
+diff --git a/src/hle/rt64_workload_queue.h b/src/hle/rt64_workload_queue.h
+index bde2f03..d98c648 100644
+--- a/src/hle/rt64_workload_queue.h
++++ b/src/hle/rt64_workload_queue.h
+@@ -111,7 +111,7 @@ namespace RT64 {
+         void waitForWorkloadId(uint64_t waitId);
+         void setup(const External &ext);
+         void updateMultisampling();
+-        void threadConfigurationUpdate(hlslpp::uint2 viFbSize, WorkloadConfiguration &workloadConfig);
++        void threadConfigurationUpdate(hlslpp::uint2 viFbSize, float viAspectRatio, WorkloadConfiguration &workloadConfig);
+         void threadConfigurationValidate();
+         void threadRenderFrame(GameFrame &curFrame, const GameFrame &prevFrame, const WorkloadConfiguration &workloadConfig,
+             const DebuggerRenderer &debuggerRenderer, const DebuggerCamera &debuggerCamera, float curFrameWeight, float prevFrameWeight,
+diff --git a/src/render/rt64_vi_renderer.cpp b/src/render/rt64_vi_renderer.cpp
+index b4ff4e9..67d17b0 100644
+--- a/src/render/rt64_vi_renderer.cpp
++++ b/src/render/rt64_vi_renderer.cpp
+@@ -101,7 +101,13 @@ namespace RT64 {
+         // the region of interest is rendered. A scissor will cut it off correctly according to the coordinates
+         // specified by the VI.
+         const hlslpp::float2 sdSize = removeBlackBorders ? hlslpp::float2(vi.fbSize()) : hlslpp::float2(320.0f, 240.0f);
+-        const hlslpp::float2 hdSize = computeHDSize(sdSize, resolutionScale, downsamplingScale);
++        hlslpp::float2 hdSize = computeHDSize(sdSize, resolutionScale, downsamplingScale);
++        if (removeBlackBorders) {
++            // Give the virtual TV the shape the VI shows the buffer at (VI::displayAspectRatio), not the buffer's own
++            // width/height: a 512x256 buffer that the VI stretches over a 4:3 screen must not be letterboxed to 2:1.
++            // Keep the widening chosen for the frame (Expand): resolutionScale.x / resolutionScale.y is its aspect ratio scale.
++            hdSize.x = hdSize.y * vi.displayAspectRatio() * (resolutionScale.x / resolutionScale.y);
++        }
+         const hlslpp::float2 windowSize = { float(swapChain->getWidth()), float(swapChain->getHeight()) };
+ 
+         // Query the VI for the current rendering area.

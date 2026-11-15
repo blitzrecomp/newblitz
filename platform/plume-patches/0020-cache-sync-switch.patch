@@ -1,0 +1,54 @@
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index 0083720..4548b1a 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -1179,6 +1179,27 @@ namespace plume {
+         }
+     }
+ 
++    // BLITZ_CACHE_SYNC=0 skips the invalidate and flush below, to compare on screen; on otherwise. The first map and unmap of
++    // memory that isn't coherent are logged, so a log says whether they do anything on that GPU.
++    static bool blitzCacheSync(VmaAllocator allocator, VmaAllocation allocation, const char *what) {
++        static const bool on = []() {
++            const char *v = getenv("BLITZ_CACHE_SYNC");
++            return (v == nullptr) || (atoi(v) != 0);
++        }();
++
++        VkMemoryPropertyFlags flags = 0;
++        vmaGetAllocationMemoryProperties(allocator, allocation, &flags);
++        if ((flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0) {
++            static std::atomic<int> told{ 0 };
++            const int bit = (what[0] == 'i') ? 1 : 2;
++            if ((told.fetch_or(bit) & bit) == 0) {
++                fprintf(stderr, "[memory] %s of non-coherent memory (flags 0x%X): %s\n", what, flags, on ? "done" : "skipped (BLITZ_CACHE_SYNC=0)");
++            }
++        }
++
++        return on;
++    }
++
+     void *VulkanBuffer::map(uint32_t subresource, const RenderRange *readRange) {
+         void *data = nullptr;
+         VkResult res = vmaMapMemory(device->allocator, allocation, &data);
+@@ -1189,13 +1210,19 @@ namespace plume {
+ 
+         // Memory that's host cached but not coherent (Mali's readback type, flags 0xB on an RG DS) needs its CPU cache invalidated
+         // before a read, or a readback can return what the cache held from earlier. VMA does nothing here for coherent memory.
+-        vmaInvalidateAllocation(device->allocator, allocation, 0, VK_WHOLE_SIZE);
++        if (blitzCacheSync(device->allocator, allocation, "invalidate")) {
++            vmaInvalidateAllocation(device->allocator, allocation, 0, VK_WHOLE_SIZE);
++        }
++
+         return data;
+     }
+ 
+     void VulkanBuffer::unmap(uint32_t subresource, const RenderRange *writtenRange) {
+         // And flushed after a write, for the same memory. Nothing for coherent memory.
+-        vmaFlushAllocation(device->allocator, allocation, 0, VK_WHOLE_SIZE);
++        if (blitzCacheSync(device->allocator, allocation, "flush")) {
++            vmaFlushAllocation(device->allocator, allocation, 0, VK_WHOLE_SIZE);
++        }
++
+         vmaUnmapMemory(device->allocator, allocation);
+     }
+ 

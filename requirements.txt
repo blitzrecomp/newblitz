@@ -1,0 +1,7 @@
+# Python tools for ROM analysis (make venv). Pinned to the versions this project was built and
+# tested with (2026-10-15); bump deliberately.
+splat64[mips]==0.50.1
+spimdisasm==1.42.4
+rabbitizer==1.16.2
+crunch64==0.6.2
+xxhash==4.0.1

@@ -1,0 +1,16 @@
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index 35d5c3b..ebe5063 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -4843,7 +4843,10 @@ namespace plume {
+ 
+             // A run recipe (BLITZ_RECIPE_TEXMODE), else BLITZ_TEXMODE (test_env.txt: a recipe clears the keys it doesn't name).
+             const char *texmode = (getenv("BLITZ_RECIPE_TEXMODE") != nullptr) ? getenv("BLITZ_RECIPE_TEXMODE") : getenv("BLITZ_TEXMODE");
+-            const bool compactAsked = (texmode != nullptr) && (strcmp(texmode, "compact") == 0);
++            // Compact unless asked otherwise in Potato Mode (BLITZ_LEAN): legacy indexing past the stage's 256 sampled images is
++            // undefined, and an RG DS drew from slots up to 354 that way (118,679 draws at 256+ in 3 minutes) against none with
++            // compact, same fps (28.5 vs 28.8), no misses (peak 185 of 201). Elsewhere only when asked, as before.
++            const bool compactAsked = (texmode != nullptr) ? (strcmp(texmode, "compact") == 0) : (getenv("BLITZ_LEAN") != nullptr);
+             const uint32_t stageResources = (limits.maxPerStageResources > 49) ? (limits.maxPerStageResources - 49) : 0;
+             const uint32_t imageLimit = std::min({ limits.maxPerStageDescriptorSampledImages, limits.maxDescriptorSetSampledImages, stageResources });
+             const uint32_t imageBudget = (imageLimit > 4) ? (imageLimit - 4) : 0;

@@ -1,0 +1,118 @@
+diff --git a/librecomp/include/librecomp/addresses.hpp b/librecomp/include/librecomp/addresses.hpp
+--- a/librecomp/include/librecomp/addresses.hpp
++++ b/librecomp/include/librecomp/addresses.hpp
+@@ -6,6 +6,24 @@
+ #include "recomp.h"
+ 
+ namespace recomp {
++#if defined(RECOMP_SMALL_RDRAM)
++    // BlitzRecomp (PSP, docs/PSP_PORT.md §4.2): RDRAM is the console's 8 MB and nothing more, a block the platform
++    // provides (recomp::platform_rdram) with no address-space reservation around it. The PI handles and patch data
++    // live in the top 8 KB, which the game never uses (Modern's highest use is about 0x80722300; the runtime's dummy
++    // framebuffers end at 0x807FB000), and there is no mod heap.
++    constexpr size_t mem_size = 8ULL * 1024ULL * 1024ULL;
++    constexpr size_t allocation_size = mem_size;
++    constexpr int32_t cart_handle = 0x807FE000;
++    constexpr int32_t drive_handle = (int32_t)(cart_handle + sizeof(OSPiHandle));
++    constexpr int32_t flash_handle = (int32_t)(drive_handle + sizeof(OSPiHandle));
++    constexpr int32_t flash_handle_end = (int32_t)(flash_handle + sizeof(OSPiHandle));
++    constexpr int32_t patch_rdram_start = 0x807FF000;
++    constexpr int32_t patch_rdram_end = (int32_t)0x80800000;
++    static_assert(patch_rdram_start >= flash_handle_end);
++    constexpr int32_t mod_rdram_start = patch_rdram_end;  // nothing above it: no room for mods (RECOMP_NO_MODS)
++    // The platform's RDRAM: mem_size bytes, zeroed, at a fixed address for the whole run (called once, by recomp::start).
++    uint8_t* platform_rdram(size_t size);
++#else
+     // 512GB (kseg0 size)
+     constexpr size_t mem_size = 512ULL * 1024ULL * 1024ULL;
+     // 4GB (the full address space)
+@@ -18,6 +36,7 @@
+     constexpr int32_t patch_rdram_start = 0x80801000;
+     static_assert(patch_rdram_start >= flash_handle_end);
+     constexpr int32_t mod_rdram_start = 0x81000000;
++#endif
+ 
+     // Flashram occupies the same physical address as sram, but that issue is avoided because libultra exposes
+     // a high-level interface for flashram. Because that high-level interface is reimplemented, low level accesses
+diff --git a/librecomp/include/librecomp/overlays.hpp b/librecomp/include/librecomp/overlays.hpp
+--- a/librecomp/include/librecomp/overlays.hpp
++++ b/librecomp/include/librecomp/overlays.hpp
+@@ -30,6 +30,9 @@
+         void register_base_events(char const* const* event_names);
+         void register_manual_patch_symbols(const ManualPatchSymbol* manual_patch_symbols);
+         void read_patch_data(uint8_t* rdram, gpr patch_data_address);
++#if defined(RECOMP_SMALL_RDRAM)
++        size_t patch_data_size();  // BlitzRecomp (PSP): checked against the small RDRAM's patch area
++#endif
+ 
+         void init_overlays();
+         const std::unordered_map<uint32_t, uint16_t>& get_vrom_to_section_map();
+diff --git a/librecomp/src/overlays.cpp b/librecomp/src/overlays.cpp
+--- a/librecomp/src/overlays.cpp
++++ b/librecomp/src/overlays.cpp
+@@ -177,7 +177,13 @@
+     for (size_t i = 0; i < num_patch_code_sections; i++) {
+         load_special_overlay(patch_code_sections[i], patch_code_sections[i].ram_addr);
+     }
++}
++
++#if defined(RECOMP_SMALL_RDRAM)
++size_t recomp::overlays::patch_data_size() {
++    return patch_data.size();
+ }
++#endif
+ 
+ void recomp::overlays::read_patch_data(uint8_t* rdram, gpr patch_data_address) {
+     for (size_t i = 0; i < patch_data.size(); i++) {
+diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
+--- a/librecomp/src/recomp.cpp
++++ b/librecomp/src/recomp.cpp
+@@ -585,6 +585,12 @@
+     recomp::do_rom_read(rdram, entrypoint, 0x10001000, 0x100000);
+ 
+     // Read in any extra data from patches
++#if defined(RECOMP_SMALL_RDRAM)
++    if (recomp::overlays::patch_data_size() > (size_t)(recomp::patch_rdram_end - recomp::patch_rdram_start)) {
++        ultramodern::error_handling::message_box("Patch data doesn't fit in the small RDRAM's patch area.");
++        ULTRAMODERN_QUICK_EXIT();
++    }
++#endif
+     recomp::overlays::read_patch_data(rdram, (gpr)recomp::patch_rdram_start);
+ 
+     // Set up context floats
+@@ -833,7 +839,11 @@
+                     }
+                 }
+ 
++#if !defined(RECOMP_SMALL_RDRAM)
+                 recomp::init_heap(rdram, recomp::mod_rdram_start + mod_ram_used);
++#else
++                (void)mod_ram_used;  // no mod heap in 8 MB
++#endif
+ 
+                 save_type = game_entry.save_type;
+                 ultramodern::init_saving(rdram);
+@@ -925,7 +935,11 @@
+     // that initializes to zero. Protect the region above the memory size to catch accesses to invalid addresses.
+     uint8_t* rdram;
+     bool alloc_failed;
+-#ifdef _WIN32
++#if defined(RECOMP_SMALL_RDRAM)
++    // BlitzRecomp (PSP): the platform's fixed 8 MB block (addresses.hpp).
++    rdram = recomp::platform_rdram(recomp::mem_size);
++    alloc_failed = rdram == nullptr;
++#elif defined(_WIN32)
+     rdram = reinterpret_cast<uint8_t*>(VirtualAlloc(nullptr, allocation_size, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS));
+     DWORD old_protect = 0;
+     alloc_failed = (rdram == nullptr);
+@@ -1015,7 +1029,9 @@
+     
+     // Free rdram.
+     bool free_failed;
+-#ifdef _WIN32
++#if defined(RECOMP_SMALL_RDRAM)
++    free_failed = false;  // the platform's block, never freed
++#elif defined(_WIN32)
+     // VirtualFree returns zero on failure.
+     free_failed = (VirtualFree(rdram, 0, MEM_RELEASE) == 0);
+ #elif defined(__PROSPERO__)

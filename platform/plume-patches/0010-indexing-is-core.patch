@@ -1,0 +1,16 @@
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index 70463f4..0001297 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -4106,7 +4106,10 @@ namespace plume {
+         void *featuresChain = nullptr;
+         VkPhysicalDeviceDescriptorIndexingFeatures indexingFeatures = {};
+         const bool descriptorIndexingFound = supportedOptionalExtensions.find(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME) != supportedOptionalExtensions.end();
+-        if (descriptorIndexingFound) {
++        // Core since Vulkan 1.2: a driver needn't list the extension (Mali-G52 on an RG DS Plus reads as having none of it).
++        const bool descriptorIndexingCore = physicalDeviceProperties.apiVersion >= VK_API_VERSION_1_2;
++        fprintf(stderr, "[vulkan] descriptor indexing extension listed %d, core %d\n", descriptorIndexingFound, descriptorIndexingCore);
++        if (descriptorIndexingFound || descriptorIndexingCore) {
+             indexingFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+             featuresChain = &indexingFeatures;
+         }

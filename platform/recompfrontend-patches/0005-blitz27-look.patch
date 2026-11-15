@@ -1,0 +1,1997 @@
+diff --git a/recompinput/src/input_mapping.cpp b/recompinput/src/input_mapping.cpp
+index bfcfef4..bc6f0e9 100644
+--- a/recompinput/src/input_mapping.cpp
++++ b/recompinput/src/input_mapping.cpp
+@@ -56,7 +56,7 @@ namespace recompinput {
+ 
+         { GameInput::TOGGLE_MENU,    { InputField::controller_digital(SDL_CONTROLLER_BUTTON_BACK) } },
+         { GameInput::ACCEPT_MENU,    { InputField::controller_digital(SDL_CONTROLLER_BUTTON_SOUTH) } },
+-        { GameInput::BACK_MENU,      { InputField::controller_digital(SDL_CONTROLLER_BUTTON_WEST) } },
++        { GameInput::BACK_MENU,      { InputField::controller_digital(SDL_CONTROLLER_BUTTON_EAST), InputField::controller_digital(SDL_CONTROLLER_BUTTON_WEST) } },  // Blitz '27: Back on ○ / B (east), west still works
+         { GameInput::APPLY_MENU,     { InputField::controller_digital(SDL_CONTROLLER_BUTTON_NORTH), InputField::controller_digital(SDL_CONTROLLER_BUTTON_START) } },
+         { GameInput::TAB_LEFT_MENU,  { InputField::controller_digital(SDL_CONTROLLER_BUTTON_LEFTSHOULDER) } },
+         { GameInput::TAB_RIGHT_MENU, { InputField::controller_digital(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) } },
+diff --git a/recompinput/src/profiles.cpp b/recompinput/src/profiles.cpp
+index c89956e..1d80541 100644
+--- a/recompinput/src/profiles.cpp
++++ b/recompinput/src/profiles.cpp
+@@ -542,6 +542,16 @@ namespace recompinput {
+                     if (!load_input_device_from_json(profile, profile_index, device, "mappings")) {
+                         assign_all_mappings(profile_index, device);
+                     }
++                    // Blitz '27: menus go back with ○ / B (east). A profile saved with the old default (west
++                    // alone) moves to east, keeping west as the second binding.
++                    if (device == InputDevice::Controller) {
++                        InputField west = InputField::controller_digital(SDL_CONTROLLER_BUTTON_WEST);
++                        if (profiles::get_input_binding(profile_index, GameInput::BACK_MENU, 0) == west &&
++                            profiles::get_input_binding(profile_index, GameInput::BACK_MENU, 1).input_type == InputType::None) {
++                            profiles::set_input_binding(profile_index, GameInput::BACK_MENU, 0, InputField::controller_digital(SDL_CONTROLLER_BUTTON_EAST));
++                            profiles::set_input_binding(profile_index, GameInput::BACK_MENU, 1, west);
++                        }
++                    }
+                 }
+             }
+ 
+diff --git a/recompui/include/recompui/config.h b/recompui/include/recompui/config.h
+index 4eab024..7ff7a94 100644
+--- a/recompui/include/recompui/config.h
++++ b/recompui/include/recompui/config.h
+@@ -152,6 +152,15 @@ namespace recompui {
+         recomp::config::Config &get_graphics_config();
+         recomp::config::Config &get_sound_config();
+ 
++        // Blitz '27 shared-row additions for option pages. A section heading drawn before an option, with an
++        // optional live count on the right ("2 ON"); and a bool option drawn as a button that sets it to true
++        // (the option's change callback does the action and sets it back).
++        void set_option_section(const std::string &config_id, const std::string &option_id, const std::string &label,
++                                std::function<std::string()> count = {});
++        void set_option_action(const std::string &config_id, const std::string &option_id, const std::string &button_text);
++        // Shows a title and text in the open options page's description panel (the header's icon buttons).
++        void describe_header_button(const std::string &title, const std::string &text);
++
+         // Internal use only.
+         void init_modal();
+     }
+diff --git a/recompui/include/recompui/recompui.h b/recompui/include/recompui/recompui.h
+index 6076980..0708fa4 100644
+--- a/recompui/include/recompui/recompui.h
++++ b/recompui/include/recompui/recompui.h
+@@ -79,6 +79,11 @@ namespace recompui {
+     // Replaces the quit prompt (window close, Cmd+Q, Settings → Quit) while it returns true, e.g. to ask
+     // about saving a game in progress.
+     void set_quit_prompt_override(std::function<bool()> override_prompt);
++    // Lets the app draw framework panels in its own style: called with the box and what it is ("prompt",
++    // "prompt_title"); returns the element the content goes in (the box itself if nothing was drawn).
++    // Set before the UI is created.
++    void set_panel_decorator(std::function<Element*(ContextId, Element* box, const char* kind)> decorator);
++    Element* decorate_panel(ContextId context, Element* box, const char* kind);
+     void open_info_prompt(
+         const std::string& header_text,
+         const std::string& content_text,
+@@ -92,6 +97,9 @@ namespace recompui {
+     );
+     void close_prompt();
+     bool is_prompt_open();
++    // Blitz '27: a scoreline plate on the open prompt, from a game summary "ARI 7 - 0 CHI, 2nd & 7 at the 35,
++    // Q2 1:23" (teams and score on the first line, the rest under it). Call after opening; "" hides it.
++    void set_prompt_scoreline(const std::string &summary);
+     void update_mod_list(bool scan_mods = true);
+     void process_game_started();
+ 
+@@ -121,6 +129,10 @@ namespace recompui {
+ 
+     void drop_files(const std::list<std::filesystem::path> &file_list);
+ 
++    // Blitz '27: what a game input does in this game ("JUMP / TACKLE"), shown after its name on the Controls page.
++    void set_game_input_meaning(recompinput::GameInput input, const std::string &meaning);
++    const std::string &get_game_input_meaning(recompinput::GameInput input);
++
+     namespace menu_action_mapping {
+         struct key_map {
+             // End result menu action
+@@ -146,7 +158,11 @@ namespace recompui {
+             { back.rml, back },
+             { toggle.rml, toggle },
+             { tab_left.rml, tab_left },
+-            { tab_right.rml, tab_right }
++            { tab_right.rml, tab_right },
++            // Blitz '27: real keyboard keys for the actions that only had hidden F-keys.
++            { Rml::Input::KI_BACK, back },
++            { Rml::Input::KI_PRIOR, tab_left },
++            { Rml::Input::KI_NEXT, tab_right }
+         };
+ 
+         MenuAction menu_action_from_rml_key(const Rml::Input::KeyIdentifier& key);
+diff --git a/recompui/src/base/ui_game_option.cpp b/recompui/src/base/ui_game_option.cpp
+index 13f3f5c..7d0e3f2 100644
+--- a/recompui/src/base/ui_game_option.cpp
++++ b/recompui/src/base/ui_game_option.cpp
+@@ -2,6 +2,11 @@
+ #include "ui_utils.h"
+ 
+ namespace recompui {
++    static std::string upper(std::string s) {
++        for (char& c : s) c = (char)std::toupper((unsigned char)c);
++        return s;
++    }
++
+     GameOption::GameOption(
+         ResourceId rid,
+         Element* parent,
+@@ -35,21 +40,23 @@ namespace recompui {
+         disabled_style.set_cursor(Cursor::None);
+         
+         auto context = get_current_context();
+-        label = context.create_element<Label>(this, title, theme::Typography::LabelLG);
++        label = context.create_element<Label>(this, upper(title), theme::Typography::LabelLG);
+         set_styles();
+     }
+ 
+     void GameOption::set_styles() {
++        // The focused option sits on the solid accent bar with the selected colour (no pulse).
+         set_width(100.0f, Unit::Percent);
+-        set_padding(16.0f);
++        set_height(81.0f);  // the Blitz '27 menu: 54 px at 960x720 (dp is height / 1080)
++        set_padding_left(24.0f);
++        set_padding_right(24.0f);
+         set_border_radius(theme::border::radius_sm);
+         set_background_color(theme::color::Transparent);
+-        set_color(theme::color::TextDim);
++        set_color(theme::color::TextA80);
+ 
+-        hover_style.set_background_color(theme::color::Elevated);
+-        hover_style.set_color(theme::color::TextActive);
+-        focus_style.set_background_color(theme::color::Elevated);
+-        focus_style.set_color(theme::color::TextActive);
++        hover_style.set_color(theme::color::Text);
++        focus_style.set_background_color(theme::color::Primary);
++        focus_style.set_color(theme::color::SecondaryL);
+     
+         disabled_style.set_opacity(0.5f);
+         disabled_style.set_background_color(theme::color::Transparent);
+@@ -89,18 +96,10 @@ namespace recompui {
+         case EventType::Focus: {
+             bool active = std::get<EventFocus>(e.variant).active;
+             set_style_enabled(focus_state, active);
+-            if (active) {
+-                queue_update();
+-            }
++            for (Element* a : focus_adornments) a->set_display(active ? Display::Block : Display::None);
+             break;
+         }
+         case EventType::Update:
+-            if (is_style_enabled(focus_state)) {
+-                recompui::Color pulse_color = recompui::get_pulse_color(750);
+-                focus_style.set_color(pulse_color);
+-                apply_styles();
+-                queue_update();
+-            }
+             break;
+         default:
+             assert(false && "Unknown event type.");
+@@ -110,7 +109,7 @@ namespace recompui {
+ 
+     void GameOption::set_title(const std::string& new_title) {
+         title = new_title;
+-        label->set_text(new_title);
++        label->set_text(upper(new_title));
+     }
+ 
+     void GameOption::set_callback(std::function<void()> new_callback) {
+diff --git a/recompui/src/base/ui_game_option.h b/recompui/src/base/ui_game_option.h
+index cfaab26..499c03a 100644
+--- a/recompui/src/base/ui_game_option.h
++++ b/recompui/src/base/ui_game_option.h
+@@ -20,6 +20,8 @@ namespace recompui {
+         void set_title(const std::string& new_title);
+         void set_callback(std::function<void()> new_callback);
+         Label* get_label() { return label; }
++        // Shown only while this option is focused (e.g. selector caps added by the app).
++        std::vector<Element*> focus_adornments;
+         // These are public so you can modify them.
+         Style hover_style;
+         Style focus_style;
+diff --git a/recompui/src/base/ui_launcher.cpp b/recompui/src/base/ui_launcher.cpp
+index 6de7a94..0418157 100644
+--- a/recompui/src/base/ui_launcher.cpp
++++ b/recompui/src/base/ui_launcher.cpp
+@@ -407,10 +407,28 @@ namespace recompui {
+         }
+     }
+ 
++    static rom_import_t app_rom_import;
++    static rom_error_text_t app_rom_error_text;
++
++    void set_rom_import(rom_import_t import, rom_error_text_t error_text) {
++        app_rom_import = std::move(import);
++        app_rom_error_text = std::move(error_text);
++    }
++
+     void GameOptionsMenu::select_rom(std::function<void(bool)> callback) {
+         recompui::file::open_file_dialog([this, callback](bool success, const std::filesystem::path& path) {
+             if (success) {
+-                recomp::RomValidationError rom_error = recomp::select_rom(path, this->game_id);
++                recomp::RomValidationError rom_error = app_rom_import ? app_rom_import(path, this->game_id) : recomp::select_rom(path, this->game_id);
++                if (rom_error == recomp::RomValidationError::Good) {
++                    recomp::check_all_stored_roms();  // so recomp::is_rom_valid agrees for the rest of this session
++                    callback(true);
++                    return;
++                }
++                if (app_rom_error_text) {
++                    recompui::message_box(app_rom_error_text(rom_error).c_str());
++                    callback(false);
++                    return;
++                }
+                 switch (rom_error) {
+                     case recomp::RomValidationError::Good:
+                         callback(true);
+@@ -483,6 +501,16 @@ namespace recompui {
+         return option;
+     }
+ 
++    GameOption *GameOptionsMenu::add_change_rom_option(const std::string& title) {
++        return add_option(title, [this]() {
++            select_rom([this](bool success) {
++                if (success) {
++                    this->rom_valid = true;
++                }
++            });
++        });
++    }
++
+     GameOption *GameOptionsMenu::add_setup_controls_option(const std::string& title) {
+         return add_option(title, [this]() {
+             recompui::update_game_mod_id(this->mod_game_id);
+diff --git a/recompui/src/base/ui_launcher.h b/recompui/src/base/ui_launcher.h
+index eb8833e..502dc47 100644
+--- a/recompui/src/base/ui_launcher.h
++++ b/recompui/src/base/ui_launcher.h
+@@ -8,7 +8,18 @@
+ #include "base/ui_launcher_common.h"
+ #include "elements/ui_svg.h"
+ 
++#include <filesystem>
++
++namespace recomp {
++    enum class RomValidationError;  // librecomp/game.hpp (not included here: recompinput builds without librecomp's paths)
++}
+ namespace recompui {
++    // Blitz: the app's own Load ROM step (e.g. unpacking a zip first) and its own wording for a ROM that
++    // wasn't accepted. Unset, the launcher uses recomp::select_rom and its generic messages.
++    using rom_import_t = std::function<recomp::RomValidationError(const std::filesystem::path &path, std::u8string &game_id)>;
++    using rom_error_text_t = std::function<std::string(recomp::RomValidationError error)>;
++    void set_rom_import(rom_import_t import, rom_error_text_t error_text);
++
+     class GameOption;
+ 
+     class GameOptionsMenu : public Element {
+@@ -37,6 +48,15 @@ namespace recompui {
+         GameOption *add_exit_option(const std::string& title = "Exit");
+ 
+         GameOption *get_start_game_option() { return start_game_option; }
++        // Blitz: pick another ROM for this game (the launcher's Load ROM, any time).
++        GameOption *add_change_rom_option(const std::string& title);
++        // Anchors the menu by its top (instead of the layout's bottom anchor), centred, at this width.
++        void set_top_anchor(float top, float width) {
++            remove_property(Rml::PropertyId::Bottom);
++            set_top(top);
++            set_width(width);
++            set_gap(6.0f);
++        }
+     
+         void add_default_options() {
+             add_start_game_or_load_rom_option();
+@@ -73,6 +93,7 @@ namespace recompui {
+         Svg *set_launcher_background_svg(const std::string& svg_path);
+         Element *get_background_container() { return background_wrapper; }
+         Element *get_menu_container() { return menu_container; }
++        Label *get_version_label() { return version_label; }
+     };
+ 
+     LauncherMenu *get_launcher_menu();
+diff --git a/recompui/src/base/ui_state.cpp b/recompui/src/base/ui_state.cpp
+index fe97814..dc8e41a 100644
+--- a/recompui/src/base/ui_state.cpp
++++ b/recompui/src/base/ui_state.cpp
+@@ -46,8 +46,8 @@ void recompui::open_quit_game_prompt() {
+         return;  // the game showed its own prompt
+     }
+     recompui::open_choice_prompt(
+-        "Are you sure you want to quit?",
+-        "Any progress since your last save will be lost.",
++        "Quit Blitz?",
++        "Anything you haven't saved will be lost.",
+         "Quit",
+         "Cancel",
+         []() {
+diff --git a/recompui/src/composites/ui_prompt.cpp b/recompui/src/composites/ui_prompt.cpp
+index 56a0b70..6f90e9c 100644
+--- a/recompui/src/composites/ui_prompt.cpp
++++ b/recompui/src/composites/ui_prompt.cpp
+@@ -6,12 +6,16 @@
+ #include "elements/ui_document.h"
+ #include "elements/ui_label.h"
+ #include "elements/ui_button.h"
++#include "elements/ui_modal.h"  // build_hint_row
+ 
+ struct {
+     recompui::ContextId ui_context;
+     recompui::Label* prompt_header;
+     recompui::Label* prompt_label;
+     recompui::Element* prompt_controls;
++    recompui::Element* score_plate;
++    recompui::Element* score_line1;
++    recompui::Label* score_line2;
+     recompui::Button* confirm_button;
+     recompui::Button* cancel_button;
+     std::function<void()> confirm_action;
+@@ -19,6 +23,16 @@ struct {
+     std::mutex mutex;
+ } prompt_state;
+ 
++static std::function<recompui::Element*(recompui::ContextId, recompui::Element*, const char*)> panel_decorator;
++
++void recompui::set_panel_decorator(std::function<Element*(ContextId, Element*, const char*)> decorator) {
++    panel_decorator = std::move(decorator);
++}
++
++recompui::Element* recompui::decorate_panel(ContextId context, Element* box, const char* kind) {
++    return panel_decorator ? panel_decorator(context, box, kind) : box;
++}
++
+ void run_confirm_callback() {
+     std::function<void()> confirm_action;
+     {
+@@ -46,6 +60,70 @@ void run_cancel_callback() {
+     // or just remove it as the usage of the prompt can change now
+ }
+ 
++// B (Back) on a prompt: close it without choosing either button (e.g. "Save this game?" back to the game).
++void run_dismiss() {
++    {
++        std::lock_guard lock{ prompt_state.mutex };
++        prompt_state.confirm_action = {};
++        prompt_state.cancel_action = {};
++    }
++    recompui::hide_context(prompt_state.ui_context);
++}
++
++namespace {
++    class PromptCard : public recompui::Element {
++    protected:
++        std::string_view get_type_name() override { return "PromptCard"; }
++        void process_event(const recompui::Event& e) override {
++            if (e.type == recompui::EventType::MenuAction &&
++                std::get<recompui::EventMenuAction>(e.variant).action == recompui::MenuAction::Back) {
++                run_dismiss();
++            }
++        }
++    public:
++        PromptCard(recompui::ResourceId rid, recompui::Element* parent)
++            : Element(rid, parent, recompui::Events(recompui::EventType::MenuAction), "div", false) {}
++    };
++
++    // Blitz '27: a prompt owns the hint row while it's up (✕ CHOOSE · ○ CANCEL), drawn for player 1's device.
++    class PromptHints : public recompui::Element {
++        recompinput::InputDevice shown_device = recompinput::InputDevice::COUNT;
++        int shown_profile = -2;
++    protected:
++        std::string_view get_type_name() override { return "PromptHints"; }
++        void process_event(const recompui::Event& e) override {
++            if (e.type != recompui::EventType::Update) {
++                return;
++            }
++            auto [device, profile] = recompui::hint_input_info();
++            if (device != shown_device || profile != shown_profile) {
++                shown_device = device;
++                shown_profile = profile;
++                recompui::build_hint_row(recompui::get_current_context(), this, {
++                    { { recompui::MenuAction::Accept }, "Choose" },
++                    { { recompui::MenuAction::Back }, "Cancel" },
++                }, device, profile);
++            }
++            queue_update();
++        }
++    public:
++        PromptHints(recompui::ResourceId rid, recompui::Element* parent)
++            : Element(rid, parent, recompui::Events(recompui::EventType::Update), "div", false) {
++            using namespace recompui;
++            set_position(Position::Absolute);
++            set_left(0);
++            set_right(0);
++            set_bottom(0);
++            set_height(64.0f);
++            set_display(Display::Flex);
++            set_justify_content(JustifyContent::Center);
++            set_align_items(AlignItems::Center);
++            set_gap(45.0f);
++            queue_update();
++        }
++    };
++}
++
+ void recompui::init_prompt_context() {
+     ContextId context = create_context();
+ 
+@@ -78,47 +156,94 @@ void recompui::init_prompt_context() {
+     prompt_content_wrapper->set_align_items(AlignItems::Center);
+     prompt_content_wrapper->set_justify_content(JustifyContent::Center);
+ 
+-    Element* prompt_content = context.create_element<Element>(prompt_content_wrapper);
++    // The card: the app may draw it (set_panel_decorator, "prompt"); 900 dp wide, a title strip
++    // ("prompt_title"), centred text and two buttons.
++    Element* prompt_card = context.create_element<PromptCard>(prompt_content_wrapper);
++    prompt_card->set_position(Position::Relative);
++    prompt_card->set_width(100, Unit::Percent);
++    prompt_card->set_max_width(900, Unit::Dp);
++    prompt_card->set_height_auto();
++    prompt_card->set_margin_auto();
++    Element* prompt_content = decorate_panel(context, prompt_card, "prompt");
++    if (prompt_content == prompt_card) {
++        prompt_card->set_border_width(theme::border::width, Unit::Dp);
++        prompt_card->set_border_radius(theme::border::radius_lg, Unit::Dp);
++        prompt_card->set_border_color(theme::color::Border);
++        prompt_card->set_background_color(theme::color::ModalOverlay);
++    }
+     prompt_content->set_display(Display::Flex);
+-    prompt_content->set_position(Position::Relative);
+-    prompt_content->set_flex(1.0f, 1.0f);
+-    prompt_content->set_flex_basis(100, Unit::Percent);
+     prompt_content->set_flex_direction(FlexDirection::Column);
+-    prompt_content->set_width(100, Unit::Percent);
+-    prompt_content->set_max_width(700, Unit::Dp);
+-    prompt_content->set_height_auto();
+-    prompt_content->set_margin_auto();
+-    prompt_content->set_border_width(theme::border::width, Unit::Dp);
+-    prompt_content->set_border_radius(theme::border::radius_lg, Unit::Dp);
+-    prompt_content->set_border_color(theme::color::WhiteA20);
+-    prompt_content->set_background_color(theme::color::ModalOverlay);
+-    
+-    prompt_state.prompt_header = context.create_element<Label>(prompt_content, "", LabelStyle::Large);
+-    prompt_state.prompt_header->set_margin(24, Unit::Dp);
+-
+-    prompt_state.prompt_label = context.create_element<Label>(prompt_content, "", LabelStyle::Small);
+-    prompt_state.prompt_label->set_margin(24, Unit::Dp);
+-    prompt_state.prompt_label->set_margin_top(0);
+-    
++    prompt_content->set_align_items(AlignItems::Stretch);
++    prompt_content->set_padding(18, Unit::Dp);
++
++    Element* title_strip = context.create_element<Element>(prompt_content);
++    title_strip->set_position(Position::Relative);
++    title_strip->set_height(96, Unit::Dp);
++    Element* title_holder = decorate_panel(context, title_strip, "prompt_title");
++    title_holder->set_height(100, Unit::Percent);
++    title_holder->set_display(Display::Flex);
++    title_holder->set_align_items(AlignItems::Center);
++    title_holder->set_justify_content(JustifyContent::Center);
++    prompt_state.prompt_header = context.create_element<Label>(title_holder, "", theme::Typography::Header1);
++    prompt_state.prompt_header->set_font_size(66, Unit::Dp);
++    prompt_state.prompt_header->set_color(theme::color::Secondary);
++    prompt_state.prompt_header->set_text_transform(TextTransform::Uppercase);  // every prompt title in caps
++    prompt_state.prompt_header->set_text_align(TextAlign::Center);
++
++    prompt_state.prompt_label = context.create_element<Label>(prompt_content, "", theme::Typography::Body);
++    prompt_state.prompt_label->set_margin(36, Unit::Dp);
++    prompt_state.prompt_label->set_margin_bottom(12, Unit::Dp);
++    prompt_state.prompt_label->set_color(theme::color::TextDim);
++    prompt_state.prompt_label->set_text_align(TextAlign::Center);
++
++    // The scoreline plate (set_prompt_scoreline): Background2 with a soft rim, 40 px side margins.
++    prompt_state.score_plate = context.create_element<Element>(prompt_content);
++    prompt_state.score_plate->set_display(Display::None);
++    prompt_state.score_plate->set_flex_direction(FlexDirection::Column);
++    prompt_state.score_plate->set_align_items(AlignItems::Center);
++    prompt_state.score_plate->set_gap(6.0f);
++    prompt_state.score_plate->set_margin_left(60.0f);
++    prompt_state.score_plate->set_margin_right(60.0f);
++    prompt_state.score_plate->set_margin_top(18.0f);
++    prompt_state.score_plate->set_padding_top(18.0f);
++    prompt_state.score_plate->set_padding_bottom(18.0f);
++    prompt_state.score_plate->set_padding_left(27.0f);
++    prompt_state.score_plate->set_padding_right(27.0f);
++    prompt_state.score_plate->set_background_color(theme::color::Background2);
++    prompt_state.score_plate->set_border_width(1.5f);
++    prompt_state.score_plate->set_border_color(theme::color::BorderSoft);
++    prompt_state.score_line1 = context.create_element<Element>(prompt_state.score_plate);
++    prompt_state.score_line1->set_display(Display::Flex);
++    prompt_state.score_line1->set_align_items(AlignItems::Center);
++    prompt_state.score_line1->set_gap(18.0f);
++    prompt_state.score_line2 = context.create_element<Label>(prompt_state.score_plate, "", theme::Typography::LabelMD);
++    prompt_state.score_line2->set_font_size(36.0f);
++    prompt_state.score_line2->set_font_weight(700);
++    prompt_state.score_line2->set_color(theme::color::SecondaryL);
++    prompt_state.score_line2->set_text_transform(TextTransform::Uppercase);
++
+     prompt_state.prompt_controls = context.create_element<Element>(prompt_content);
+-    
+     prompt_state.prompt_controls->set_display(Display::Flex);
+     prompt_state.prompt_controls->set_flex_direction(FlexDirection::Row);
+     prompt_state.prompt_controls->set_as_navigation_container(NavigationType::Horizontal);
+-    prompt_state.prompt_controls->set_justify_content(JustifyContent::SpaceBetween);
++    prompt_state.prompt_controls->set_justify_content(JustifyContent::Center);
+     prompt_state.prompt_controls->set_align_items(AlignItems::Center);
+-    prompt_state.prompt_controls->set_padding(24, Unit::Dp);
+-    prompt_state.prompt_controls->set_border_top_width(theme::border::width, Unit::Dp);
+-    prompt_state.prompt_controls->set_border_top_color(theme::color::BorderSoft);
++    prompt_state.prompt_controls->set_gap(36, Unit::Dp);
++    prompt_state.prompt_controls->set_padding(30, Unit::Dp);
+ 
+-    prompt_state.confirm_button = context.create_element<Button>(prompt_state.prompt_controls, "", ButtonStyle::Success);
+-    prompt_state.confirm_button->set_min_width(185.0f, Unit::Dp);
++    // Blitz '27: 52 px buttons at least 180 px wide; focus is the fill and rim alone (no outer ring).
++    prompt_state.confirm_button = context.create_element<Button>(prompt_state.prompt_controls, "", ButtonStyle::Primary, ButtonSize::Prompt);
++    prompt_state.confirm_button->set_min_width(270.0f, Unit::Dp);
++    prompt_state.confirm_button->hide_focus_ring();
+     prompt_state.confirm_button->add_pressed_callback(run_confirm_callback);
+ 
+-    prompt_state.cancel_button = context.create_element<Button>(prompt_state.prompt_controls, "", ButtonStyle::Danger);
+-    prompt_state.cancel_button->set_min_width(185.0f, Unit::Dp);
++    prompt_state.cancel_button = context.create_element<Button>(prompt_state.prompt_controls, "", ButtonStyle::Secondary, ButtonSize::Prompt);
++    prompt_state.cancel_button->set_min_width(270.0f, Unit::Dp);
++    prompt_state.cancel_button->hide_focus_ring();
+     prompt_state.cancel_button->add_pressed_callback(run_cancel_callback);
+ 
++    context.create_element<PromptHints>(window);
++
+     context.close();
+ }
+ 
+@@ -163,6 +288,7 @@ void recompui::open_choice_prompt(
+ 
+     prompt_state.prompt_header->set_text(header_text);
+     prompt_state.prompt_label->set_text(content_text);
++    prompt_state.score_plate->set_display(Display::None);
+     prompt_state.prompt_controls->set_display(Display::Flex);
+     prompt_state.confirm_button->set_display(Display::Flex);
+     prompt_state.cancel_button->set_display(Display::Flex);
+@@ -199,6 +325,7 @@ void recompui::open_info_prompt(
+ 
+     prompt_state.prompt_header->set_text(header_text);
+     prompt_state.prompt_label->set_text(content_text);
++    prompt_state.score_plate->set_display(Display::None);
+     prompt_state.prompt_controls->set_display(Display::Flex);
+     prompt_state.confirm_button->set_display(Display::None);
+     prompt_state.cancel_button->set_display(Display::Flex);
+@@ -231,6 +358,7 @@ void recompui::open_notification(
+ 
+     prompt_state.prompt_header->set_text(header_text);
+     prompt_state.prompt_label->set_text(content_text);
++    prompt_state.score_plate->set_display(Display::None);
+     prompt_state.prompt_controls->set_display(Display::None);
+     prompt_state.confirm_button->set_display(Display::None);
+     prompt_state.cancel_button->set_display(Display::None);
+@@ -258,6 +386,42 @@ void recompui::close_prompt() {
+     }
+ }
+ 
++void recompui::set_prompt_scoreline(const std::string &summary) {
++    std::lock_guard lock{ prompt_state.mutex };
++    ContextId prev_context = try_close_current_context();
++    prompt_state.ui_context.open();
++    prompt_state.score_line1->clear_children();
++    if (summary.empty()) {
++        prompt_state.score_plate->set_display(Display::None);
++    } else {
++        size_t comma = summary.find(", ");
++        std::string line1 = comma == std::string::npos ? summary : summary.substr(0, comma);
++        std::string line2 = comma == std::string::npos ? "" : summary.substr(comma + 2);
++        // "ARI 7 - 0 CHI": the teams in Text, the score between them in Blitz yellow.
++        size_t first_space = line1.find(' '), last_space = line1.rfind(' ');
++        auto add = [&](const std::string &text, recompui::theme::color color) {
++            auto label = prompt_state.ui_context.create_element<Label>(prompt_state.score_line1, text, theme::Typography::LabelMD);
++            label->set_font_size(54.0f);
++            label->set_color(color);
++            label->set_white_space(WhiteSpace::Nowrap);
++        };
++        if (first_space != std::string::npos && last_space > first_space) {
++            add(line1.substr(0, first_space), theme::color::Text);
++            add(line1.substr(first_space + 1, last_space - first_space - 1), theme::color::Secondary);
++            add(line1.substr(last_space + 1), theme::color::Text);
++        } else {
++            add(line1, theme::color::Text);
++        }
++        prompt_state.score_line2->set_text(line2);
++        prompt_state.score_line2->set_display(line2.empty() ? Display::None : Display::Block);
++        prompt_state.score_plate->set_display(Display::Flex);
++    }
++    prompt_state.ui_context.close();
++    if (prev_context != ContextId::null()) {
++        prev_context.open();
++    }
++}
++
+ bool recompui::is_prompt_open() {
+     std::lock_guard lock{ prompt_state.mutex };
+ 
+diff --git a/recompui/src/config/ui_config.cpp b/recompui/src/config/ui_config.cpp
+index 2019bfe..2578f55 100644
+--- a/recompui/src/config/ui_config.cpp
++++ b/recompui/src/config/ui_config.cpp
+@@ -159,9 +159,24 @@ namespace recompui {
+         }
+         config_modal->set_selected_tab(0);
+         auto header_right = config_modal->get_header()->get_right();
++        // Blitz '27: 40x40 px framed icon buttons, 6 px apart, that name themselves in the description panel.
++        header_right->set_gap(9.0f);
++        auto frame_icon = [](IconButton *button, const char *title, const char *text) {
++            button->set_kit_framed(60.0f, 30.0f);
++            button->set_focus_callback([title, text](bool active) {
++                if (active) {
++                    config::describe_header_button(title, text);
++                }
++            });
++        };
+         if (restart_callback) {
+             auto restart_button = config_modal->modal_root_context.create_element<IconButton>(header_right, "icons/Reset.svg", ButtonStyle::Basic);
++            frame_icon(restart_button, "RESTART GAME", "Back to the title screen. A game you haven't saved is lost.");
+             restart_button->add_pressed_callback([]() {
++                if (!ultramodern::is_game_started()) {  // from the launcher there's nothing to restart
++                    recompui::open_info_prompt("Nothing to restart", "The game isn't running yet.", "OK", []() {}, ButtonStyle::Secondary);
++                    return;
++                }
+                 recompui::open_choice_prompt(
+                     "Restart the game?",
+                     "The game starts over from the beginning. Anything not saved to the Controller Pak is lost.",
+@@ -171,6 +186,7 @@ namespace recompui {
+             });
+         }
+         auto quit_button = config_modal->modal_root_context.create_element<IconButton>(header_right, "icons/Quit.svg", ButtonStyle::Basic);
++        frame_icon(quit_button, "QUIT BLITZ", "Close the app.");
+         quit_button->add_pressed_callback([]() {
+             if (ultramodern::is_game_started()) {
+                 recompui::open_quit_game_prompt();
+@@ -179,6 +195,7 @@ namespace recompui {
+             }
+         });
+         auto close_button = config_modal->modal_root_context.create_element<IconButton>(header_right, "icons/X.svg", ButtonStyle::Basic);
++        frame_icon(close_button, "CLOSE SETTINGS", "Back to the game.");
+         close_button->add_pressed_callback([]() {
+             config::close();
+         });
+diff --git a/recompui/src/config/ui_config_option.h b/recompui/src/config/ui_config_option.h
+index 0561657..c4ab4eb 100644
+--- a/recompui/src/config/ui_config_option.h
++++ b/recompui/src/config/ui_config_option.h
+@@ -7,6 +7,7 @@
+ #include "elements/ui_text_input.h"
+ #include "elements/ui_slider.h"
+ #include "elements/ui_toggle.h"
++#include "elements/ui_button.h"
+ 
+ namespace recompui {
+     using set_option_value_t = std::function<void(const std::string &option_id, recomp::config::ConfigValueVariant value)>;
+@@ -42,6 +43,8 @@ namespace recompui {
+         virtual void update_value() = 0;
+         virtual void update_disabled() = 0;
+         void update_hidden();
++        // The row's focused look (the red bar), while it or its control has focus.
++        void set_row_lit(bool lit);
+         const std::string &get_option_id() { return option_id; }
+     };
+ 
+@@ -89,6 +92,28 @@ public:
+     void update_disabled() override;
+ };
+ 
++// Blitz '27: a bool option shown as a button (an action, not a state): pressing sets it to true.
++class ConfigOptionAction : public ConfigOptionElement {
++protected:
++    Button *button = nullptr;
++
++    std::string_view get_type_name() override { return "ConfigOptionAction"; }
++public:
++    ConfigOptionAction(
++        ResourceId rid,
++        Element *parent,
++        std::string option_id,
++        size_t option_index,
++        const recomp::config::Config *config,
++        set_option_value_t set_option_value,
++        on_option_hover_t on_hover,
++        const std::string &button_text
++    );
++
++    void update_value() override {}
++    void update_disabled() override;
++};
++
+ class ConfigOptionString : public ConfigOptionElement {
+ protected:
+     TextInput *text_input = nullptr;
+@@ -112,6 +137,9 @@ public:
+ class ConfigOptionBool : public ConfigOptionElement {
+ protected:
+     Toggle *toggle = nullptr;
++    Label *state_word = nullptr;  // Blitz '27: ON / OFF beside the switch
++    bool lit = false;
++    void show_state(bool checked);
+ 
+     std::string_view get_type_name() override { return "ConfigOptionBool"; }
+ public:
+diff --git a/recompui/src/config/ui_config_page_controls.cpp b/recompui/src/config/ui_config_page_controls.cpp
+index f379a6f..dbb5f9c 100644
+--- a/recompui/src/config/ui_config_page_controls.cpp
++++ b/recompui/src/config/ui_config_page_controls.cpp
+@@ -8,11 +8,27 @@
+ #include "elements/ui_select.h"
+ #include "recompinput/profiles.h"
+ #include "recompui/config.h"
++#include "elements/ui_radio.h"
+ 
+ namespace recompui {
+ 
+ ConfigPageControls *controls_page = nullptr;
+ 
++static std::unordered_map<int, std::string> &game_input_meanings() {
++    static std::unordered_map<int, std::string> meanings;
++    return meanings;
++}
++
++void set_game_input_meaning(recompinput::GameInput input, const std::string &meaning) {
++    game_input_meanings()[static_cast<int>(input)] = meaning;
++}
++
++const std::string &get_game_input_meaning(recompinput::GameInput input) {
++    static const std::string none;
++    auto it = game_input_meanings().find(static_cast<int>(input));
++    return it == game_input_meanings().end() ? none : it->second;
++}
++
+ const std::string_view active_state_style_name = "cont_opt_active";
+ 
+ // Separating this out, may be a good component later to expose.
+@@ -38,6 +54,8 @@ GameInputRow::GameInputRow(
+     this->input_id = input_ctx.input_id;
+     this->on_active_callback = on_active_callback;
+ 
++    // Blitz '27: a 72 dp (48 px) row like the option rows: the N64 name in caps and what it does in Blitz,
++    // then two binding slots and a quiet bin; while one of its buttons has focus it is the red bar.
+     set_display(Display::Flex);
+     set_position(Position::Relative);
+     set_flex_direction(FlexDirection::Row);
+@@ -46,67 +64,74 @@ GameInputRow::GameInputRow(
+     set_width(100.0f, Unit::Percent);
+     // Have to set height here for the scroll buffer to work.
+     // Otherwise it fails to calculate the correct size (RmlUI issue)
+-    set_height(64.0f);
++    set_height(72.0f);
+ 
+-    set_padding_top(4.0f);
+-    set_padding_right(16.0f);
+-    set_padding_bottom(4.0f);
++    set_padding_right(18.0f);
+     set_padding_left(GameInputRow::left_padding);
+-    set_border_radius(theme::border::radius_sm);
++    set_gap(18.0f);
++    set_border_bottom_width(1.5f);
++    set_border_bottom_color(theme::color::BorderSoft);
+     set_background_color(theme::color::Transparent);
+ 
+-    active_style.set_background_color(theme::color::ElevatedSoft);
+-    add_style(&active_style, active_state_style_name);
+-
+     recompui::ContextId context = get_current_context();
+ 
+     set_debug_id("GameInputRow (" + input_ctx.name + ")");
+ 
+-    auto label = context.create_element<Label>(this, input_ctx.name, theme::Typography::LabelMD);
+-    label->set_flex_grow(2.0f);
++    auto label = context.create_element<Element>(this, 0, "div", false);
++    label->set_display(Display::Flex);
++    label->set_align_items(AlignItems::Center);
++    label->set_flex_grow(1.0f);
+     label->set_flex_shrink(1.0f);
+-    label->set_flex_basis(300.0f);
+-    label->set_height_auto();
+-    // TODO: whitespace nowrap impl
++    label->set_overflow(Overflow::Hidden);
++    label->set_gap(12.0f);
++    std::string upper_name = input_ctx.name;
++    for (char &c : upper_name) c = (char)std::toupper((unsigned char)c);
++    name_label = context.create_element<Label>(label, upper_name, theme::Typography::LabelMD);
++    name_label->set_white_space(WhiteSpace::Nowrap);
++    name_label->set_color(theme::color::Text);
++    const std::string &meaning = get_game_input_meaning(input_ctx.input_id);
++    if (!meaning.empty()) {
++        meaning_label = context.create_element<Label>(label, "\xC2\xB7 " + meaning, theme::Typography::LabelMD);
++        meaning_label->set_white_space(WhiteSpace::Nowrap);
++        meaning_label->set_color(theme::color::TextDim);
++    }
+ 
+     auto bindings_container = context.create_element<Element>(this, 0, "div", false);
+     {
+         bindings_container->set_display(Display::Flex);
+         bindings_container->set_position(Position::Relative);
+-        bindings_container->set_flex_grow(2.0f);
+-        bindings_container->set_flex_shrink(1.0f);
+-        bindings_container->set_flex_basis(400.0f);
++        bindings_container->set_flex_grow(0.0f);
++        bindings_container->set_flex_shrink(0.0f);
+         bindings_container->set_flex_direction(FlexDirection::Row);
+         bindings_container->set_align_items(AlignItems::Center);
+-        bindings_container->set_justify_content(JustifyContent::SpaceBetween);
+-        bindings_container->set_width(100.0f, Unit::Percent);
+-        bindings_container->set_height(56.0f);
+-        bindings_container->set_padding_right(12.0f);
+-        bindings_container->set_padding_left(4.0f);
+-        bindings_container->set_gap(4.0f);
++        bindings_container->set_gap(12.0f);
+ 
+         for (size_t i = 0; i < recompinput::num_bindings_per_input; i++) {
+             BindingButton *binding_button = context.create_element<BindingButton>(bindings_container, "");
+             binding_button->add_pressed_callback([this, i, on_bind_click]() {
+                on_bind_click(this->input_id, i);
+             });
++            binding_button->set_focus_callback([this](bool active) { this->set_lit(active); });
+             binding_button->set_debug_id("BindingButton (" + input_ctx.name + " Binding " + std::to_string(i) + ")");
+             binding_buttons.push_back(binding_button);
+         }
+         binding_buttons[0]->set_as_primary_focus(true);
+     }
+ 
++    IconButton *tool_button = nullptr;
+     if (input_ctx.clearable) {
+-        auto clear_button = context.create_element<IconButton>(this, "icons/Trash.svg", ButtonStyle::Danger, IconButtonSize::Large);
+-        clear_button->add_pressed_callback([this, on_clear_or_reset]() {
++        tool_button = context.create_element<IconButton>(this, "icons/Trash.svg", ButtonStyle::Tertiary, IconButtonSize::Large);
++        tool_button->add_pressed_callback([this, on_clear_or_reset]() {
+             on_clear_or_reset(this->input_id, false);
+         });
+     } else {
+-        auto reset_button = context.create_element<IconButton>(this, "icons/Reset.svg", ButtonStyle::Warning, IconButtonSize::Large);
+-        reset_button->add_pressed_callback([this, on_clear_or_reset]() {
++        tool_button = context.create_element<IconButton>(this, "icons/Reset.svg", ButtonStyle::Tertiary, IconButtonSize::Large);
++        tool_button->add_pressed_callback([this, on_clear_or_reset]() {
+             on_clear_or_reset(this->input_id, true);
+         });
+     }
++    tool_button->set_kit_quiet(33.0f);
++    tool_button->set_focus_callback([this](bool active) { this->set_lit(active); });
+ 
+     bindings.resize(recompinput::num_bindings_per_input);
+     for (size_t i = 0; i < recompinput::num_bindings_per_input; i++) {
+@@ -119,6 +144,20 @@ GameInputRow::GameInputRow(
+ GameInputRow::~GameInputRow() {
+ }
+ 
++void GameInputRow::set_lit(bool lit) {
++    set_background_color(lit ? theme::color::Primary : theme::color::Transparent);
++    name_label->set_color(lit ? theme::color::SecondaryL : theme::color::Text);
++    if (meaning_label != nullptr) {
++        meaning_label->set_color(lit ? theme::color::SecondaryL : theme::color::TextDim);
++    }
++    if (lit && on_active_callback) {
++        on_active_callback();
++    }
++    if (lit) {
++        scroll_buffer->scroll_into_view();
++    }
++}
++
+ void GameInputRow::update_bindings(BindingList &new_bindings) {
+     for (size_t i = 0; i < new_bindings.size(); i++) {
+         binding_buttons[i]->set_is_binding(false);
+@@ -140,22 +179,11 @@ void GameInputRow::process_event(const Event &e) {
+     case EventType::Hover:
+         {
+             bool hover_active = std::get<EventHover>(e.variant).active;
+-            set_style_enabled(active_state_style_name, hover_active);
+             if (hover_active && on_active_callback) {
+                 on_active_callback();
+             }
+         }
+         break;
+-    case EventType::Focus:
+-        {
+-            bool focus_active = std::get<EventFocus>(e.variant).active;
+-            set_style_enabled(active_state_style_name, focus_active);
+-            if (focus_active && on_active_callback) {
+-                on_active_callback();
+-            }
+-            scroll_buffer->scroll_into_view();
+-        }
+-        break;
+     default:
+         break;
+     }
+@@ -259,12 +287,33 @@ static void show_or_hide_if_exists(Element* element, bool show) {
+ void ConfigPageControls::render_header() {
+     // Header attempts to not re-render elements if not necessary, instead swapping visibility / updating text.
+ 
++    recompui::ContextId context = get_current_context();
+     if (!multiplayer_enabled) {
+-        hide_header();
++        // Blitz '27 toolbar on top: which device's buttons are shown (pills) and Reset to defaults.
++        add_header();
++        header->set_as_navigation_container(NavigationType::Horizontal);
++        header->set_padding_left(GameInputRow::left_padding);
++        header->set_padding_right(18.0f);
++        auto header_left = header->get_left();
++        header_left->clear_children();
++        Radio *device_radio = context.create_element<Radio>(header_left);
++        device_radio->add_option("Controller");
++        device_radio->add_option("Keyboard");
++        device_radio->set_index(single_player_show_keyboard_mappings ? 1 : 0);
++        device_radio->add_index_changed_callback([this](uint32_t index) {
++            this->single_player_show_keyboard_mappings = index == 1;
++            this->update_control_mappings();
++        });
++        auto header_right = header->get_right();
++        header_right->clear_children();
++        auto reset_button = context.create_element<Button>(header_right, "Reset to defaults", ButtonStyle::Danger);
++        reset_button->set_height(60.0f);
++        reset_button->add_pressed_callback([this]() {
++            recompinput::profiles::reset_profile_bindings(this->selected_profile_index, this->get_player_input_device());
++            this->update_control_mappings();
++        });
+         return;
+     }
+-
+-    recompui::ContextId context = get_current_context();
+     add_header();
+     header->set_as_navigation_container(NavigationType::Horizontal);
+ 
+@@ -352,11 +401,40 @@ void ConfigPageControls::render_body_mappings() {
+         render_control_mappings();
+     }
+ 
+-    // right side
++    // right side: the same description panel as the other tabs (Blitz '27).
+     {
+-        body->get_right()->clear_children();
+-        description_container = context.create_element<Element>(body->get_right(), 0, "p", true);
+-        description_container->set_text("");
++        Element *right = body->get_right();
++        right->clear_children();
++        right->set_flex_grow(0.0f);
++        right->set_flex_shrink(0.0f);
++        right->set_flex_basis(435.0f, Unit::Dp);
++        right->set_width(435.0f, Unit::Dp);
++        right->set_display(Display::Flex);
++        right->set_flex_direction(FlexDirection::Column);
++        Element *desc_box = context.create_element<Element>(right, 0, "div", false);
++        desc_box->set_margin(16.0f);
++        desc_box->set_flex_grow(1.0f);
++        Element *desc_content = decorate_panel(context, desc_box, "description");
++        desc_content->set_padding(24.0f);
++        description_eyebrow = context.create_element<Label>(desc_content, "", theme::Typography::LabelXS);
++        description_eyebrow->set_color(Color{143, 239, 245, 255});
++        description_eyebrow->set_margin_bottom(9.0f);
++        description_eyebrow->set_letter_spacing(0.0f);
++        description_eyebrow->set_white_space(WhiteSpace::Nowrap);
++        description_title = context.create_element<Label>(desc_content, "", theme::Typography::Header3);
++        description_title->set_color(theme::color::Secondary);
++        Element *rule = context.create_element<Element>(desc_content, 0, "div", false);
++        rule->set_height(6.0f);
++        rule->set_width(140.0f);
++        rule->set_margin_top(10.0f);
++        rule->set_margin_bottom(14.0f);
++        rule->set_background_color(theme::color::SecondaryD);
++        description_container = context.create_element<Element>(desc_content, 0, "p", true);
++        description_container->set_typography(theme::Typography::Body);
++        description_container->set_line_height(42.0f);
++        description_container->set_color(theme::color::TextDim);
++        description_title->set_text("CONTROLS");
++        description_container->set_text("Choose a slot, then press the button you want. The bin clears a slot. Reset puts every button back.");
+     }
+ }
+ 
+@@ -461,7 +539,8 @@ void ConfigPageControls::on_edit_player_profile(int player_index) {
+ }
+ 
+ void ConfigPageControls::render_footer() {
+-    if (multiplayer_enabled && !multiplayer_view_mappings) {
++    // Blitz '27: in single player the device switch and Reset live in the toolbar on top.
++    if (!multiplayer_enabled || !multiplayer_view_mappings) {
+         hide_footer();
+         return;
+     }
+@@ -523,6 +602,37 @@ void ConfigPageControls::render_control_mappings() {
+         create_game_input_contexts();
+         set_current_profile_index();
+ 
++        // Blitz '27 column headers: N64 BUTTON · MAIN · ALSO, in cyan caps over the slots.
++        {
++            auto columns = context.create_element<Element>(body_left_scroll, 0, "div", false);
++            columns->set_display(Display::Flex);
++            columns->set_align_items(AlignItems::Center);
++            columns->set_height(51.0f);
++            columns->set_padding_left(GameInputRow::left_padding);
++            columns->set_padding_right(18.0f);
++            columns->set_gap(18.0f);
++            auto add_heading = [&](Element *parent, const char *text, float width) {
++                Label *heading = context.create_element<Label>(parent, text, theme::Typography::LabelXS);
++                heading->set_color(Color{143, 239, 245, 255});
++                if (width > 0.0f) {
++                    heading->set_width(width);
++                    heading->set_text_align(TextAlign::Center);
++                } else {
++                    heading->set_flex_grow(1.0f);
++                }
++                return heading;
++            };
++            add_heading(columns, "N64 BUTTON", 0.0f);
++            auto slots = context.create_element<Element>(columns, 0, "div", false);
++            slots->set_display(Display::Flex);
++            slots->set_gap(12.0f);
++            add_heading(slots, "MAIN", 156.0f);
++            add_heading(slots, "ALSO", 156.0f);
++            auto tool_space = context.create_element<Element>(columns, 0, "div", false);
++            tool_space->set_width(static_cast<float>(IconButtonSize::Large));
++            tool_space->set_flex_shrink(0.0f);
++        }
++
+         rows_wrappers.clear();
+         for (auto *section : game_input_sections.get_all_sections()) {
+             if (section->contexts.size() == 0) {
+@@ -663,8 +773,22 @@ void ConfigPageControls::set_selected_player(int player) {
+ void ConfigPageControls::on_option_hover(recompinput::GameInput input_id) {
+     if (description_container) {
+         GameInputContext *ctx = game_input_sections.get_context_by_input_id(input_id);
++        bool keyboard = get_player_input_device() == recompinput::InputDevice::Keyboard;
++        if (description_eyebrow != nullptr) {
++            description_eyebrow->set_text(std::string("PLAYER ") + std::to_string(selected_player + 1) + (keyboard ? " \xC2\xB7 KEYBOARD" : " \xC2\xB7 CONTROLLER"));
++        }
+         if (ctx != nullptr) {
+-            description_container->set_text(ctx->description);
++            std::string title = ctx->name;
++            for (char &c : title) c = (char)std::toupper((unsigned char)c);
++            const std::string &meaning = get_game_input_meaning(input_id);
++            if (!meaning.empty()) {
++                title += " \xC2\xB7 " + meaning;
++            }
++            if (description_title != nullptr) {
++                description_title->set_text(title);
++            }
++            description_container->set_text_unsafe((ctx->description.empty() ? std::string() : ctx->description + "<br/><br/>") +
++                "Choose a slot, then press the button you want. The bin clears a slot. Reset puts every button back.");
+         } else {
+             description_container->set_text("");
+         }
+diff --git a/recompui/src/config/ui_config_page_controls.h b/recompui/src/config/ui_config_page_controls.h
+index dd8ff24..d5f7a45 100644
+--- a/recompui/src/config/ui_config_page_controls.h
++++ b/recompui/src/config/ui_config_page_controls.h
+@@ -49,6 +49,9 @@ protected:
+ 
+     Style active_style;
+     std::function<void()> on_active_callback;
++    Label *name_label = nullptr;
++    Label *meaning_label = nullptr;
++    void set_lit(bool lit);  // Blitz '27: the red focus bar while one of the row's buttons has focus
+ 
+     virtual void process_event(const Event &e) override;
+     std::string_view get_type_name() override { return "GameInputRow"; }
+@@ -65,7 +68,7 @@ public:
+     void update_bindings(BindingList &new_bindings);
+     recompinput::GameInput get_input_id() const { return input_id; }
+     void focus_on_first_binding();
+-    static constexpr float left_padding = 20.0f;
++    static constexpr float left_padding = 36.0f;
+ };
+ 
+ class GameInputRowsWrapper : public Element {
+@@ -76,12 +79,14 @@ public:
+     GameInputRowsWrapper(ResourceId rid, Element *parent, const std::string &name, bool is_menu = false) : Element(rid, parent, 0, "div", false), is_menu(is_menu) {
+         set_display(Display::Block);
+         if (!name.empty()) {
++            // Blitz '27 section row: cyan caps.
+             auto context = get_current_context();
+-            Label *section_label = context.create_element<Label>(this, name, theme::Typography::LabelSM);
+-            section_label->set_margin_top(24.0f);
++            Label *section_label = context.create_element<Label>(this, name, theme::Typography::LabelXS);
++            section_label->set_text_transform(TextTransform::Uppercase);
++            section_label->set_margin_top(30.0f);
+             section_label->set_margin_left(GameInputRow::left_padding);
+-            section_label->set_margin_bottom(8.0f);
+-            section_label->set_color(theme::color::PrimaryL);
++            section_label->set_margin_bottom(9.0f);
++            section_label->set_color(Color{143, 239, 245, 255});
+         }
+     }
+ };
+@@ -111,7 +116,7 @@ protected:
+ 
+     struct {
+         GameInputSection n64 = GameInputSection("");
+-        GameInputSection menu = GameInputSection("Menu Inputs");
++        GameInputSection menu = GameInputSection("Menu Buttons");
+         std::vector<GameInputSection> other;
+ 
+         std::vector<GameInputSection *> get_all_sections() {
+@@ -152,6 +157,8 @@ protected:
+     std::vector<GameInputRow*> game_input_rows;
+     IconToggle *keyboard_toggle;
+     Element *description_container = nullptr;
++    Label *description_eyebrow = nullptr;
++    Label *description_title = nullptr;
+     on_player_bind_callback on_player_bind;
+     Element *nav_up_element = nullptr;
+     Element *first_nav_element = nullptr;
+diff --git a/recompui/src/config/ui_config_page_options_menu.h b/recompui/src/config/ui_config_page_options_menu.h
+index 49e05db..f054ab6 100644
+--- a/recompui/src/config/ui_config_page_options_menu.h
++++ b/recompui/src/config/ui_config_page_options_menu.h
+@@ -14,6 +14,8 @@ namespace recompui {
+         bool is_internal = false;
+ 
+         std::vector<ConfigOptionElement*> config_option_elements;
++        Label *description_title = nullptr;
++        Element *description_rule = nullptr;
+         Element *description_container = nullptr;
+         std::string description_option_id = "";
+         Button *apply_button = nullptr;
+@@ -38,6 +40,8 @@ namespace recompui {
+             recomp::config::Config *config,
+             bool is_internal = false
+         );
+-        virtual ~ConfigPageOptionsMenu() = default;
++        virtual ~ConfigPageOptionsMenu();
++        // Blitz '27: the settings header's icon buttons describe themselves in the open page's panel.
++        void describe(const std::string &title, const std::string &text);
+     };
+ } // namespace recompui
+diff --git a/recompui/src/data/base_rcss.cpp b/recompui/src/data/base_rcss.cpp
+index fdbc97e..d00d5a3 100644
+--- a/recompui/src/data/base_rcss.cpp
++++ b/recompui/src/data/base_rcss.cpp
+@@ -51,19 +51,11 @@ scrollbarvertical, scrollbarhorizontal {
+   border: 0;
+ }
+ scrollbarvertical slidertrack, scrollbarhorizontal slidertrack {
+-  background: PrimaryL;
+-  opacity: 0.05;
++  background: BorderSoft;
+ }
+ scrollbarvertical sliderbar, scrollbarhorizontal sliderbar {
+-  border-radius: 5dp;
+-  background: PrimaryL;
+-  opacity: 0.1;
+-}
+-scrollbarvertical sliderbar:hover:not(:active), scrollbarhorizontal sliderbar:hover:not(:active) {
+-  opacity: 0.2;
+-}
+-scrollbarvertical sliderbar:active, scrollbarhorizontal sliderbar:active {
+-  opacity: 0.3;
++  border-radius: 3dp;
++  background: Border;
+ }
+ scrollbarvertical sliderarrowdec, scrollbarvertical sliderarrowinc, scrollbarhorizontal sliderarrowdec, scrollbarhorizontal sliderarrowinc {
+   width: 0;
+@@ -71,23 +63,23 @@ scrollbarvertical sliderarrowdec, scrollbarvertical sliderarrowinc, scrollbarhor
+ }
+ 
+ scrollbarvertical {
+-  width: 12dp;
++  width: 6dp;
+ }
+ scrollbarvertical slidertrack {
+-  width: 12dp;
++  width: 6dp;
+ }
+ scrollbarvertical sliderbar {
+-  width: 12dp;
++  width: 6dp;
+ }
+ 
+ scrollbarhorizontal {
+-  height: 12dp;
++  height: 6dp;
+ }
+ scrollbarhorizontal slidertrack {
+-  height: 12dp;
++  height: 6dp;
+ }
+ scrollbarhorizontal sliderbar {
+-  height: 12dp;
++  height: 6dp;
+ }
+ )";
+ 
+diff --git a/recompui/src/elements/ui_binding_button.cpp b/recompui/src/elements/ui_binding_button.cpp
+index caa1020..349eb92 100644
+--- a/recompui/src/elements/ui_binding_button.cpp
++++ b/recompui/src/elements/ui_binding_button.cpp
+@@ -12,18 +12,22 @@ namespace recompui {
+ 
+         enable_focus();
+         apply_sizing_styling(this);
+-
+-        set_border_color(theme::color::ElevatedSoft);
+-        set_background_color(theme::color::ElevatedSoft);
+-        set_color(theme::color::TextDim);
+-
++        // Blitz '27 binding slot: 104x40 px, Background2 with a soft cyan rim; focused, the red bar with a
++        // selected-yellow rim.
++        set_flex_grow(0.0f);
++        set_flex_shrink(0.0f);
++        set_flex_basis_auto();
++        set_width(156.0f - theme::border::width * 2.0f);
++        set_height(60.0f - theme::border::width * 2.0f);
++        set_border_color(theme::color::BorderSoft);
++        set_background_color(theme::color::Background2);
++        set_color(theme::color::Text);
+         set_cursor(Cursor::Pointer);
+-
+-        focus_style.set_border_color(theme::color::ElevatedBorderHard);
+-        focus_style.set_background_color(theme::color::Elevated);
+-        focus_style.set_color(theme::color::TextActive);
+-        hover_style.set_border_color(theme::color::ElevatedBorder);
+-        hover_style.set_background_color(theme::color::Elevated);
++        focus_style.set_border_color(theme::color::SecondaryL);
++        focus_style.set_background_color(theme::color::Primary);
++        focus_style.set_color(theme::color::SecondaryL);
++        hover_style.set_border_color(theme::color::Border);
++        hover_style.set_background_color(theme::color::Background3);
+         hover_style.set_color(theme::color::Text);
+ 
+         disabled_style.set_color(theme::color::TextDim);
+@@ -39,6 +43,10 @@ namespace recompui {
+ 
+         bound_text_el = context.create_element<Element>(this, 0, "div", true);
+         apply_binding_style();
++        empty_el = context.create_element<Element>(this, 0, "div", true);
++        empty_el->set_text("\xE2\x80\x94");
++        empty_el->set_color(theme::color::TextDim, 153);
++        empty_el->set_font_size(36.0f);
+         unknown_svg_el = context.create_element<Svg>(this, "icons/Question.svg");
+         unknown_svg_el->set_position(Position::Absolute);
+         unknown_svg_el->set_width(32);
+@@ -115,10 +123,10 @@ namespace recompui {
+         bound_text_el->set_left(50.0f, recompui::Unit::Percent);
+         bound_text_el->set_translate_2D(-50.0f, -50.0f, recompui::Unit::Percent);
+         bound_text_el->set_font_family("promptfont");
+-        bound_text_el->set_font_size(32.0f);
++        bound_text_el->set_font_size(54.0f);  // 36 px: readable from the couch
+         bound_text_el->set_font_style(FontStyle::Normal);
+         bound_text_el->set_font_weight(400);
+-        bound_text_el->set_line_height(32.0f);
++        bound_text_el->set_line_height(54.0f);
+         bound_text_el->set_opacity(1);
+     }
+ 
+@@ -134,9 +142,12 @@ namespace recompui {
+             unknown_svg_el->set_display(Display::Block);
+         } else  {
+             bound_text_el->set_text(mapped_binding);
+-            bound_text_el->set_display(Display::Block);
++            bound_text_el->set_display(binding.empty() ? Display::None : Display::Block);
+             unknown_svg_el->set_display(Display::None);
+         }
++        if (empty_el != nullptr) {
++            empty_el->set_display(binding.empty() ? Display::Block : Display::None);
++        }
+     }
+ 
+     void BindingButton::set_is_binding(bool is_binding) {
+@@ -184,6 +195,9 @@ namespace recompui {
+         case EventType::Focus: {
+             bool active = std::get<EventFocus>(e.variant).active;
+             set_style_enabled(focus_state, active);
++            if (focus_callback) {
++                focus_callback(active);
++            }
+             if (active) {
+                 queue_update();
+             }
+diff --git a/recompui/src/elements/ui_binding_button.h b/recompui/src/elements/ui_binding_button.h
+index f5d9744..f95ae72 100644
+--- a/recompui/src/elements/ui_binding_button.h
++++ b/recompui/src/elements/ui_binding_button.h
+@@ -22,6 +22,8 @@ namespace recompui {
+         Style disabled_style;
+         Style hover_disabled_style;
+         std::list<std::function<void()>> pressed_callbacks;
++        std::function<void(bool)> focus_callback;
++        Element *empty_el = nullptr;  // Blitz '27: an em dash in an empty slot
+ 
+         // Element overrides.
+         virtual void process_event(const Event &e) override;
+@@ -31,6 +33,7 @@ namespace recompui {
+         void add_pressed_callback(std::function<void()> callback);
+         void set_binding(const std::string &binding);
+         void set_is_binding(bool is_binding);
++        void set_focus_callback(std::function<void(bool)> callback) { focus_callback = std::move(callback); }
+         Style* get_hover_style() { return &hover_style; }
+         Style* get_focus_style() { return &focus_style; }
+         Style* get_disabled_style() { return &disabled_style; }
+diff --git a/recompui/src/elements/ui_button.cpp b/recompui/src/elements/ui_button.cpp
+index cf2a311..7e6cf83 100644
+--- a/recompui/src/elements/ui_button.cpp
++++ b/recompui/src/elements/ui_button.cpp
+@@ -3,10 +3,17 @@
+ #include "ui_pseudo_border.h"
+ 
+ #include <cassert>
++#include <cctype>
++#include <string>
+ 
+ // #define RECOMPUI_BUTTON_DEBUG
+ 
+ namespace recompui {
++    static std::string upper_text(std::string_view t) {
++        std::string s{t};
++        for (char& c : s) c = (char)std::toupper((unsigned char)c);
++        return s;
++    }
+ 
+     Button::Button(ResourceId rid, Element *parent, const std::string &text, ButtonStyle style, ButtonSize size) : Element(rid, parent, Events(EventType::Click, EventType::Hover, EventType::Enable, EventType::Focus), "button", false) {
+         this->style = style;
+@@ -22,6 +29,12 @@ namespace recompui {
+             case ButtonSize::Medium:
+                 base_padding = 12.0f;
+                 break;
++            case ButtonSize::Card:
++                base_padding = 21.0f;
++                break;
++            case ButtonSize::Prompt:
++                base_padding = 36.0f;
++                break;
+             case ButtonSize::Large:
+             default:
+                 base_padding = 24.0f;
+@@ -53,28 +66,32 @@ namespace recompui {
+ 
+         auto focus_border = context.create_element<FocusBorder>(this, true);
+         focus_border->set_border_radius(theme::border::radius_md + theme::border::width * 4.0f);
++        focus_ring = focus_border;
+ 
++        // Blitz '27: display-face caps, sized to the button.
++        label = context.create_element<Label>(this, upper_text(text), theme::Typography::LabelMD);
+         switch (size) {
+-            case ButtonSize::Small: {
+-                label = context.create_element<Label>(this, text, LabelStyle::Annotation);
++            case ButtonSize::Small:
++                label->set_font_size(20.0f);
+                 break;
+-            }
+             case ButtonSize::Medium:
+-                label = context.create_element<Label>(this, text, LabelStyle::Small);
++                label->set_font_size(27.0f);
++                break;
++            case ButtonSize::Card:
++                label->set_font_size(30.0f);
++                break;
++            case ButtonSize::Prompt:
++                label->set_font_size(39.0f);
+                 break;
+             case ButtonSize::Large:
+             default:
+-                label = context.create_element<Label>(this, text, LabelStyle::Normal);
++                label->set_font_size(34.0f);
+                 break;
+         }
+ 
+         set_cursor(Cursor::Pointer);
+         set_color(theme::color::Text);
+         set_tab_index(TabIndex::Auto);
+-        hover_style.set_color(theme::color::Text);
+-        focus_style.set_color(theme::color::Text);
+-        disabled_style.set_color(theme::color::TextDim, 128);
+-        hover_disabled_style.set_color(theme::color::Text, 128);
+ 
+         apply_button_style(style);
+ 
+@@ -112,6 +129,9 @@ namespace recompui {
+             break;
+         case EventType::Focus:
+             set_style_enabled(focus_state, std::get<EventFocus>(e.variant).active);
++            if (focus_callback) {
++                focus_callback(std::get<EventFocus>(e.variant).active);
++            }
+             break;
+         case EventType::Update:
+             break;
+@@ -162,33 +182,39 @@ namespace recompui {
+         }
+     }
+ 
++    // Blitz '27 buttons: idle on deep navy with a soft cyan rim (danger: a red-orange rim and text);
++    // focused or hovered: the red accent bar with a selected-yellow rim and text. `color` picks the idle
++    // variant only: Primary is the red-tinted primary action, Danger the outlined destructive one.
+     void Button::apply_theme_style(recompui::theme::color color, bool is_basic) {
+-        uint8_t border_opacity = is_basic ? 0 : 204;
+-        uint8_t background_opacity = is_basic ? 0 : 13;
+-        uint8_t background_hover_opacity = 77;
+-        uint8_t border_hover_opacity = is_basic ? background_hover_opacity : 255;
+-
+-        if (color == theme::color::Elevated) {
+-            background_hover_opacity = theme::get_theme_color(theme::color::Elevated).a;
+-            if (is_basic) {
+-                border_hover_opacity = background_hover_opacity;
+-            } else {
+-                background_opacity = theme::get_theme_color(theme::color::ElevatedSoft).a;
+-                border_opacity = theme::get_theme_color(theme::color::ElevatedBorder).a;
+-                border_hover_opacity = theme::get_theme_color(theme::color::ElevatedBorderHard).a;
+-            }
++        using C = theme::color;
++        set_color(color == C::Danger ? C::Danger : C::Text);
++        if (is_basic) {
++            set_border_color(C::Transparent);
++            set_background_color(C::Transparent);
+         }
+-
+-        set_border_color(color, border_opacity);
+-        set_background_color(color, background_opacity);
+-        hover_style.set_border_color(color, border_hover_opacity);
+-        hover_style.set_background_color(color, background_hover_opacity);
+-        focus_style.set_border_color(color, border_hover_opacity);
+-        focus_style.set_background_color(color, background_hover_opacity);
+-        disabled_style.set_border_color(color, border_opacity / 4);
+-        disabled_style.set_background_color(color, background_opacity / 4);
+-        hover_disabled_style.set_border_color(color, border_hover_opacity / 4);
+-        hover_disabled_style.set_background_color(color, background_hover_opacity / 4);
++        else if (color == C::Primary) {
++            set_border_color(C::Primary);
++            set_background_color(C::PrimaryD);
++        }
++        else if (color == C::Danger) {
++            set_border_color(C::Danger);
++            set_background_color(C::Background3);
++        }
++        else {
++            set_border_color(C::BorderSoft);
++            set_background_color(C::Background3);
++        }
++        for (Style* st : {&hover_style, &focus_style}) {
++            st->set_border_color(C::SecondaryL);
++            st->set_background_color(C::Primary);
++            st->set_color(C::SecondaryL);
++        }
++        disabled_style.set_border_color(C::BorderSoft, 40);
++        disabled_style.set_background_color(C::Background3, 110);
++        disabled_style.set_color(C::TextDim, 115);
++        hover_disabled_style.set_border_color(C::BorderSoft, 40);
++        hover_disabled_style.set_background_color(C::Background3, 110);
++        hover_disabled_style.set_color(C::TextDim, 115);
+ 
+         add_style(&hover_style, hover_state);
+         add_style(&focus_style, focus_state);
+@@ -197,6 +223,6 @@ namespace recompui {
+     }
+ 
+     void Button::set_text(std::string_view text) {
+-        label->set_text(text);
++        label->set_text(upper_text(text));
+     }
+ };
+diff --git a/recompui/src/elements/ui_button.h b/recompui/src/elements/ui_button.h
+index d8a5e1e..b2b2108 100644
+--- a/recompui/src/elements/ui_button.h
++++ b/recompui/src/elements/ui_button.h
+@@ -18,6 +18,8 @@ namespace recompui {
+         Small = 32,
+         Medium = 48,
+         Large = 72,
++        Card = 60,    // Blitz '27: 40 px card buttons (Players tab, Rules actions)
++        Prompt = 78,  // Blitz '27: 52 px prompt buttons
+         Default = Large
+     };
+ 
+@@ -31,6 +33,8 @@ namespace recompui {
+         Style hover_disabled_style;
+         std::list<std::function<void()>> pressed_callbacks;
+         Element *label = nullptr;
++        Element *focus_ring = nullptr;
++        std::function<void(bool)> focus_callback;
+ 
+         // Element overrides.
+         virtual void process_event(const Event &e) override;
+@@ -44,6 +48,9 @@ namespace recompui {
+         Style* get_hover_disabled_style() { return &hover_disabled_style; }
+         void apply_button_style(ButtonStyle new_style);
+         virtual void set_text(std::string_view text) override;
++        void set_focus_callback(std::function<void(bool)> callback) { focus_callback = std::move(callback); }
++        // Blitz '27: no outer focus ring (the fill and rim already show focus).
++        void hide_focus_ring() { if (focus_ring != nullptr) focus_ring->set_display(Display::None); }
+     private:
+         void apply_theme_style(recompui::theme::color color, bool is_basic = false);
+     };
+diff --git a/recompui/src/elements/ui_config_page.cpp b/recompui/src/elements/ui_config_page.cpp
+index b839753..6e6b96c 100644
+--- a/recompui/src/elements/ui_config_page.cpp
++++ b/recompui/src/elements/ui_config_page.cpp
+@@ -52,6 +52,9 @@ namespace recompui {
+ 
+         right = context.create_element<Container>(this, FlexDirection::Row, JustifyContent::FlexEnd, 0);
+         set_header_footer_side_styles(right);
++        // Positioned, so they paint over decorations an app adds to the header (recompui::decorate_panel).
++        left->set_position(Position::Relative);
++        right->set_position(Position::Relative);
+     }
+ 
+     void ConfigHeaderFooter::hide() {
+diff --git a/recompui/src/elements/ui_element.cpp b/recompui/src/elements/ui_element.cpp
+index 4517152..9096a5f 100644
+--- a/recompui/src/elements/ui_element.cpp
++++ b/recompui/src/elements/ui_element.cpp
+@@ -259,6 +259,13 @@ void Element::ProcessEvent(Rml::Event &event) {
+ 
+         if (events_enabled & Events(EventType::MenuAction)) {
+             MenuAction action = menu_action_mapping::menu_action_from_rml_key(rml_key);
++            // Backspace and Page Up/Down are menu keys, except while typing in a text field.
++            if (rml_key == Rml::Input::KI_BACK || rml_key == Rml::Input::KI_PRIOR || rml_key == Rml::Input::KI_NEXT) {
++                Rml::Element *target = event.GetTargetElement();
++                if (target != nullptr && (target->GetTagName() == "input" || target->GetTagName() == "textarea")) {
++                    action = MenuAction::None;
++                }
++            }
+             if (action != MenuAction::None) {
+                 handle_event(Event::menu_action_event(action));
+             }
+@@ -577,6 +584,31 @@ bool Element::focus() {
+     return base->Focus();
+ }
+ 
++bool Element::focus_first_focusable(bool skip_text_inputs) {
++    for (auto child : children) {
++        if (!child->base->IsVisible() || !child->enabled) {
++            continue;
++        }
++        CanFocus res = child->is_focusable();
++        if (res == CanFocus::Yes) {
++            if (skip_text_inputs && (child->base->GetTagName() == "input" || child->base->GetTagName() == "textarea")) {
++                continue;
++            }
++            if (child->focus()) {
++                return true;
++            }
++            continue;
++        }
++        if (res == CanFocus::NoAndNoChildren) {
++            continue;
++        }
++        if (child->focus_first_focusable(skip_text_inputs)) {
++            return true;
++        }
++    }
++    return false;
++}
++
+ void Element::blur() {
+     base->Blur();
+ }
+diff --git a/recompui/src/elements/ui_element.h b/recompui/src/elements/ui_element.h
+index 34eec3f..0817d24 100644
+--- a/recompui/src/elements/ui_element.h
++++ b/recompui/src/elements/ui_element.h
+@@ -148,6 +148,8 @@ public:
+     float get_dp_to_pixel_ratio();
+     void enable_focus();
+     bool focus();
++    // Focuses the first visible, enabled, focusable element under this one (in child order).
++    bool focus_first_focusable(bool skip_text_inputs = false);
+     void blur();
+     void queue_update();
+     void register_callback(ContextId context, PTR(void) callback, PTR(void) userdata);
+diff --git a/recompui/src/elements/ui_icon_button.cpp b/recompui/src/elements/ui_icon_button.cpp
+index bbc9cc2..3cff21d 100644
+--- a/recompui/src/elements/ui_icon_button.cpp
++++ b/recompui/src/elements/ui_icon_button.cpp
+@@ -62,6 +62,7 @@ namespace recompui {
+ 
+         auto focus_border = context.create_element<FocusBorder>(this, true);
+         focus_border->set_border_radius(static_cast<float>(size) + theme::border::width * 4.0f);
++        focus_border_el = focus_border;
+ 
+         svg = context.create_element<Svg>(this, svg_src);
+         svg->set_width(icon_size);
+@@ -85,6 +86,10 @@ namespace recompui {
+             {
+                 bool hover_active = std::get<EventHover>(e.variant).active && is_enabled();
+                 set_style_enabled(hover_state, hover_active);
++                if (kit_style != 0) {
++                    update_kit_icon(is_pseudo_class_set("focus"), hover_active);
++                    break;
++                }
+                 svg->set_color(hover_active ? theme::color::Text : theme::color::TextDim);
+             }
+             break;
+@@ -108,6 +113,13 @@ namespace recompui {
+             {
+                 bool focus_active = std::get<EventFocus>(e.variant).active;
+                 set_style_enabled(focus_state, focus_active);
++                if (focus_callback) {
++                    focus_callback(focus_active);
++                }
++                if (kit_style != 0) {
++                    update_kit_icon(focus_active, false);
++                    break;
++                }
+                 svg->set_color(focus_active ? theme::color::Text : theme::color::TextDim);
+             }
+             break;
+@@ -119,6 +131,52 @@ namespace recompui {
+         }
+     }
+ 
++    void IconButton::update_kit_icon(bool focused, bool hovered) {
++        if (focused) {
++            svg->set_color(theme::color::SecondaryL);
++        } else if (hovered || kit_style == 2) {
++            svg->set_color(theme::color::Text);
++        } else {
++            svg->set_color(theme::color::TextDim, 179);
++        }
++    }
++
++    void IconButton::set_kit_quiet(float icon_dp) {
++        kit_style = 1;
++        focus_border_el->set_display(Display::None);
++        set_border_color(theme::color::Transparent);
++        set_background_color(theme::color::Transparent);
++        hover_style.set_border_color(theme::color::Transparent);
++        hover_style.set_background_color(theme::color::Transparent);
++        focus_style.set_border_color(theme::color::Transparent);
++        focus_style.set_background_color(theme::color::Transparent);
++        svg->set_width(icon_dp);
++        svg->set_height(icon_dp);
++        update_kit_icon(false, false);
++    }
++
++    void IconButton::set_kit_framed(float box_dp, float icon_dp) {
++        kit_style = 2;
++        focus_border_el->set_display(Display::None);
++        float inner = box_dp - theme::border::width * 2.0f;
++        set_width(inner);
++        set_min_width(inner);
++        set_max_width(inner);
++        set_height(inner);
++        set_min_height(inner);
++        set_max_height(inner);
++        set_border_radius(theme::border::radius_md);
++        set_border_color(theme::color::BorderSoft);
++        set_background_color(theme::color::Background3);
++        hover_style.set_border_color(theme::color::Border);
++        hover_style.set_background_color(theme::color::Background3);
++        focus_style.set_border_color(theme::color::SecondaryL);
++        focus_style.set_background_color(theme::color::Primary);
++        svg->set_width(icon_dp);
++        svg->set_height(icon_dp);
++        update_kit_icon(false, false);
++    }
++
+     void IconButton::add_pressed_callback(std::function<void()> callback) {
+         pressed_callbacks.emplace_back(callback);
+     }
+diff --git a/recompui/src/elements/ui_icon_button.h b/recompui/src/elements/ui_icon_button.h
+index 4b42b07..6a00e43 100644
+--- a/recompui/src/elements/ui_icon_button.h
++++ b/recompui/src/elements/ui_icon_button.h
+@@ -24,6 +24,10 @@ namespace recompui {
+         Style hover_disabled_style;
+         std::list<std::function<void()>> pressed_callbacks;
+         Svg *svg;
++        Element *focus_border_el = nullptr;
++        std::function<void(bool)> focus_callback;
++        int kit_style = 0;  // Blitz '27: 0 none, 1 quiet (bare glyph), 2 framed
++        void update_kit_icon(bool focused, bool hovered);
+ 
+         // Element overrides.
+         virtual void process_event(const Event &e) override;
+@@ -36,6 +40,12 @@ namespace recompui {
+         Style* get_disabled_style() { return &disabled_style; }
+         Style* get_hover_disabled_style() { return &hover_disabled_style; }
+         void apply_button_style(ButtonStyle new_style);
++        // Blitz '27 looks. Quiet: a bare steel glyph that turns selected yellow on focus (row tools such as
++        // the Controls page's bins). Framed: a box_dp square, Background3 with a soft cyan rim, the red bar
++        // with a selected-yellow rim on focus (the settings header's icons).
++        void set_kit_quiet(float icon_dp);
++        void set_kit_framed(float box_dp, float icon_dp);
++        void set_focus_callback(std::function<void(bool)> callback) { focus_callback = std::move(callback); }
+     private:
+         void apply_theme_style(recompui::theme::color color, bool is_basic = false);
+     };
+diff --git a/recompui/src/elements/ui_modal.h b/recompui/src/elements/ui_modal.h
+index d065a14..4d320f7 100644
+--- a/recompui/src/elements/ui_modal.h
++++ b/recompui/src/elements/ui_modal.h
+@@ -53,6 +53,15 @@ namespace recompui {
+ 
+     class TabbedModal;
+ 
++    // Blitz '27 hint rows (the settings overlay and prompts): one item per action, glyph(s) then a caps label.
++    struct HintItem {
++        std::vector<MenuAction> actions;  // two for a pair (L1 R1 TABS)
++        std::string label;
++    };
++    // Player 1's last-used input device and its profile (COUNT, -1 when unknown).
++    std::pair<recompinput::InputDevice, int> hint_input_info();
++    void build_hint_row(ContextId context, Element *row, const std::vector<HintItem> &items, recompinput::InputDevice device, int profile);
++
+     struct MenuActionCallback {
+         std::function<void()> callback;
+         std::string description;
+@@ -73,6 +82,7 @@ namespace recompui {
+ 
+         recompinput::InputDevice last_input_device = recompinput::InputDevice::COUNT;
+         int last_input_profile = -1;
++        bool hints_hidden_for_prompt = false;
+ 
+         virtual void process_event(const Event &e) override;
+         std::string_view get_type_name() override { return "Modal"; }
+@@ -102,6 +112,7 @@ namespace recompui {
+         TabSet *tabs = nullptr;
+         int previous_tab_index = -1;
+         int current_tab_index = -1;
++        int content_focus_frames = 0;  // Blitz '27: frames left to put focus in the content after opening
+         virtual void process_event(const Event &e) override;
+         std::string_view get_type_name() override { return "TabbedModal"; }
+         void on_tab_change(int tab_index);
+diff --git a/recompui/src/elements/ui_slider.cpp b/recompui/src/elements/ui_slider.cpp
+index 7a50da4..2997ad0 100644
+--- a/recompui/src/elements/ui_slider.cpp
++++ b/recompui/src/elements/ui_slider.cpp
+@@ -47,6 +47,13 @@ namespace recompui {
+     void Slider::update_circle_position() {
+         double ratio = std::clamp((value - min_value) / (max_value - min_value), 0.0, 1.0);
+         circle_element->set_left(ratio * 100.0, Unit::Percent);
++        // Blitz '27: lit segments (the slanted green bars) up to the value.
++        int lit = (int)std::lround(ratio * segments.size());
++        if (ratio > 0.0 && lit == 0) lit = 1;
++        for (size_t i = 0; i < segments.size(); i++) {
++            segments[i]->set_background_color((int)i < lit ? theme::color::Success : theme::color::Background2);
++            segments[i]->set_border_color((int)i < lit ? theme::color::SuccessL : theme::color::BorderSoft);
++        }
+     }
+ 
+     void Slider::update_label_text() {
+@@ -148,11 +155,7 @@ namespace recompui {
+ 
+         ContextId context = get_current_context();
+ 
+-        value_label = context.create_element<Label>(this, "0", LabelStyle::Small);
+-        value_label->set_margin_right(20.0f);
+-        value_label->set_min_width(60.0f);
+-        value_label->set_max_width(60.0f);
+-
++        set_align_items(AlignItems::Center);
+         slider_element = context.create_element<Clickable>(this, true);
+         slider_element->set_flex(1.0f, 0.0f);
+         slider_element->add_pressed_callback([this](float x, float y){ bar_pressed(x, y); focus(); });
+@@ -160,15 +163,31 @@ namespace recompui {
+ 
+         {
+             bar_element = context.create_element<Clickable>(slider_element, true);
++            bar_element->set_position(Position::Relative);
+             bar_element->set_width(100.0f, Unit::Percent);
+-            bar_element->set_height(2.0f);
+-            bar_element->set_margin_top(8.0f);
+-            bar_element->set_background_color(theme::color::WhiteA20);
++            bar_element->set_height(36.0f);
++            bar_element->set_display(Display::Flex);
++            bar_element->set_flex_direction(FlexDirection::Row);
++            bar_element->set_gap(4.5f);
++            bar_element->set_background_color(theme::color::Transparent);
++            // Ten slanted segments (14x24 px, 3 px apart at 960x720); the knob stays, invisible, for dragging.
++            for (int i = 0; i < 10; i++) {
++                Element* seg = context.create_element<Element>(bar_element, 0, "div", false);
++                seg->set_flex_grow(1.0f);
++                seg->set_height(36.0f);
++                seg->set_border_width(1.5f);
++                seg->set_border_radius(2.0f);
++                seg->set_transform_skew_x(-14.0f);
++                seg->set_pointer_events(PointerEvents::None);
++                segments.push_back(seg);
++            }
+             bar_element->add_pressed_callback([this](float x, float y){ bar_pressed(x, y); focus(); });
+             bar_element->add_dragged_callback([this](float x, float y, recompui::DragPhase phase){ bar_dragged(x, y, phase); focus(); });
+             
+             circle_element = context.create_element<Clickable>(bar_element, true);
+-            circle_element->set_position(Position::Relative);
++            circle_element->set_position(Position::Absolute);
++            circle_element->set_top(10.0f);
++            circle_element->set_opacity(0.0f);
+             circle_element->set_width(16.0f);
+             circle_element->set_height(16.0f);
+             circle_element->set_margin_top(-7.0f);
+@@ -181,6 +200,13 @@ namespace recompui {
+             circle_element->set_cursor(Cursor::Pointer);
+         }
+ 
++        value_label = context.create_element<Label>(this, "0", theme::Typography::LabelLG);
++        value_label->set_font_size(39.0f);
++        value_label->set_color(theme::color::Secondary);
++        value_label->set_margin_left(24.0f);
++        value_label->set_min_width(84.0f);
++        value_label->set_text_align(TextAlign::Right);
++
+         set_value_internal(value, true, false);
+     }
+ 
+diff --git a/recompui/src/elements/ui_slider.h b/recompui/src/elements/ui_slider.h
+index 4d8c41e..5f69412 100644
+--- a/recompui/src/elements/ui_slider.h
++++ b/recompui/src/elements/ui_slider.h
+@@ -1,4 +1,5 @@
+ #pragma once
++#include <vector>
+ 
+ #include "ui_clickable.h"
+ #include "ui_label.h"
+@@ -12,6 +13,8 @@ namespace recompui {
+     };
+ 
+     class Slider : public Element {
++    private:
++        std::vector<Element*> segments;  // Blitz '27 slanted bars
+     private:
+         SliderType type = SliderType::Percent;
+         Label *value_label = nullptr;
+diff --git a/recompui/src/elements/ui_style.cpp b/recompui/src/elements/ui_style.cpp
+index 99c8e61..b7e370b 100644
+--- a/recompui/src/elements/ui_style.cpp
++++ b/recompui/src/elements/ui_style.cpp
+@@ -3,6 +3,8 @@
+ 
+ #include <cassert>
+ 
++#include "recompui/recompui.h"  // get_primary_font_family (typography presets)
++
+ namespace recompui {
+ 
+     static Rml::Unit to_rml(Unit unit) {
+@@ -728,6 +730,7 @@ namespace recompui {
+         set_line_height(preset.line_height);
+         set_font_weight(preset.font_weight);
+         set_font_style(preset.font_style);
++        set_font_family(preset.font_family != nullptr ? std::string_view{preset.font_family} : std::string_view{recompui::get_primary_font_family()});
+     }
+ 
+     void Style::set_text_align(TextAlign text_align) {
+@@ -763,6 +766,13 @@ namespace recompui {
+         set_property(Rml::PropertyId::TabIndex, to_rml(tab_index));
+     }
+ 
++    void Style::set_decorator(const std::string& decorator) {
++        Rml::PropertyDictionary properties;
++        if (Rml::StyleSheetSpecification::ParsePropertyDeclaration(properties, "decorator", decorator)) {
++            for (const auto& [id, property] : properties.GetProperties()) set_property(id, property);
++        }
++    }
++
+     void Style::set_font_family(std::string_view family) {
+         set_property(Rml::PropertyId::FontFamily, Rml::Property(Rml::String{ family }, Rml::Unit::UNKNOWN));
+     }
+@@ -841,6 +851,10 @@ namespace recompui {
+         set_or_add_transformation(Rml::Transforms::Scale2D(scale_x, scale_y));
+     }
+ 
++    void Style::set_transform_skew_x(float degrees) {
++        set_or_add_transformation(Rml::Transforms::SkewX(degrees));
++    }
++
+     void Style::set_rotation(float degrees) {
+         set_or_add_transformation(Rml::Transforms::Rotate2D(degrees));
+     }
+diff --git a/recompui/src/elements/ui_style.h b/recompui/src/elements/ui_style.h
+index 3fe8e04..f820e8e 100644
+--- a/recompui/src/elements/ui_style.h
++++ b/recompui/src/elements/ui_style.h
+@@ -127,10 +127,13 @@ namespace recompui {
+         void set_drag(Drag drag);
+         void set_tab_index(TabIndex focus);
+         void set_font_family(std::string_view family);
++        // An RmlUi decorator, e.g. "image(?/name repeat)" (queued images are named "?/...").
++        void set_decorator(const std::string& decorator);
+         void unset_transform();
+         void set_translate_2D(float x, float y, Unit unit = Unit::Dp);
+         void set_scale_2D(float scale_x, float scale_y);
+         void set_rotation(float degrees);
++        void set_transform_skew_x(float degrees);
+         virtual void set_nav_auto(NavDirection dir);
+         virtual void set_nav_none(NavDirection dir);
+         virtual void set_nav(NavDirection dir, Element* element);
+diff --git a/recompui/src/elements/ui_theme.cpp b/recompui/src/elements/ui_theme.cpp
+index 3d679c1..19f0cf5 100644
+--- a/recompui/src/elements/ui_theme.cpp
++++ b/recompui/src/elements/ui_theme.cpp
+@@ -272,8 +272,9 @@ constexpr TypographyArray get_default_typography_array() {
+ 
+ static TypographyArray typography_presets = get_default_typography_array();
+ 
+-void recompui::theme::set_typography_preset(Typography type, float font_size, float letter_spacing_percentage, uint32_t font_weight, recompui::FontStyle font_style) {
++void recompui::theme::set_typography_preset(Typography type, float font_size, float letter_spacing_percentage, uint32_t font_weight, recompui::FontStyle font_style, const char* font_family) {
+     typography_presets[(std::size_t)type] = create_typography_preset(font_size, letter_spacing_percentage, font_weight, font_style);
++    typography_presets[(std::size_t)type].font_family = font_family;
+ }
+ 
+ TypographyPreset &recompui::theme::get_typography_preset(recompui::theme::Typography type) {
+diff --git a/recompui/src/elements/ui_theme.h b/recompui/src/elements/ui_theme.h
+index 3eb5ce3..efa77f0 100644
+--- a/recompui/src/elements/ui_theme.h
++++ b/recompui/src/elements/ui_theme.h
+@@ -137,9 +137,10 @@ namespace recompui {
+             float letter_spacing;
+             uint32_t font_weight = 400;
+             recompui::FontStyle font_style = recompui::FontStyle::Normal;
++            const char* font_family = nullptr;  // nullptr: the primary font
+         };
+ 
+-        void set_typography_preset(Typography type, float font_size, float letter_spacing_percentage = 0.0f, uint32_t font_weight = 400, recompui::FontStyle font_style = recompui::FontStyle::Normal);
++        void set_typography_preset(Typography type, float font_size, float letter_spacing_percentage = 0.0f, uint32_t font_weight = 400, recompui::FontStyle font_style = recompui::FontStyle::Normal, const char* font_family = nullptr);
+         TypographyPreset &get_typography_preset(Typography type);
+ 
+     } // namespace theme
+diff --git a/recompui/src/elements/ui_toggle.cpp b/recompui/src/elements/ui_toggle.cpp
+index da7039a..ad97e87 100644
+--- a/recompui/src/elements/ui_toggle.cpp
++++ b/recompui/src/elements/ui_toggle.cpp
+@@ -26,7 +26,7 @@ namespace recompui {
+         }
+     };
+ 
+-    static const ToggleSizing medium_toggle_sizing = ToggleSizing(64.0f, 36.0f, 6.0f);
++    static const ToggleSizing medium_toggle_sizing = ToggleSizing(96.0f, 48.0f, 6.0f);  // Blitz '27: 64x32 px
+     static const ToggleSizing large_toggle_sizing = ToggleSizing(144.0f, 72.0f, 8.0f);
+ 
+     static const ToggleSizing &get_toggle_sizing(ToggleSize size) {
+@@ -42,8 +42,8 @@ namespace recompui {
+ 
+     const ToggleColorTheme &Toggle::get_toggle_color_theme_unchecked() {
+         static const ToggleColorTheme color_theme = {
+-            .border = theme::color::BW50,
+-            .bg_hover = theme::color::WhiteA5,
++            .border = theme::color::BorderSoft,
++            .bg_hover = theme::color::Background3,
+             .floater = theme::color::TextDim,
+             .floater_disabled = theme::color::TextDim
+         };
+@@ -53,10 +53,10 @@ namespace recompui {
+ 
+     const ToggleColorTheme &Toggle::get_toggle_color_theme_checked() {
+         static const ToggleColorTheme color_theme = {
+-            .border = theme::color::Primary,
+-            .bg_hover = theme::color::PrimaryA30,
+-            .floater = theme::color::Primary,
+-            .floater_disabled = theme::color::PrimaryD
++            .border = theme::color::Success,
++            .bg_hover = theme::color::Success,
++            .floater = theme::color::Background1,
++            .floater_disabled = theme::color::SuccessD
+         };
+ 
+         return color_theme;
+@@ -71,10 +71,12 @@ namespace recompui {
+ 
+         if (for_checked) {
+             base_styles.normal.set_border_color(color_theme.border);
++            base_styles.normal.set_background_color(theme::color::Success);
+             floater_styles.normal.set_background_color(color_theme.floater);
+             inner_border_styles.normal.set_border_color(color_theme.border);
+         } else {
+             set_border_color(color_theme.border);
++            set_background_color(theme::color::Background2);
+             floater->set_background_color(color_theme.floater);
+             inner_border->set_border_color(color_theme.border);
+         }
+@@ -207,6 +209,7 @@ namespace recompui {
+         case EventType::Focus: {
+             bool focus_active = std::get<EventFocus>(e.variant).active;
+             set_all_style_enabled(focus_state, focus_active);
++            if (focus_callback) focus_callback(focus_active);
+             queue_update();
+             break;
+         }
+diff --git a/recompui/src/elements/ui_toggle.h b/recompui/src/elements/ui_toggle.h
+index 507bffb..d747273 100644
+--- a/recompui/src/elements/ui_toggle.h
++++ b/recompui/src/elements/ui_toggle.h
+@@ -33,6 +33,7 @@ namespace recompui {
+         float floater_left = 0.0f;
+         std::chrono::high_resolution_clock::duration last_time;
+         std::list<std::function<void(bool)>> checked_callbacks;
++        std::function<void(bool)> focus_callback;
+ 
+         struct {
+             ToggleStyleGroup unchecked;
+@@ -59,6 +60,8 @@ namespace recompui {
+         virtual void process_event(const Event &e) override;
+         std::string_view get_type_name() override { return "Toggle"; }
+     public:
++        void set_focus_callback(std::function<void(bool)> callback) { focus_callback = std::move(callback); }
++    
+         Toggle(ResourceId rid, Element *parent, ToggleSize size = ToggleSize::Default);
+         void set_checked(bool checked);
+         bool is_checked() const;

@@ -1,0 +1,480 @@
+diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
+index 3227ab1..44ce5c2 100644
+--- a/src/hle/rt64_present_queue.cpp
++++ b/src/hle/rt64_present_queue.cpp
+@@ -9,6 +9,56 @@
+ 
+ #include "rt64_workload_queue.h"
+ 
++#include <chrono>
++#include <condition_variable>
++#include <mutex>
++
++// BLITZ DS (the game's src/game/ds_view.cpp, docs/BLITZ_DS.md): a second screen, drawn by this thread right after the
++// first and presented right after it. Each gets its own submit and wait, in turn, since the emulator's Android stalls
++// when two swap chains are drawn within one (tools/android/probe, 2026-10-31).
++//   blitz_ds_mode 0: one screen, as ever. 1: the picture over both. 2: the picture on the first, the second has only
++//   the hook's drawing.
++extern "C" {
++    extern volatile float blitz_tall_aspect_on;
++    volatile int blitz_ds_mode = 0;
++    volatile float blitz_ds_split = 0.5f;        // the upper screen's share of the picture's height
++    volatile int blitz_ds_second_on_top = 1;     // the second window is the upper screen
++    void (*blitz_ds_second_hook)(plume::RenderCommandList *, plume::RenderFramebuffer *) = nullptr;
++    volatile uint64_t blitz_ds_second_frames = 0;
++    volatile uint64_t blitz_ds_second_failures = 0;
++    volatile float blitz_ds_second_ms = 0.0f;    // the last frame's time on this thread, second screen's part
++    volatile int blitz_ds_clip_enabled = 0;      // keep the last play (memory: about 47 MB)
++    volatile int blitz_ds_clip_restart = 0;      // the next frame starts a new clip (set as play select ends)
++    volatile int blitz_ds_clip_show = 0;         // show it now, on the left of the second screen
++    volatile int blitz_ds_clip_frames = 0;       // how many frames it has
++    volatile int blitz_ds_second_dirty = 1;      // the panel changed (recompui::ds_panel_set)
++
++    static std::mutex blitz_ds_window_mutex;
++    static std::condition_variable blitz_ds_window_changed;
++    static plume::RenderWindow blitz_ds_window{};
++    static bool blitz_ds_window_set = false;
++    static uint64_t blitz_ds_window_generation = 0;
++    static uint64_t blitz_ds_window_taken = 0;
++
++    // From any thread; a and b as the platform's RenderWindow (Android: the ANativeWindow; Mac: window, layer). Null a
++    // takes it away: this returns once the present thread has let go, so a surface being destroyed is safe.
++    void blitz_ds_set_window(void *a, void *b) {
++        std::unique_lock<std::mutex> lock(blitz_ds_window_mutex);
++#if defined(__ANDROID__)
++        (void)b;
++        blitz_ds_window = (plume::RenderWindow)a;
++#elif defined(__APPLE__)
++        blitz_ds_window = plume::RenderWindow{ a, b };
++#else
++        (void)b;
++        if (a != nullptr) return;  // Mac and Android only so far
++#endif
++        blitz_ds_window_set = a != nullptr;
++        const uint64_t generation = ++blitz_ds_window_generation;
++        blitz_ds_window_changed.wait_for(lock, std::chrono::milliseconds(a != nullptr ? 0 : 1000), [&]() { return blitz_ds_window_taken >= generation; });
++    }
++}
++
+ namespace RT64 {
+     // PresentQueue
+ 
+@@ -298,6 +348,8 @@ namespace RT64 {
+             }
+ 
+             uint32_t swapChainIndex = 0;
++            uint32_t secondIndex = 0;
++            bool secondPresent = false;
+             const bool presentFrame = (i < framesToPresent) && swapChainValid;
+             if (presentFrame) {
+                 swapChainValid = ext.swapChain->acquireTexture(acquiredSemaphore.get(), &swapChainIndex);
+@@ -323,6 +375,12 @@ namespace RT64 {
+                     renderParams.filtering = filtering;
+                     renderParams.vi = &present.screenVI;
+                     renderParams.removeBlackBorders = removeBlackBorders;
++                    // BLITZ DS: this window's share of the picture over both screens.
++                    if ((blitz_ds_mode == 1) && (secondChain != nullptr) && secondValid) {
++                        renderParams.part = true;
++                        renderParams.partTop = (blitz_ds_second_on_top != 0) ? blitz_ds_split : 0.0f;
++                        renderParams.partBottom = (blitz_ds_second_on_top != 0) ? 1.0f : blitz_ds_split;
++                    }
+ 
+                     const bool useDownsampling = (colorTarget->downsampleMultiplier > 1);
+                     if (useDownsampling) {
+@@ -367,6 +425,9 @@ namespace RT64 {
+                     ext.presentGraphicsWorker->commandQueue->executeCommandLists(&commandList, 1, &waitSemaphore, 1, &signalSemaphore, 1, ext.presentGraphicsWorker->commandFence.get());
+                     ext.presentGraphicsWorker->wait();
+                 }
++
++                // Also reached with no game frame to show (renderParams without a VI): the hook still draws.
++                secondPresent = secondDraw(renderParams, secondIndex);
+             }
+ 
+             if (lockedWorkloadMutex) {
+@@ -401,11 +462,216 @@ namespace RT64 {
+                 RenderCommandSemaphore *waitSemaphore = drawSemaphores[swapChainIndex].get();
+                 presentTimestamp = Timer::current();
+                 swapChainValid = ext.swapChain->present(swapChainIndex, &waitSemaphore, 1);
++                if (secondPresent) {
++                    RenderCommandSemaphore *secondWait = secondDrawSemaphores[secondIndex].get();
++                    secondValid = secondChain->present(secondIndex, &secondWait, 1);
++                }
++
+                 presentProfiler.logAndRestart();
+             }
+         }
+     }
+ 
++    void PresentQueue::secondUpdate() {
++        std::unique_lock<std::mutex> lock(blitz_ds_window_mutex);
++        if (secondGeneration != blitz_ds_window_generation) {
++            const bool set = blitz_ds_window_set;
++            const RenderWindow window = blitz_ds_window;
++            const uint64_t generation = blitz_ds_window_generation;
++            ext.presentGraphicsWorker->commandList->begin();
++            ext.presentGraphicsWorker->commandList->end();
++            ext.presentGraphicsWorker->execute();
++            ext.presentGraphicsWorker->wait();
++            secondFramebuffers.clear();
++            secondChain.reset();
++            secondValid = false;
++            if (set) {
++                RenderSwapChainDesc desc;
++                desc.renderWindow = window;
++#   if defined(__ANDROID__)
++                desc.format = RenderFormat::R8G8B8A8_UNORM;
++#   else
++                desc.format = RenderFormat::B8G8R8A8_UNORM;
++#   endif
++                desc.textureCount = 2;
++                secondChain = ext.presentGraphicsWorker->commandQueue->createSwapChain(desc);
++                secondValid = (secondChain != nullptr) && !secondChain->needsResize();
++                fprintf(stderr, "[ds] second swap chain: %s, %ux%u\n", (secondChain != nullptr) ? "made" : "FAILED", (secondChain != nullptr) ? secondChain->getWidth() : 0, (secondChain != nullptr) ? secondChain->getHeight() : 0);
++                if (secondAcquired == nullptr) {
++                    secondAcquired = ext.device->createCommandSemaphore();
++                }
++            }
++            else {
++                fprintf(stderr, "[ds] second swap chain let go\n");
++            }
++
++            secondGeneration = generation;
++            blitz_ds_window_taken = generation;
++            blitz_ds_window_changed.notify_all();
++        }
++
++        // A chain the driver won't make is tried again once a second, not every frame.
++        const auto now = std::chrono::steady_clock::now();
++        if ((secondChain != nullptr) && (secondChain->needsResize() || !secondValid) && ((now - secondLastResize) > std::chrono::seconds(1))) {
++            secondLastResize = now;
++            lock.unlock();
++            secondValid = secondChain->resize();
++            secondFramebuffers.clear();
++            secondLastMode = -1;
++            if (secondValid || secondResizeLogged) {
++                fprintf(stderr, "[ds] second swap chain resized: %s, %ux%u\n", secondValid ? "ok" : "FAILED", secondChain->getWidth(), secondChain->getHeight());
++            }
++
++            secondResizeLogged = secondValid;
++        }
++
++        if ((secondChain != nullptr) && secondValid) {
++            while (secondDrawSemaphores.size() < secondChain->getTextureCount()) {
++                secondDrawSemaphores.emplace_back(ext.device->createCommandSemaphore());
++            }
++
++            if (secondFramebuffers.empty()) {
++                secondFramebuffers.resize(secondChain->getTextureCount());
++                for (uint32_t i = 0; i < secondChain->getTextureCount(); i++) {
++                    const RenderTexture *texture = secondChain->getTexture(i);
++                    secondFramebuffers[i] = ext.device->createFramebuffer(RenderFramebufferDesc(&texture, 1));
++                }
++            }
++        }
++    }
++
++    // Draws the second screen and waits for it; present it with index afterwards. False: nothing to present.
++    bool PresentQueue::secondDraw(const VIRenderer::RenderParams &first, uint32_t &index) {
++        if ((secondChain == nullptr) || !secondValid) {
++            return false;
++        }
++
++        const auto start = std::chrono::steady_clock::now();
++        const int mode = blitz_ds_mode;
++
++        // Nothing has changed on a panel: what's on the screen stays. A redraw a second, in case a compositor lost it.
++        if ((mode == 2) && (secondLastMode == 2) && (blitz_ds_clip_show == 0) && (blitz_ds_second_dirty == 0) && ((start - secondLastDraw) < std::chrono::seconds(1))) {
++            return false;
++        }
++
++        secondLastMode = mode;
++        secondLastDraw = start;
++        blitz_ds_second_dirty = 0;
++        secondValid = secondChain->acquireTexture(secondAcquired.get(), &index);
++        if (!secondValid) {
++            blitz_ds_second_failures = blitz_ds_second_failures + 1;
++            return false;
++        }
++
++        RenderTexture *texture = secondChain->getTexture(index);
++        RenderFramebuffer *framebuffer = secondFramebuffers[index].get();
++        RenderCommandList *commandList = ext.presentGraphicsWorker->commandList.get();
++        commandList->begin();
++
++        // The clip. A new play starts it over; 15 frames a second of the last 8 seconds, at 256x384.
++        constexpr uint32_t ClipLength = 120, ClipWidth = 256, ClipHeight = 384;
++        if ((blitz_ds_clip_enabled == 0) && !clipTextures.empty()) {
++            // Turned off because play's too slow: its memory goes too. Nothing's using it: the last submit has finished.
++            clipFramebuffers.clear();
++            clipTextures.clear();
++            clipRenderer.reset();
++            clipCount = 0;
++            blitz_ds_clip_frames = 0;
++            fprintf(stderr, "[ds] clip memory freed\n");
++        }
++
++        if (blitz_ds_clip_restart != 0) {
++            blitz_ds_clip_restart = 0;
++            clipShown = 0;
++            clipHead = 0;
++            clipCount = 0;
++            blitz_ds_clip_frames = 0;
++        }
++        if ((blitz_ds_clip_enabled != 0) && (clipTextures.empty())) {
++#   if defined(__ANDROID__)
++            const RenderFormat clipFormat = RenderFormat::R8G8B8A8_UNORM;
++#   else
++            const RenderFormat clipFormat = RenderFormat::B8G8R8A8_UNORM;
++#   endif
++            clipRenderer = std::make_unique<VIRenderer>();
++            for (uint32_t i = 0; i < ClipLength; i++) {
++                clipTextures.emplace_back(ext.device->createTexture(RenderTextureDesc::ColorTarget(ClipWidth, ClipHeight, clipFormat)));
++                const RenderTexture *attachment = clipTextures.back().get();
++                clipFramebuffers.emplace_back(ext.device->createFramebuffer(RenderFramebufferDesc(&attachment, 1)));
++            }
++            fprintf(stderr, "[ds] clip memory made: %u frames at %ux%u\n", ClipLength, ClipWidth, ClipHeight);
++        }
++        if ((blitz_ds_clip_enabled != 0) && (mode == 1) && (first.texture != nullptr) && ((start - clipLastCapture) > std::chrono::milliseconds(62))) {
++            clipLastCapture = start;
++            RenderTexture *clipTexture = clipTextures[clipHead].get();
++            commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(clipTexture, RenderTextureLayout::COLOR_WRITE));
++            commandList->setFramebuffer(clipFramebuffers[clipHead].get());
++            VIRenderer::RenderParams p = first;
++            p.commandList = commandList;
++            p.swapChain = secondChain.get();
++            p.part = true;
++            p.partTop = 0.0f;
++            p.partBottom = 1.0f;
++            p.targetWidth = ClipWidth;
++            p.targetHeight = ClipHeight;
++            commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(p.texture, RenderTextureLayout::SHADER_READ));
++            clipRenderer->render(p);
++            commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(clipTexture, RenderTextureLayout::SHADER_READ));
++            clipHead = (clipHead + 1) % ClipLength;
++            clipCount = std::min(clipCount + 1, ClipLength);
++            blitz_ds_clip_frames = int(clipCount);
++        }
++
++        commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(texture, RenderTextureLayout::COLOR_WRITE));
++        commandList->setFramebuffer(framebuffer);
++        commandList->clearColor();
++
++        if ((mode == 2) && (blitz_ds_clip_show != 0) && (blitz_ds_clip_enabled != 0) && (clipCount > 0) && (first.vi != nullptr)) {
++            if ((start - clipLastShown) > std::chrono::milliseconds(66)) {
++                clipLastShown = start;
++                clipShown = (clipShown + 1) % clipCount;
++            }
++            const uint32_t oldest = (clipCount == ClipLength) ? clipHead : 0;
++            VIRenderer::RenderParams p = first;
++            p.commandList = commandList;
++            p.swapChain = secondChain.get();
++            p.texture = clipTextures[(oldest + std::min(clipShown, clipCount - 1)) % ClipLength].get();
++            p.textureWidth = ClipWidth;
++            p.textureHeight = ClipHeight;
++            p.downsamplingScale = 1;
++            p.part = false;
++            p.stored = true;
++            const int32_t height = int32_t(secondChain->getHeight());
++            p.storedRect = RenderRect(0, 0, (height * 2) / 3, height);
++            viRenderer->render(p);
++        }
++        else if ((mode == 1) && (first.texture != nullptr)) {
++            VIRenderer::RenderParams p = first;
++            p.commandList = commandList;
++            p.swapChain = secondChain.get();
++            p.part = true;
++            p.partTop = (blitz_ds_second_on_top != 0) ? 0.0f : blitz_ds_split;
++            p.partBottom = (blitz_ds_second_on_top != 0) ? blitz_ds_split : 1.0f;
++            commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(p.texture, RenderTextureLayout::SHADER_READ));
++            viRenderer->render(p);
++        }
++
++        if (blitz_ds_second_hook != nullptr) {
++            blitz_ds_second_hook(commandList, framebuffer);
++        }
++
++        commandList->barriers(RenderBarrierStage::NONE, RenderTextureBarrier(texture, RenderTextureLayout::PRESENT));
++        commandList->end();
++        const RenderCommandList *submitted = commandList;
++        RenderCommandSemaphore *waitSemaphore = secondAcquired.get();
++        RenderCommandSemaphore *signalSemaphore = secondDrawSemaphores[index].get();
++        ext.presentGraphicsWorker->commandQueue->executeCommandLists(&submitted, 1, &waitSemaphore, 1, &signalSemaphore, 1, ext.presentGraphicsWorker->commandFence.get());
++        ext.presentGraphicsWorker->wait();
++        blitz_ds_second_ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
++        blitz_ds_second_frames = blitz_ds_second_frames + 1;
++        return true;
++    }
++
+     void PresentQueue::skipInterpolation() {
+         {
+             std::unique_lock<std::mutex> interpolatedLock(ext.sharedResources->interpolatedMutex);
+@@ -465,6 +731,7 @@ namespace RT64 {
+ 
+             if (processCursor >= 0) {
+                 std::unique_lock<std::mutex> threadLock(threadMutex);
++                secondUpdate();
+                 const bool needsResize = ext.swapChain->needsResize() || !swapChainValid;
+                 if (needsResize) {
+                     ext.presentGraphicsWorker->commandList->begin();
+diff --git a/src/hle/rt64_present_queue.h b/src/hle/rt64_present_queue.h
+index e08b02c..adbf869 100644
+--- a/src/hle/rt64_present_queue.h
++++ b/src/hle/rt64_present_queue.h
+@@ -4,6 +4,7 @@
+ 
+ #pragma once
+ 
++#include <chrono>
+ #include "common/rt64_profiling_timer.h"
+ #include "gui/rt64_inspector.h"
+ #include "render/rt64_vi_renderer.h"
+@@ -49,6 +50,25 @@ namespace RT64 {
+         FramebufferChangePool screenFbChangePool;
+         std::atomic<bool> viewRDRAM = false;
+         std::vector<std::unique_ptr<RenderFramebuffer>> swapChainFramebuffers;
++        std::unique_ptr<RenderSwapChain> secondChain;
++        std::vector<std::unique_ptr<RenderFramebuffer>> secondFramebuffers;
++        std::vector<std::unique_ptr<RenderCommandSemaphore>> secondDrawSemaphores;
++        std::unique_ptr<RenderCommandSemaphore> secondAcquired;
++        uint64_t secondGeneration = 0;
++        bool secondValid = false;
++        bool secondResizeLogged = true;   // the last resize's result, so a failing one is said once
++        std::chrono::steady_clock::time_point secondLastResize;
++        int secondLastMode = -1;
++        std::chrono::steady_clock::time_point secondLastDraw;
++        // The last play on the second screen, while picking the next: small copies of the picture, a ring of them.
++        std::unique_ptr<VIRenderer> clipRenderer;
++        std::vector<std::unique_ptr<RenderTexture>> clipTextures;
++        std::vector<std::unique_ptr<RenderFramebuffer>> clipFramebuffers;
++        uint32_t clipHead = 0;
++        uint32_t clipCount = 0;
++        uint32_t clipShown = 0;
++        std::chrono::steady_clock::time_point clipLastCapture;
++        std::chrono::steady_clock::time_point clipLastShown;
+         std::unique_ptr<RenderCommandSemaphore> acquiredSemaphore;
+         std::vector<std::unique_ptr<RenderCommandSemaphore>> drawSemaphores;
+         std::unique_ptr<VIRenderer> viRenderer;
+@@ -68,6 +88,9 @@ namespace RT64 {
+         void waitForPresentId(uint64_t waitId);
+         void setup(const External &ext);
+         void threadPresent(const Present &present, bool &swapChainValid);
++        // BLITZ DS: the second screen's swap chain, in step with blitz_ds_set_window.
++        void secondUpdate();
++        bool secondDraw(const VIRenderer::RenderParams &first, uint32_t &index);
+         void skipInterpolation();
+         void notifyPresentId(const Present &present);
+         void threadAdvanceBarrier();
+diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
+index 5e8812d..6332dc5 100644
+--- a/src/hle/rt64_workload_queue.cpp
++++ b/src/hle/rt64_workload_queue.cpp
+@@ -12,7 +12,8 @@
+ 
+ // Tall view experiment (the game's src/game/tall_view.cpp): nonzero makes Expand a 2:3 picture, whatever the window;
+ // VIRenderer::render puts its two halves at the window's top and bottom.
+-extern "C" { volatile float blitz_tall_aspect_on = 0.0f; }
++extern "C" { extern volatile int blitz_ds_mode; extern volatile float blitz_ds_split; extern volatile int blitz_ds_second_on_top; }
++extern "C" { volatile float blitz_tall_aspect_on = 0.0f; volatile float blitz_tall_ratio = 2.0f / 3.0f; }
+ 
+ namespace RT64 {
+     // WorkloadQueue
+@@ -147,7 +148,7 @@ namespace RT64 {
+         case UserConfiguration::AspectRatio::Expand:
+             if ((ext.sharedResources->swapChainWidth > 0) && (ext.sharedResources->swapChainHeight > 0)) {
+                 const float derivedRatioTarget = (float(ext.sharedResources->swapChainWidth) / float(ext.sharedResources->swapChainHeight)) * pixelAspect;
+-                workloadConfig.aspectRatioTarget = (blitz_tall_aspect_on != 0.0f) ? (2.0f / 3.0f) * pixelAspect : std::max(derivedRatioTarget, workloadConfig.aspectRatioSource);
++                workloadConfig.aspectRatioTarget = (blitz_tall_aspect_on != 0.0f) ? blitz_tall_ratio * pixelAspect : std::max(derivedRatioTarget, workloadConfig.aspectRatioSource);
+             }
+             else {
+                 workloadConfig.aspectRatioTarget = workloadConfig.aspectRatioSource;
+@@ -197,7 +198,14 @@ namespace RT64 {
+         switch (resolutionMode) {
+         case UserConfiguration::Resolution::WindowIntegerScale:
+             if (ext.sharedResources->swapChainHeight > 0) {
+-                resolutionMultiplier = std::max(float((ext.sharedResources->swapChainHeight + referenceHeight - 1) / referenceHeight), 1.0f);
++                // BLITZ DS: the picture spans two screens, so it takes the lines of both.
++                uint32_t displayHeight = ext.sharedResources->swapChainHeight;
++                if ((blitz_tall_aspect_on != 0.0f) && (blitz_ds_mode == 1)) {
++                    const float share = (blitz_ds_second_on_top != 0) ? (1.0f - blitz_ds_split) : blitz_ds_split;
++                    displayHeight = uint32_t(float(displayHeight) / std::max(share, 0.1f));
++                }
++
++                resolutionMultiplier = std::max(float((displayHeight + referenceHeight - 1) / referenceHeight), 1.0f);
+             }
+             else {
+                 resolutionMultiplier = 1.0f;
+diff --git a/src/render/rt64_vi_renderer.cpp b/src/render/rt64_vi_renderer.cpp
+index deb9a8e..67bdc53 100644
+--- a/src/render/rt64_vi_renderer.cpp
++++ b/src/render/rt64_vi_renderer.cpp
+@@ -72,6 +72,29 @@ namespace RT64 {
+         RenderViewport viewport;
+         RenderRect scissor;
+         getViewportAndScissor(p.swapChain, *p.vi, p.resolutionScale, p.downsamplingScale, p.removeBlackBorders, viewport, scissor);
++        if (p.part) {
++            // The picture is what the scissor shows; stretch that so the part chosen fills the screen.
++            const float targetWidth = float((p.targetWidth > 0) ? p.targetWidth : p.swapChain->getWidth());
++            const float targetHeight = float((p.targetHeight > 0) ? p.targetHeight : p.swapChain->getHeight());
++            const float pictureWidth = std::max(float(scissor.right - scissor.left), 1.0f);
++            const float pictureHeight = std::max(float(scissor.bottom - scissor.top), 1.0f);
++            const float scaleX = targetWidth / pictureWidth;
++            const float scaleY = (targetHeight / std::max(p.partBottom - p.partTop, 0.01f)) / pictureHeight;
++            RenderViewport part;
++            part.x = (viewport.x - float(scissor.left)) * scaleX;
++            part.width = viewport.width * scaleX;
++            part.y = (viewport.y - float(scissor.top)) * scaleY - p.partTop * pictureHeight * scaleY;
++            part.height = viewport.height * scaleY;
++            part.minDepth = viewport.minDepth;
++            part.maxDepth = viewport.maxDepth;
++            viewport = part;
++            scissor = RenderRect(0, 0, int32_t(targetWidth), int32_t(targetHeight));
++        }
++        if (p.stored) {
++            scissor = p.storedRect;
++            viewport = RenderViewport(float(scissor.left), float(scissor.top), float(scissor.right - scissor.left), float(scissor.bottom - scissor.top));
++        }
++
+         p.commandList->setViewports(viewport);
+         p.commandList->setScissors(scissor);
+ 
+@@ -79,6 +102,10 @@ namespace RT64 {
+         pushConstants.videoResolution = computeHDSize(hlslpp::float2(p.vi->fbSize()), p.resolutionScale, p.downsamplingScale);
+         pushConstants.textureResolution = { float(p.textureWidth), float(p.textureHeight) };
+         pushConstants.gamma = p.vi->gamma();
++        if (p.stored) {
++            pushConstants.videoResolution = pushConstants.textureResolution;
++            pushConstants.gamma = 1.0f;
++        }
+ 
+         p.commandList->setPipeline(shader->pipeline.get());
+         p.commandList->setGraphicsPipelineLayout(shader->pipelineLayout.get());
+@@ -89,7 +116,7 @@ namespace RT64 {
+         // Tall view: a window taller than 2:3 parts the picture's halves, so the space between them hides none of it.
+         const float tallPicture = float(p.swapChain->getWidth()) * 1.5f;
+         const float tallGap = float(p.swapChain->getHeight()) - tallPicture;
+-        if ((blitz_tall_aspect_on != 0.0f) && (tallGap >= 1.0f)) {
++        if ((blitz_tall_aspect_on != 0.0f) && (tallGap >= 1.0f) && !p.part && !p.stored) {
+             const int32_t move = lround(tallGap * 0.5f);
+             const int32_t middle = (scissor.top + scissor.bottom) / 2;
+             RenderViewport part = viewport;
+diff --git a/src/render/rt64_vi_renderer.h b/src/render/rt64_vi_renderer.h
+index 8a3782a..d0524d3 100644
+--- a/src/render/rt64_vi_renderer.h
++++ b/src/render/rt64_vi_renderer.h
+@@ -29,6 +29,16 @@ namespace RT64 {
+             UserConfiguration::Filtering filtering = UserConfiguration::Filtering::Linear;
+             const VI *vi = nullptr;
+             bool removeBlackBorders = false;
++            // BLITZ DS: this much of the picture's height, 0 top to 1 bottom, fills the whole target.
++            bool part = false;
++            float partTop = 0.0f;
++            float partBottom = 1.0f;
++            // The target's size, when it isn't the swap chain (the last-play clip).
++            uint32_t targetWidth = 0;
++            uint32_t targetHeight = 0;
++            // Show the whole texture in this rectangle of the target, as stored (a clip frame already through the VI).
++            bool stored = false;
++            RenderRect storedRect;
+         };
+ 
+         VIRenderer();

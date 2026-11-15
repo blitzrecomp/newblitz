@@ -1,0 +1,250 @@
+diff --git a/plume_render_interface_types.h b/plume_render_interface_types.h
+index da0002f..615c1c1 100644
+--- a/plume_render_interface_types.h
++++ b/plume_render_interface_types.h
+@@ -1797,6 +1797,14 @@ namespace plume {
+         bool descriptorIndexing = false;
+         bool scalarBlockLayout = false;
+ 
++        // A driver with no descriptor indexing and few sampled images per stage: Mali-G52 reports 256.
++        bool smallTextureLimit = false;
++
++        // Above 0 only on such a driver when a run recipe's texmode=compact asked for it: each frame numbers its own textures, in plain
++        // arrays of these sizes (2D in set 1, TMEM in set 2). 0 is the array of 8192 every other device and the legacy mode use.
++        uint32_t compactTextures2D = 0;
++        uint32_t compactTexturesTMEM = 0;
++
+         // Buffers.
+         bool bufferDeviceAddress = false;
+         
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index f0d1405..18daf6b 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -198,8 +198,11 @@ namespace plume {
+         VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
+         VK_EXT_SAMPLE_LOCATIONS_EXTENSION_NAME,
+         VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME,
++#   if !defined(__ANDROID__)
++        // BlitzRecomp: Android's loader owns the swap chain, whatever a driver claims of present wait (Turnip's do).
+         VK_KHR_PRESENT_ID_EXTENSION_NAME,
+         VK_KHR_PRESENT_WAIT_EXTENSION_NAME,
++#   endif
+         VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME,
+         // Vulkan spec requires this to be enabled if supported by the driver.
+         VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME,
+@@ -1399,6 +1402,7 @@ namespace plume {
+     // VulkanShader
+ 
+     static VulkanDevice *savedCacheDevice = nullptr;
++    static std::mutex savedCacheMutex;  // the save has a thread of its own (src/main/fps_counter.cpp), and the device can go
+ 
+     // A driver without descriptor indexing (Mali-G52) refuses pipelines from SPIR-V that asks for non-uniform indexing, though a
+     // draw's texture index is the same for all of it: drop the capability, the extension and the decorations.
+@@ -1434,6 +1438,72 @@ namespace plume {
+         return out;
+     }
+ 
++    // Compact textures: the shaders declare 8192 of each, and an array in a shader can't be longer than its binding in the
++    // layout, so cut the 2D and the 1D (TMEM) arrays to the plain sizes of the layouts. The length 8192 may have other uses, so
++    // each array gets a new constant rather than the old one changing.
++    static void withShortTextureArrays(std::vector<uint32_t> &code, uint32_t textures2D, uint32_t texturesTMEM) {
++        if (code.size() < 5) {
++            return;
++        }
++
++        struct Constant {
++            uint32_t type;
++            uint32_t value;
++        };
++
++        std::unordered_map<uint32_t, Constant> constants;
++        std::unordered_map<uint32_t, uint32_t> imageDims;
++        std::vector<uint32_t> out(code.begin(), code.begin() + 5);
++        out.reserve(code.size() + 8);
++        uint32_t bound = code[3];
++        uint32_t length2D = 0;
++        uint32_t lengthTMEM = 0;
++        for (size_t i = 5; i < code.size(); ) {
++            const uint32_t opcode = code[i] & 0xFFFF;
++            const uint32_t length = code[i] >> 16;
++            if ((length == 0) || (i + length > code.size())) {
++                return;  // not what we thought: leave it as it came
++            }
++
++            bool shortened = false;
++            if ((opcode == 43) && (length == 4)) {  // OpConstant: type, result, value
++                constants[code[i + 2]] = Constant{ code[i + 1], code[i + 3] };
++            }
++            else if ((opcode == 25) && (length >= 4)) {  // OpTypeImage: result, sampled type, dim (0 is 1D, 1 is 2D)
++                imageDims[code[i + 1]] = code[i + 3];
++            }
++            else if ((opcode == 28) && (length == 4)) {  // OpTypeArray: result, element, length
++                const auto image = imageDims.find(code[i + 2]);
++                const auto constant = constants.find(code[i + 3]);
++                if ((image != imageDims.end()) && (constant != constants.end()) && (constant->second.value == 8192) && (image->second <= 1)) {
++                    const bool tmem = (image->second == 0);
++                    uint32_t &lengthId = tmem ? lengthTMEM : length2D;
++                    if (lengthId == 0) {
++                        lengthId = bound++;
++                        out.push_back((4U << 16) | 43U);
++                        out.push_back(constant->second.type);
++                        out.push_back(lengthId);
++                        out.push_back(tmem ? texturesTMEM : textures2D);
++                    }
++
++                    out.push_back(code[i]);
++                    out.push_back(code[i + 1]);
++                    out.push_back(code[i + 2]);
++                    out.push_back(lengthId);
++                    shortened = true;
++                }
++            }
++
++            if (!shortened) {
++                out.insert(out.end(), code.begin() + i, code.begin() + i + length);
++            }
++            i += length;
++        }
++
++        out[3] = bound;
++        code.swap(out);
++    }
++
+     VulkanShader::VulkanShader(VulkanDevice *device, const void *data, uint64_t size, const char *entryPointName, RenderShaderFormat format) {
+         assert(device != nullptr);
+         assert(data != nullptr);
+@@ -1448,6 +1518,10 @@ namespace plume {
+         std::vector<uint32_t> plainCode;
+         if (!device->capabilities.descriptorIndexing) {
+             plainCode = withoutNonUniform(data, size);
++            if (device->capabilities.compactTextures2D > 0) {
++                withShortTextureArrays(plainCode, device->capabilities.compactTextures2D, device->capabilities.compactTexturesTMEM);
++            }
++
+             data = plainCode.data();
+             size = plainCode.size() * sizeof(uint32_t);
+         }
+@@ -1671,7 +1745,8 @@ namespace plume {
+ 
+         VkPipelineRasterizationStateCreateInfo rasterization = {};
+         rasterization.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+-        rasterization.depthClampEnable = !desc.depthClipEnabled;
++        // Compact textures keep to the spec here too: no clamp from a driver without the feature. Legacy stays what has been measured.
++        rasterization.depthClampEnable = !desc.depthClipEnabled && (device->depthClampSupported || (device->capabilities.compactTextures2D == 0));
+         rasterization.rasterizerDiscardEnable = VK_FALSE;
+         rasterization.polygonMode = VK_POLYGON_MODE_FILL;
+         rasterization.lineWidth = 1.0f;
+@@ -2623,6 +2698,16 @@ namespace plume {
+         }
+ 
+         desc.textureCount = retrievedImageCount;
++#   if defined(__ANDROID__)
++        // Potato Mode: how many images (each one's memory counts on 1 GB), and the transform we leave to the compositor. A few
++        // lines a run, however often a chain is remade.
++        static std::atomic<int> swapChainLines{0};
++        if ((getenv("BLITZ_LEAN") != nullptr) && (swapChainLines.fetch_add(1) < 24)) {
++            fprintf(stderr, "[vulkan] swap chain: %u images (asked %u, surface %u to %u), %ux%u, surface transform 0x%x, pre-transform 0x%x, present mode %d\n",
++                retrievedImageCount, createInfo.minImageCount, surfaceCapabilities.minImageCount, surfaceCapabilities.maxImageCount, width, height,
++                unsigned(surfaceCapabilities.currentTransform), unsigned(createInfo.preTransform), int(createInfo.presentMode));
++        }
++#   endif
+ 
+         std::vector<VkImage> images(desc.textureCount);
+         res = vkGetSwapchainImagesKHR(commandQueue->device->vk, vk, &desc.textureCount, images.data());
+@@ -3195,6 +3280,7 @@ namespace plume {
+ 
+     void VulkanCommandList::dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) {
+         assert(activeComputePipelineLayout != nullptr);
++        if (computePipelineMissing) return;
+ 
+         vkCmdDispatch(vk, threadGroupCountX, threadGroupCountY, threadGroupCountZ);
+     }
+@@ -3256,6 +3342,9 @@ namespace plume {
+         switch (interfacePipeline->type) {
+         case VulkanPipeline::Type::Compute: {
+             const VulkanComputePipeline *computePipeline = static_cast<const VulkanComputePipeline *>(interfacePipeline);
++            // One the driver refused: its dispatches are skipped, as binding a null pipeline crashed Adreno's (an RP5).
++            computePipelineMissing = computePipeline->vk == VK_NULL_HANDLE;
++            if (computePipelineMissing) break;
+             vkCmdBindPipeline(vk, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline->vk);
+             break;
+         }
+@@ -4513,6 +4602,32 @@ namespace plume {
+         capabilities.resolveModes = false;
+         capabilities.descriptorIndexing = descriptorIndexingSupported;
+         capabilities.scalarBlockLayout = scalarBlockLayoutSupported;
++
++        // Vulkan counts a stage's sampled images over every entry of a pipeline layout's sets (VkPipelineLayoutCreateInfo), whether
++        // a shader reads them or not. So on a limit of 256 one array bound for both 2D and 1D views is legal only up to about 126,
++        // short of the 151 Blitz has been measured to load in a frame, which is why the two arrays get their own sizes. They share
++        // what's left after the 3 sampled images in the other sets, plus one spare, with room for far more 2D than raw TMEM.
++        depthClampSupported = deviceFeatures.features.depthClamp;
++        {
++            const VkPhysicalDeviceLimits &limits = physicalDeviceProperties.limits;
++            capabilities.smallTextureLimit = !descriptorIndexingSupported && (limits.maxPerStageDescriptorSampledImages < 4096);
++
++            const char *texmode = getenv("BLITZ_RECIPE_TEXMODE");
++            const bool compactAsked = (texmode != nullptr) && (strcmp(texmode, "compact") == 0);
++            const uint32_t stageResources = (limits.maxPerStageResources > 8) ? (limits.maxPerStageResources - 8) : 0;
++            const uint32_t imageLimit = std::min({ limits.maxPerStageDescriptorSampledImages, limits.maxDescriptorSetSampledImages, stageResources });
++            const uint32_t imageBudget = (imageLimit > 4) ? (imageLimit - 4) : 0;
++            if (capabilities.smallTextureLimit && !rayTracingSupported && compactAsked && (imageBudget >= 64) && deviceFeatures.features.shaderSampledImageArrayDynamicIndexing) {
++                capabilities.compactTexturesTMEM = imageBudget / 5;
++                capabilities.compactTextures2D = imageBudget - capabilities.compactTexturesTMEM;
++            }
++
++            fprintf(stderr, "[vulkan] textures: mode %s (asked %s), small limit %d, arrays %u 2D and %u TMEM. Per stage: %u resources, %u storage images, %u storage buffers. Depth clamp %d\n",
++                (capabilities.compactTextures2D > 0) ? "compact" : "legacy", (texmode != nullptr) ? texmode : "nothing", capabilities.smallTextureLimit,
++                capabilities.compactTextures2D, capabilities.compactTexturesTMEM, limits.maxPerStageResources, limits.maxPerStageDescriptorStorageImages,
++                limits.maxPerStageDescriptorStorageBuffers, deviceFeatures.features.depthClamp);
++        }
++
+         capabilities.bufferDeviceAddress = bufferDeviceAddressSupported;
+         capabilities.samplerMirrorClampToEdge = supportedOptionalExtensions.find(VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME) != supportedOptionalExtensions.end();
+         capabilities.presentWait = presentWaitSupported;
+@@ -4850,6 +4965,11 @@ namespace plume {
+ 
+         if (vk != VK_NULL_HANDLE) {
+             if (pipelineCache != VK_NULL_HANDLE) {
++                const std::scoped_lock cacheLock(savedCacheMutex);
++                if (savedCacheDevice == this) {
++                    savedCacheDevice = nullptr;
++                }
++
+                 savePipelineCache();
+                 vkDestroyPipelineCache(vk, pipelineCache, nullptr);
+             }
+@@ -5083,7 +5203,12 @@ extern "C" void plume_narrow_barriers(int on) {
+     plume::narrowBarriers = on != 0;
+ }
+ 
++extern "C" int plume_narrow_barriers_on() {
++    return plume::narrowBarriers.load() ? 1 : 0;
++}
++
+ extern "C" void plume_save_pipeline_cache() {
++    const std::scoped_lock cacheLock(plume::savedCacheMutex);
+     if (plume::savedCacheDevice != nullptr) {
+         plume::savedCacheDevice->savePipelineCache();
+     }
+diff --git a/plume_vulkan.h b/plume_vulkan.h
+index a2b4540..73d3db1 100644
+--- a/plume_vulkan.h
++++ b/plume_vulkan.h
+@@ -305,6 +305,7 @@ namespace plume {
+         const VulkanPipelineLayout *activeComputePipelineLayout = nullptr;
+         const VulkanPipelineLayout *activeGraphicsPipelineLayout = nullptr;
+         bool graphicsPipelineMissing = false;
++        bool computePipelineMissing = false;
+         const VulkanPipelineLayout *activeRaytracingPipelineLayout = nullptr;
+         VkRenderPass activeRenderPass = VK_NULL_HANDLE;
+ 
+@@ -425,6 +426,7 @@ namespace plume {
+         std::unique_ptr<RenderBuffer> nullBuffer;
+         bool loadStoreOpNoneSupported = false;
+         bool nullDescriptorSupported = false;
++        bool depthClampSupported = false;
+ 
+         VulkanDevice(VulkanInterface *renderInterface, const std::string &preferredDeviceName);
+         ~VulkanDevice() override;

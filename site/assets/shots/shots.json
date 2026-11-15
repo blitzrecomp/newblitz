@@ -1,0 +1,81 @@
+[
+  {
+    "slot": "widescreen",
+    "file": "gameplay_widescreen.jpg",
+    "caption": "Widescreen, mid-play",
+    "what": "A play in progress across a widescreen field, the New Blitz 2027 mark at midfield"
+  },
+  {
+    "file": "kickoff_stadium.jpg",
+    "caption": "Kickoff, widescreen",
+    "what": "The kickoff with the whole stadium in view"
+  },
+  {
+    "file": "downfield.jpg",
+    "caption": "Brought down in the open field",
+    "what": "A ball carrier tackled downfield, widescreen"
+  },
+  {
+    "slot": "builder-first-run",
+    "file": "builder_first_run.jpg",
+    "caption": "Blitz Builder: add the 2026 season, or play the 1999 game",
+    "what": "The Blitz Builder prompt asking whether to add the 2026 season"
+  },
+  {
+    "slot": "players-settings",
+    "file": "settings_players.jpg",
+    "caption": "Settings \u2192 Players: phones join by QR code",
+    "what": "The Players settings with four player slots and the phone controller QR code"
+  },
+  {
+    "slot": "addons",
+    "file": "addons.jpg",
+    "caption": "Add-Ons: the 2026 Season, installed",
+    "what": "The Add-Ons tab listing the installed 2026 Season"
+  },
+  {
+    "slot": [
+      "realism-rules",
+      "house-rules"
+    ],
+    "file": "settings_rules.jpg",
+    "caption": "Settings \u2192 Rules: Quick Setup, Receiver Buttons and the Blitz codes",
+    "what": "The Rules settings with Quick Setup, Receiver Buttons and house rules"
+  },
+  {
+    "slot": [
+      "phone-controller",
+      "multiplayer"
+    ],
+    "file": "phone_controller.jpg",
+    "caption": "Your phone is the controller",
+    "what": "The phone controller page held sideways: a move pad, OK, Back, Z and Start"
+  },
+  {
+    "slot": "hints",
+    "file": "hint_card.jpg",
+    "caption": "First-run tips",
+    "what": "A tip card at Controller Select explaining how to pick a side"
+  },
+  {
+    "file": "doors.jpg",
+    "caption": "The New Blitz 2027 doors",
+    "what": "The steel transition doors embossed with the New Blitz 2027 mark"
+  },
+  {
+    "file": "credits.jpg",
+    "caption": "The credits page",
+    "what": "The New Blitz 2027 credits page"
+  },
+  {
+    "file": "title.jpg",
+    "caption": "The title screen",
+    "what": "The New Blitz 2027 logo on the title screen"
+  },
+  {
+    "slot": "receiver-buttons",
+    "file": "receiver_buttons.jpg",
+    "caption": "Receiver Buttons: \u25b3, R1 and \u25cb over the three receivers before the snap",
+    "what": "Pre-snap, with a button icon floating over each of the three receivers"
+  }
+]

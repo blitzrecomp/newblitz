@@ -1,0 +1,258 @@
+diff --git a/plume_render_interface_types.h b/plume_render_interface_types.h
+index 9dcfedf..da0002f 100644
+--- a/plume_render_interface_types.h
++++ b/plume_render_interface_types.h
+@@ -41,6 +41,23 @@ namespace plume {
+     typedef ANativeWindow* RenderWindow;
+ #elif defined(PLUME_SDL_VULKAN_ENABLED)
+     typedef SDL_Window *RenderWindow;
++#elif defined(__PROSPERO__)
++    // PS5 homebrew (plume-ps5): no window; the swap chain draws to a display plane (VK_KHR_display).
++    struct RenderWindow {
++        void* window = nullptr;
++        uint32_t width = 3840;
++        uint32_t height = 2160;
++
++        RenderWindow() = default;
++        RenderWindow(std::nullptr_t) : window(nullptr) {}
++        RenderWindow(void* w, uint32_t width = 3840, uint32_t height = 2160)
++            : window(w), width(width), height(height) {}
++
++        bool operator==(const struct RenderWindow& rhs) const {
++            return window == rhs.window && width == rhs.width && height == rhs.height;
++        }
++        bool operator!=(const struct RenderWindow& rhs) const { return !(*this == rhs); }
++    };
+ #elif defined(__linux__)
+     struct RenderWindow {
+         Display* display;
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index f1dd503..6d3c2ad 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -28,6 +28,117 @@
+ // - Fix resource pools.
+ 
+ namespace plume {
++    // PS5 homebrew (BlitzRecomp, from Nazky/plume-ps5): the static RADV's loader, and a display-plane surface.
++#if defined(__PROSPERO__)
++    extern "C" int sceSystemServiceHideSplashScreen();
++    extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName) __attribute__((weak));
++
++    static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL ps5PlumeGetInstanceProcAddr(VkInstance instance, const char *pName) {
++        if (vk_icdGetInstanceProcAddr == nullptr || pName == nullptr) {
++            return nullptr;
++        }
++        PFN_vkVoidFunction fn = vk_icdGetInstanceProcAddr(instance, pName);
++        if (fn != nullptr) {
++            return fn;
++        }
++        if (strcmp(pName, "vkGetPhysicalDeviceProperties2") == 0) {
++            return vk_icdGetInstanceProcAddr(instance, "vkGetPhysicalDeviceProperties2KHR");
++        }
++        if (strcmp(pName, "vkGetPhysicalDeviceFeatures2") == 0) {
++            return vk_icdGetInstanceProcAddr(instance, "vkGetPhysicalDeviceFeatures2KHR");
++        }
++        return nullptr;
++    }
++
++    static VkResult createPs5DisplaySurface(VkInstance instance, VkPhysicalDevice physicalDevice, VkSurfaceKHR *outSurface) {
++        (void)sceSystemServiceHideSplashScreen();
++        if (instance == VK_NULL_HANDLE || physicalDevice == VK_NULL_HANDLE || outSurface == nullptr) {
++            return VK_ERROR_INITIALIZATION_FAILED;
++        }
++        if (!vkGetPhysicalDeviceDisplayPropertiesKHR || !vkGetPhysicalDeviceDisplayPlanePropertiesKHR ||
++            !vkGetDisplayModePropertiesKHR || !vkCreateDisplayPlaneSurfaceKHR) {
++            fprintf(stderr, "[plume-ps5] VK_KHR_display entry points are not available.\n");
++            return VK_ERROR_EXTENSION_NOT_PRESENT;
++        }
++
++        uint32_t displayCount = 0;
++        VkResult res = vkGetPhysicalDeviceDisplayPropertiesKHR(physicalDevice, &displayCount, nullptr);
++        if (res != VK_SUCCESS || displayCount == 0) {
++            fprintf(stderr, "[plume-ps5] No displays reported by physical device (res=%d, count=%u).\n", res, displayCount);
++            return VK_ERROR_INITIALIZATION_FAILED;
++        }
++        std::vector<VkDisplayPropertiesKHR> displays(displayCount);
++        res = vkGetPhysicalDeviceDisplayPropertiesKHR(physicalDevice, &displayCount, displays.data());
++        if (res != VK_SUCCESS) {
++            return res;
++        }
++
++        uint32_t planeCount = 0;
++        res = vkGetPhysicalDeviceDisplayPlanePropertiesKHR(physicalDevice, &planeCount, nullptr);
++        if (res != VK_SUCCESS || planeCount == 0) {
++            fprintf(stderr, "[plume-ps5] No display planes reported by physical device (res=%d, count=%u).\n", res, planeCount);
++            return VK_ERROR_INITIALIZATION_FAILED;
++        }
++        std::vector<VkDisplayPlanePropertiesKHR> planes(planeCount);
++        res = vkGetPhysicalDeviceDisplayPlanePropertiesKHR(physicalDevice, &planeCount, planes.data());
++        if (res != VK_SUCCESS) {
++            return res;
++        }
++
++        VkDisplayKHR chosenDisplay = VK_NULL_HANDLE;
++        VkDisplayModeKHR chosenMode = VK_NULL_HANDLE;
++        VkExtent2D chosenExtent = { 3840, 2160 };
++        for (uint32_t i = 0; i < displayCount && chosenMode == VK_NULL_HANDLE; ++i) {
++            uint32_t modeCount = 0;
++            if (vkGetDisplayModePropertiesKHR(physicalDevice, displays[i].display, &modeCount, nullptr) != VK_SUCCESS || modeCount == 0) {
++                continue;
++            }
++            std::vector<VkDisplayModePropertiesKHR> modes(modeCount);
++            if (vkGetDisplayModePropertiesKHR(physicalDevice, displays[i].display, &modeCount, modes.data()) != VK_SUCCESS) {
++                continue;
++            }
++            chosenDisplay = displays[i].display;
++            chosenMode = modes[0].displayMode;
++            chosenExtent = modes[0].parameters.visibleRegion;
++            for (uint32_t m = 0; m < modeCount; ++m) {
++                if (modes[m].parameters.visibleRegion.width == 3840 && modes[m].parameters.visibleRegion.height == 2160) {
++                    chosenMode = modes[m].displayMode;
++                    chosenExtent = modes[m].parameters.visibleRegion;
++                    break;
++                }
++            }
++        }
++
++        if (chosenMode == VK_NULL_HANDLE) {
++            fprintf(stderr, "[plume-ps5] No usable display mode found.\n");
++            return VK_ERROR_INITIALIZATION_FAILED;
++        }
++
++        uint32_t chosenPlane = UINT32_MAX;
++        for (uint32_t i = 0; i < planeCount; ++i) {
++            if (planes[i].currentDisplay == VK_NULL_HANDLE || planes[i].currentDisplay == chosenDisplay) {
++                chosenPlane = i;
++                break;
++            }
++        }
++        if (chosenPlane == UINT32_MAX) {
++            chosenPlane = 0;
++        }
++
++        VkDisplaySurfaceCreateInfoKHR surfaceCreateInfo = {};
++        surfaceCreateInfo.sType = VK_STRUCTURE_TYPE_DISPLAY_SURFACE_CREATE_INFO_KHR;
++        surfaceCreateInfo.displayMode = chosenMode;
++        surfaceCreateInfo.planeIndex = chosenPlane;
++        surfaceCreateInfo.planeStackIndex = planes[chosenPlane].currentStackIndex;
++        surfaceCreateInfo.transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
++        surfaceCreateInfo.globalAlpha = 1.0f;
++        surfaceCreateInfo.alphaMode = VK_DISPLAY_PLANE_ALPHA_OPAQUE_BIT_KHR;
++        surfaceCreateInfo.imageExtent = chosenExtent;
++
++        return vkCreateDisplayPlaneSurfaceKHR(instance, &surfaceCreateInfo, nullptr, outSurface);
++    }
++#endif
++
+     // Backend constants.
+ 
+     // Required buffer alignment for acceleration structures.
+@@ -45,10 +156,12 @@ namespace plume {
+ 
+     static const std::unordered_set<std::string> RequiredInstanceExtensions = {
+         VK_KHR_SURFACE_EXTENSION_NAME,
+-#   ifdef VULKAN_OBJECT_NAMES_ENABLED
++#   if defined(VULKAN_OBJECT_NAMES_ENABLED) && !defined(__PROSPERO__)
+         VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
+ #   endif
+-#   if defined(_WIN64)
++#   if defined(__PROSPERO__)
++        VK_KHR_DISPLAY_EXTENSION_NAME,
++#   elif defined(_WIN64)
+         VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
+ #   elif defined(__ANDROID__)
+         VK_KHR_ANDROID_SURFACE_EXTENSION_NAME,
+@@ -2082,7 +2195,14 @@ namespace plume {
+ 
+         VkResult res;
+ 
+-#   ifdef _WIN64
++#   if defined(__PROSPERO__)
++        VulkanInterface *renderInterface = commandQueue->device->renderInterface;
++        res = createPs5DisplaySurface(renderInterface->instance, commandQueue->device->physicalDevice, &surface);
++        if (res != VK_SUCCESS) {
++            fprintf(stderr, "createPs5DisplaySurface failed with error code 0x%X.\n", res);
++            return;
++        }
++#   elif defined(_WIN64)
+         assert(desc.renderWindow != 0);
+         VkWin32SurfaceCreateInfoKHR surfaceCreateInfo = {};
+         surfaceCreateInfo.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+@@ -2339,6 +2459,12 @@ namespace plume {
+         createInfo.imageExtent.height = height;
+         createInfo.imageArrayLayers = 1;
+         createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
++#   if defined(__PROSPERO__)
++        createInfo.imageUsage &= surfaceCapabilities.supportedUsageFlags;  // the display plane's
++        if (createInfo.imageUsage == 0) {
++            createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
++        }
++#   endif
+         createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+         createInfo.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+         createInfo.compositeAlpha = pickedAlphaFlag;
+@@ -2351,6 +2477,9 @@ namespace plume {
+             fprintf(stderr, "vkCreateSwapchainKHR failed with error code 0x%X.\n", res);
+             return false;
+         }
++#   if defined(__PROSPERO__)
++        (void)sceSystemServiceHideSplashScreen();
++#   endif
+ 
+         // Store the chosen present mode to identify later whether the swapchain needs to be recreated.
+         createdPresentMode = requiredPresentMode;
+@@ -2458,7 +2587,19 @@ namespace plume {
+     }
+ 
+     void VulkanSwapChain::getWindowSize(uint32_t &dstWidth, uint32_t &dstHeight) const {
+-#   if defined(_WIN64)
++#   if defined(__PROSPERO__)
++        if (surface != VK_NULL_HANDLE && commandQueue != nullptr && commandQueue->device != nullptr) {
++            VkSurfaceCapabilitiesKHR surfaceCapabilities = {};
++            if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(commandQueue->device->physicalDevice, surface, &surfaceCapabilities) == VK_SUCCESS &&
++                surfaceCapabilities.currentExtent.width != UINT32_MAX && surfaceCapabilities.currentExtent.width > 0) {
++                dstWidth = surfaceCapabilities.currentExtent.width;
++                dstHeight = surfaceCapabilities.currentExtent.height;
++                return;
++            }
++        }
++        dstWidth = 3840;
++        dstHeight = 2160;
++#   elif defined(_WIN64)
+         RECT rect;
+         GetClientRect(desc.renderWindow, &rect);
+         dstWidth = rect.right - rect.left;
+@@ -4054,6 +4195,9 @@ namespace plume {
+             fprintf(stderr, "vkCreateDevice failed with error code 0x%X.\n", res);
+             return;
+         }
++#   if defined(__PROSPERO__)
++        volkLoadDevice(vk);
++#   endif
+ 
+         for (uint32_t i = 0; i < queueFamilyCount; i++) {
+             for (uint32_t j = 0; j < queueFamilies[i].queues.size(); j++) {
+@@ -4464,11 +4608,22 @@ namespace plume {
+ #else
+     VulkanInterface::VulkanInterface() {
+ #endif
++#if defined(__PROSPERO__)
++        // The PS5's RADV is linked into the executable: its ICD entry point is volk's loader.
++        VkResult res = VK_SUCCESS;
++        (void)sceSystemServiceHideSplashScreen();
++        if (vk_icdGetInstanceProcAddr == nullptr) {
++            fprintf(stderr, "vk_icdGetInstanceProcAddr is not linked into the PS5 executable.\n");
++            return;
++        }
++        volkInitializeCustom(ps5PlumeGetInstanceProcAddr);
++#else
+         VkResult res = volkInitialize();
+         if (res != VK_SUCCESS) {
+             fprintf(stderr, "volkInitialize failed with error code 0x%X.\n", res);
+             return;
+         }
++#endif
+ 
+         appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+         appInfo.pApplicationName = "plume";

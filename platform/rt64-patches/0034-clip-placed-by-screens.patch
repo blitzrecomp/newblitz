@@ -1,0 +1,65 @@
+diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
+--- a/src/hle/rt64_present_queue.cpp
++++ b/src/hle/rt64_present_queue.cpp
+@@ -25,6 +25,7 @@
+ extern "C" {
+     extern volatile float blitz_tall_aspect_on;
+     volatile int blitz_ds_mode = 0;
++    volatile int blitz_ds_clip_right = 0;        // 1: the last play's clip in the second screen's top right corner, 4:3; 0: its left third, tall
+     volatile float blitz_ds_split = 0.5f;        // the upper screen's share of the picture's height
+     volatile int blitz_ds_second_on_top = 1;     // the second window is the upper screen
+     volatile int blitz_ds_second_icons = 0;      // mode 3 only: the hook's drawing goes over the picture (Stylus's receiver icons)
+@@ -759,7 +760,11 @@
+         }
+ 
+         // The clip. A new play starts it over; 15 frames a second of the last 8 seconds, at 256x384.
+-        constexpr uint32_t ClipLength = 120, ClipWidth = 256, ClipHeight = 384;
++        // Potato Mode (BLITZ_LEAN): 64 frames at 176x264, one every 125 ms, the same 8 s in 12 MB, not 47: on an RG DS the
++        // full clip and Redo's snapshots together pushed the game out to swap (team, 2026-11-02).
++        static const bool clipLean = getenv("BLITZ_LEAN") != nullptr;
++        static const uint32_t ClipLength = clipLean ? 64 : 120, ClipWidth = clipLean ? 176 : 256, ClipHeight = clipLean ? 264 : 384;
++        static const auto clipEvery = std::chrono::milliseconds(clipLean ? 125 : 62);
+         if ((blitz_ds_clip_enabled == 0) && !clipTextures.empty()) {
+             // Turned off because play's too slow: its memory goes too. Nothing's using it: the last submit has finished.
+             clipFramebuffers.clear();
+@@ -791,7 +796,10 @@
+             }
+             fprintf(stderr, "[ds] clip memory made: %u frames at %ux%u\n", ClipLength, ClipWidth, ClipHeight);
+         }
+-        if ((blitz_ds_clip_enabled != 0) && (blitz_ds_clip_hold == 0) && (mode == 1) && (first.texture != nullptr) && !first.stored && ((start - clipLastCapture) > std::chrono::milliseconds(62))) {
++        // Kept from the tall picture over both screens (mode 1), or with the corner clip (Game + Companion, Stylus) from the
++        // picture on this screen alone (mode 3): squeezed into the clip's frames, and drawn back at 4:3.
++        const bool clipFrom = (mode == 1) || ((mode == 3) && (blitz_ds_clip_right != 0));
++        if ((blitz_ds_clip_enabled != 0) && (blitz_ds_clip_hold == 0) && clipFrom && (first.texture != nullptr) && !first.stored && ((start - clipLastCapture) > clipEvery)) {
+             clipLastCapture = start;
+             RenderTexture *clipTexture = clipTextures[clipHead].get();
+             commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(clipTexture, RenderTextureLayout::COLOR_WRITE));
+@@ -817,7 +825,7 @@
+         commandList->clearColor();
+ 
+         if ((mode == 2) && (blitz_ds_clip_show != 0) && (blitz_ds_clip_enabled != 0) && (clipCount > 0) && (first.vi != nullptr)) {
+-            if ((start - clipLastShown) > std::chrono::milliseconds(66)) {
++            if ((start - clipLastShown) > clipEvery + std::chrono::milliseconds(4)) {
+                 clipLastShown = start;
+                 clipShown = (clipShown + 1) % clipCount;
+             }
+@@ -831,8 +839,17 @@
+             p.downsamplingScale = 1;
+             p.part = false;
+             p.stored = true;
+-            const int32_t height = int32_t(secondChain->getHeight());
+-            p.storedRect = RenderRect(0, 0, (height * 2) / 3, height);
++            const int32_t height = int32_t(secondChain->getHeight()), width = int32_t(secondChain->getWidth());
++            if (blitz_ds_clip_right != 0) {
++                // Game + Companion, Stylus: a 4:3 clip in the top right corner, down to the board's field strip (436 of 1080).
++                const int32_t clipH = (height * 436) / 1080, clipW = (clipH * 4) / 3;
++                p.storedRect = RenderRect(width - clipW, 0, width, clipH);
++            }
++            else {
++                // The left third, the tall clip at its own 2:3 shape, in the middle of the height (team: "the left 33%").
++                const int32_t clipW = width / 3, clipH = std::min(height, (clipW * 3) / 2), top = (height - clipH) / 2;
++                p.storedRect = RenderRect(0, top, clipW, top + clipH);
++            }
+             viRenderer->render(p);
+         }
+         else if ((mode == 3) && (first.texture != nullptr)) {

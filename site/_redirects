@@ -1,0 +1,5 @@
+# Cloudflare Pages redirects (https://developers.cloudflare.com/pages/configuration/redirects/): the short links the
+# trailer's end card shows (newblitz.com/github, newblitz.com/discord).
+/github   https://github.com/blitzrecomp/newblitz  302
+/github/* https://github.com/blitzrecomp/newblitz  302
+/discord  https://discord.gg/AtcKN9dY5            302

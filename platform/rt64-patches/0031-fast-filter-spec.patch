@@ -1,0 +1,276 @@
+diff --git a/src/render/rt64_framebuffer_renderer.cpp b/src/render/rt64_framebuffer_renderer.cpp
+index 0b2b273..2fb205f 100644
+--- a/src/render/rt64_framebuffer_renderer.cpp
++++ b/src/render/rt64_framebuffer_renderer.cpp
+@@ -15,9 +15,25 @@ namespace RT64 { extern std::atomic<uint64_t> statDrawsUber, statDrawsFast; }
+ // 2: the same, but rectangles (2D art, text) keep the exact filter. On (1) in Potato Mode (BLITZ_LEAN), off elsewhere unless
+ // asked for; live with "RT64 filter 0|1|2" (dev_input.cpp). Read at the first frame, not at load, so the env set by the activity
+ // counts. It reaches the shader in FrameParams, so it's one branch on a constant and no new pipelines. On an RG DS (Mali-G52),
+-// two screens at 1.5x: frame pass GPU 2539 -> 2088 ms per 5 s, 23.6 -> 26.8 fps.
++// two screens at 1.5x: frame pass GPU 2539 -> 2088 ms per 5 s, 23.6 -> 26.8 fps. BLITZ_FAST_FILTER_SPEC=1 bakes it into the
++// specialized pipelines instead (rt64_raster_shader.cpp).
+ namespace RT64 {
+     std::atomic<int> fastFilterMode{ -1 };  // -1: not read yet
++
++    // The mode now, 0, 1 or 2: read from the env the first time it's asked for (the first frame, or the first specialized pipeline
++    // with BLITZ_FAST_FILTER_SPEC), then as blitz_rt64_fast_filter sets it.
++    uint32_t fastFilterModeNow() {
++        int fastFilter = fastFilterMode.load(std::memory_order_relaxed);
++        if (fastFilter < 0) {
++            const char *v = getenv("BLITZ_FAST_FILTER");
++            fastFilter = (v != nullptr) ? atoi(v) : ((getenv("BLITZ_LEAN") != nullptr) ? 1 : 0);
++            int expected = -1;
++            fastFilterMode.compare_exchange_strong(expected, fastFilter);
++            fastFilter = fastFilterMode.load(std::memory_order_relaxed);
++        }
++
++        return ((fastFilter == 1) || (fastFilter == 2)) ? uint32_t(fastFilter) : 0;
++    }
+ }
+ 
+ extern "C" void blitz_rt64_fast_filter(int mode) { RT64::fastFilterMode = mode; }
+@@ -196,16 +212,7 @@ namespace RT64 {
+         rspSmoothNormalVector.clear();
+         frameParams.viewUbershaders = ubershadersVisible;
+         frameParams.ditherNoiseStrength = ditherNoiseStrength;
+-        int fastFilter = fastFilterMode.load(std::memory_order_relaxed);
+-        if (fastFilter < 0) {
+-            const char *v = getenv("BLITZ_FAST_FILTER");
+-            fastFilter = (v != nullptr) ? atoi(v) : ((getenv("BLITZ_LEAN") != nullptr) ? 1 : 0);
+-            int expected = -1;
+-            fastFilterMode.compare_exchange_strong(expected, fastFilter);
+-            fastFilter = fastFilterMode.load(std::memory_order_relaxed);
+-        }
+-
+-        frameParams.fastFilter = ((fastFilter == 1) || (fastFilter == 2)) ? uint32_t(fastFilter) : 0;
++        frameParams.fastFilter = fastFilterModeNow();
+         framebufferCount = 0;
+ 
+         // Create dummy color target if it hasn't been created yet.
+@@ -1776,6 +1783,18 @@ namespace RT64 {
+                         triangles.shaderDesc = call.shaderDesc;
+ 
+                         RasterShader *gpuShader = p.ubershadersOnly ? nullptr : p.rasterShaderCache->getGPUShader(call.shaderDesc);
++
++                        // BLITZ_FAST_FILTER_SPEC: a pipeline baked for another fast filter mode than this frame's would filter the
++                        // old way, so the ubershader, which reads FrParams, draws it instead.
++                        if ((gpuShader != nullptr) && !gpuShader->fastFilterAgrees(frameParams.fastFilter)) {
++                            static std::atomic<bool> told{ false };
++                            if (!told.exchange(true)) {
++                                fprintf(stderr, "[rt64] fast filter now %u: pipelines baked with %u draw with the ubershader until it's back\n", frameParams.fastFilter, gpuShader->fastFilterBaked);
++                            }
++
++                            gpuShader = nullptr;
++                        }
++
+                         if (gpuShader != nullptr) {
+                             triangles.pipeline = gpuShader->pipeline.get();
+                             statDrawsFast++;
+diff --git a/src/render/rt64_raster_shader.cpp b/src/render/rt64_raster_shader.cpp
+index 86bd1b9..c09b7b3 100644
+--- a/src/render/rt64_raster_shader.cpp
++++ b/src/render/rt64_raster_shader.cpp
+@@ -48,7 +48,43 @@
+ #include "rt64_descriptor_sets.h"
+ #include "rt64_render_target.h"
+ 
++#include <atomic>
++#include <cstdio>
++#include <cstdlib>
++
+ namespace RT64 {
++    uint32_t fastFilterModeNow();  // rt64_framebuffer_renderer.cpp (BLITZ_FAST_FILTER)
++
++    // BLITZ_FAST_FILTER_SPEC=1 (off unless asked for, everywhere): a specialized pipeline gets the fast filter mode as a constant
++    // (constant_id 5, TextureSampler.hlsli) instead of reading FrParams, so it keeps only the path it takes: with the mode on,
++    // the exact filter's four fetches and blend leave it, and its register count (occupancy on Mali) is the fast path's. The mode
++    // is the one when the pipeline is made; a frame whose mode differs (changed live since) draws those with the ubershader,
++    // which still reads FrParams (rt64_framebuffer_renderer.cpp). Unset, the constant is 0 and the shader reads FrParams as before.
++    // A new value means new SPIR-V, so the driver's pipeline cache (pipeline_cache.bin in Potato Mode) misses once and keeps both.
++    static uint32_t fastFilterToBake() {
++        static const bool spec = []() {
++            const char *v = getenv("BLITZ_FAST_FILTER_SPEC");
++            return (v != nullptr) && (atoi(v) != 0);
++        }();
++
++        if (!spec) {
++            return 0;
++        }
++
++        const uint32_t mode = fastFilterModeNow();
++        static std::atomic<bool> told{ false };
++        if (!told.exchange(true)) {
++            fprintf(stderr, "[rt64] BLITZ_FAST_FILTER_SPEC: specialized pipelines bake fast filter mode %u (a live change draws them with the ubershader)\n", mode);
++        }
++
++        return mode;
++    }
++
++    static bool fastFilterTakes(uint32_t mode, bool rect) {
++        // As fastFilterFor in TextureSampler.hlsli.
++        return (mode == 1) || ((mode == 2) && !rect);
++    }
++
+     static const RenderFormat RasterPositionFormat = RenderFormat::R32G32B32A32_FLOAT;
+     static const RenderFormat RasterTexcoordFormat = RenderFormat::R32G32_FLOAT;
+     static const RenderFormat RasterColorFormat = RenderFormat::R32G32B32A32_FLOAT;
+@@ -91,7 +127,12 @@ namespace RT64 {
+ 
+         this->device = device;
+         this->desc = desc;
+-        
++
++        // Only the formats built from the spec-constant shaders have the constant; D3D12's text-compiled shaders read FrParams.
++        if ((shaderFormat == RenderShaderFormat::SPIRV) || (shaderFormat == RenderShaderFormat::METAL)) {
++            fastFilterBaked = fastFilterToBake();
++        }
++
+         const bool useMSAA = (multisampling.sampleCount > 1);
+         std::unique_ptr<RenderShader> vertexShader;
+         std::unique_ptr<RenderShader> pixelShader;
+@@ -117,19 +158,20 @@ namespace RT64 {
+             thread_local std::vector<uint8_t> optimizedVS;
+             thread_local std::vector<uint8_t> optimizedPS;
+             if (!specConstantsSetup) {
+-                for (uint32_t i = 0; i < 5; i++) {
++                for (uint32_t i = 0; i < 6; i++) {
+                     specConstants.push_back(respv::SpecConstant(i, { 0 }));
+                 }
+ 
+                 specConstantsSetup = true;
+             }
+-            
++
+             specConstants[0].values[0] = desc.otherMode.L;
+             specConstants[1].values[0] = desc.otherMode.H;
+             specConstants[2].values[0] = desc.colorCombiner.L;
+             specConstants[3].values[0] = desc.colorCombiner.H;
+             specConstants[4].values[0] = desc.flags.value;
+-            
++            specConstants[5].values[0] = fastFilterBaked;  // Always given, 0 too, so re-spirv folds the shader's choice away.
++
+             bool vsRun = respv::Optimizer::run(*VS, specConstants.data(), uint32_t(specConstants.size()), optimizedVS);
+             bool psRun = respv::Optimizer::run(*PS, specConstants.data(), uint32_t(specConstants.size()), optimizedPS);
+             assert(vsRun && psRun && "Shader optimization must always succeed as the inputs are always the same.");
+@@ -172,6 +214,11 @@ namespace RT64 {
+             specConstants.emplace_back(2, desc.colorCombiner.L);
+             specConstants.emplace_back(3, desc.colorCombiner.H);
+             specConstants.emplace_back(4, desc.flags.value);
++
++            // Left out when 0: the function constant then takes its default (0), as before BLITZ_FAST_FILTER_SPEC.
++            if (fastFilterBaked != 0) {
++                specConstants.emplace_back(5, fastFilterBaked);
++            }
+ #       else
+             assert(false && "This platform does not support METAL shaders.");
+ #       endif
+@@ -241,6 +288,10 @@ namespace RT64 {
+ 
+     RasterShader::~RasterShader() { }
+ 
++    bool RasterShader::fastFilterAgrees(uint32_t frameMode) const {
++        return (fastFilterBaked == 0) || (fastFilterTakes(fastFilterBaked, desc.flags.rect) == fastFilterTakes(frameMode, desc.flags.rect));
++    }
++
+     RasterShaderText RasterShader::generateShaderText(const ShaderDescription &desc, bool multisampling) {
+         const std::string renderParamsCode = desc.toShader();
+ 
+diff --git a/src/render/rt64_raster_shader.h b/src/render/rt64_raster_shader.h
+index 3b991ff..dbe3dd3 100644
+--- a/src/render/rt64_raster_shader.h
++++ b/src/render/rt64_raster_shader.h
+@@ -65,10 +65,18 @@ namespace RT64 {
+         RenderDevice *device;
+         std::unique_ptr<RenderPipeline> pipeline;
+ 
+-        RasterShader(RenderDevice *device, const ShaderDescription &desc, const RenderPipelineLayout *pipelineLayout, RenderShaderFormat shaderFormat, const RenderMultisampling &multisampling, 
++        // BLITZ_FAST_FILTER_SPEC (rt64_raster_shader.cpp): the fast filter mode baked into this pipeline (1 or 2), or 0 when it
++        // reads FrParams like the ubershader.
++        uint32_t fastFilterBaked = 0;
++
++        RasterShader(RenderDevice *device, const ShaderDescription &desc, const RenderPipelineLayout *pipelineLayout, RenderShaderFormat shaderFormat, const RenderMultisampling &multisampling,
+             const ShaderCompiler *shaderCompiler, const OptimizerCacheSPIRV *optimizerCacheSPIRV);
+ 
+         ~RasterShader();
++
++        // Whether this pipeline filters as a frame with FrParams.fastFilter == frameMode asks. Only a pipeline baked for another
++        // mode (one changed live since) can't, and the renderer then draws with the ubershader.
++        bool fastFilterAgrees(uint32_t frameMode) const;
+         static RasterShaderText generateShaderText(const ShaderDescription &desc, bool multisampling);
+         static std::unique_ptr<RenderPipeline> createPipeline(const PipelineCreation &c);
+         static RenderMultisampling generateMultisamplingPattern(uint32_t sampleCount, bool sampleLocationsSupported);
+diff --git a/src/shaders/TextureSampler.hlsli b/src/shaders/TextureSampler.hlsli
+index 77f5c71..a191ac1 100644
+--- a/src/shaders/TextureSampler.hlsli
++++ b/src/shaders/TextureSampler.hlsli
+@@ -251,6 +251,23 @@ float4 sampleTextureLevel(const RDPTile rdpTile, const GPUTile gpuTile, bool fil
+     }
+ }
+ 
++#if defined(SPEC_CONSTANT_RENDER_PARAMS)
++// BLITZ_FAST_FILTER_SPEC (rt64_raster_shader.cpp): the fast filter's mode baked into a specialized pipeline, so it keeps only the
++// path it takes (fewer registers on Mali). 0, the default and all there is without BLITZ_FAST_FILTER_SPEC, asks FrParams each
++// frame as the ubershader does. The renderer never draws with a pipeline baked for another mode than the frame's: it takes the
++// ubershader for that draw instead (rt64_framebuffer_renderer.cpp).
++[[vk::constant_id(5)]] const uint spFastFilter = 0;
++
++// Read through a function: an expression straight on the constant becomes an OpSpecConstantOp, which re-spirv can't parse.
++uint bakedFastFilter() {
++    return spFastFilter;
++}
++#endif
++
++bool fastFilterFor(uint mode, RenderFlags renderFlags) {
++    return (mode == 1) || ((mode == 2) && !renderFlagRect(renderFlags));
++}
++
+ float4 sampleTexture(OtherMode otherMode, RenderFlags renderFlags, float2 inputUV, float2 ddxUV, float2 ddyUV, const RDPTile rdpTile, const GPUTile gpuTile, bool nextPixelBug) {
+     const bool texturePerspective = (otherMode.textPersp() == G_TP_PERSP);
+     const bool applyCorrection = (!texturePerspective && !renderFlagRect(renderFlags));
+@@ -286,8 +303,20 @@ float4 sampleTexture(OtherMode otherMode, RenderFlags renderFlags, float2 inputU
+     const bool filterBilerp = (filter != G_TF_POINT) && (cycleType != G_CYC_COPY);
+     const bool filterAverage = (filter == G_TF_AVERAGE);
+     const bool linearFiltering = renderFlagLinearFiltering(renderFlags);
+-    const bool fastFilter = (FrParams.fastFilter == 1) || ((FrParams.fastFilter == 2) && !renderFlagRect(renderFlags));
+-    
++#if defined(SPEC_CONSTANT_RENDER_PARAMS)
++    // A branch, not a select: re-spirv folds a branch on a constant and the phi after it, but not a select with a variable side.
++    bool fastFilter;
++    [branch]
++    if (bakedFastFilter() != 0) {
++        fastFilter = fastFilterFor(bakedFastFilter(), renderFlags);
++    }
++    else {
++        fastFilter = fastFilterFor(FrParams.fastFilter, renderFlags);
++    }
++#else
++    const bool fastFilter = fastFilterFor(FrParams.fastFilter, renderFlags);
++#endif
++
+ #if FIX_UPSCALING_PRECISION
+     // Account for the fact that scaling can result in less than perfect results that affect the quality of point filtering.
+     // This helps with artifacts caused by copying high resolution tiles onto other textures in non-square ratios.
+@@ -368,8 +397,21 @@ float4 sampleTexture(OtherMode otherMode, RenderFlags renderFlags, float2 inputU
+     }
+ #else
+     textureSamples[0] = sampleTextureLevel(rdpTile, gpuTile, filterBilerp, filterAverage, linearFiltering, fastFilter, uvCoord, tlut, canDecodeTMEM, RDPMipLevels[0], usesHDR);
+-    
+-    if (numRDPSamples > 1) {
++
++    bool secondLevel = (numRDPSamples > 1);
++#if defined(SPEC_CONSTANT_RENDER_PARAMS)
++    // With the fast filter baked in, the exact path's other copy goes too: a second level is only set up for NATIVE_SAMPLER_NONE,
++    // and a pipeline without dynamic tiles knows its sampler. Nested branches, so re-spirv can fold them on the constants alone.
++    [branch]
++    if (bakedFastFilter() != 0) {
++        [branch]
++        if (nativeSampler != NATIVE_SAMPLER_NONE) {
++            secondLevel = false;
++        }
++    }
++#endif
++
++    if (secondLevel) {
+         // A second level only comes with NATIVE_SAMPLER_NONE (a native sampler's mipmaps returned above), so never the fast filter:
+         // false here drops its dead copy from every specialized shader.
+         textureSamples[1] = sampleTextureLevel(rdpTile, gpuTile, filterBilerp, filterAverage, linearFiltering, false, uvCoord, tlut, canDecodeTMEM, RDPMipLevels[1], usesHDR);

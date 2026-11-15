@@ -1,0 +1,119 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -5,8 +5,17 @@
+ 
+ if (APPLE)
+     enable_language(OBJC OBJCXX)
+-    set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15")
++    if (NOT IOS)  # BlitzRecomp: an iOS build keeps its own deployment target
++        set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15")
++    endif()
+ endif()
++# BlitzRecomp: Metal shader libraries for the target's SDK (an iPhone needs iphoneos metallibs).
++# (A cache entry: the frontend builds its shaders with these functions from its own directory.)
++if (IOS)
++    set(RT64_METAL_SDK iphoneos CACHE INTERNAL "")
++else()
++    set(RT64_METAL_SDK macosx CACHE INTERNAL "")
++endif()
+ 
+ option(RT64_STATIC "Build RT64 as a static library" OFF)
+ 
+@@ -155,10 +164,10 @@
+             COMMAND spirv_cross_msl ${OUTNAME}.spv ${OUTNAME}.metal
+             DEPENDS ${OUTNAME}.spv spirv_cross_msl)
+     add_custom_command(OUTPUT ${OUTNAME}.ir
+-            COMMAND xcrun -sdk macosx metal -o ${OUTNAME}.ir -c ${OUTNAME}.metal $<$<CONFIG:Debug>:-frecord-sources>
++            COMMAND xcrun -sdk ${RT64_METAL_SDK} metal -o ${OUTNAME}.ir -c ${OUTNAME}.metal $<$<CONFIG:Debug>:-frecord-sources>
+             DEPENDS ${OUTNAME}.metal)
+     add_custom_command(OUTPUT ${OUTNAME}.metallib
+-            COMMAND xcrun -sdk macosx metallib ${OUTNAME}.ir -o ${OUTNAME}.metallib
++            COMMAND xcrun -sdk ${RT64_METAL_SDK} metallib ${OUTNAME}.ir -o ${OUTNAME}.metallib
+             DEPENDS ${OUTNAME}.ir)
+     add_custom_command(OUTPUT ${OUTNAME}.metal.c
+             COMMAND file_to_c ${OUTNAME}.metallib ${TARGET_NAME}BlobMSL ${OUTNAME}.metal.c ${OUTNAME}.metal.h
+@@ -467,13 +476,24 @@
+ 
+ # Add any Apple-specific source files and libraries
+ if (APPLE)
+-    add_subdirectory(src/tools/spirv_cross_msl)
++    # BlitzRecomp: a cross build (iOS) runs the build host's converter (RT64_HOST_SPIRV_CROSS_MSL) instead of building
++    # one for the target, which couldn't run here (and would overwrite the host's).
++    if (RT64_HOST_SPIRV_CROSS_MSL)
++        add_executable(spirv_cross_msl IMPORTED GLOBAL)
++        set_target_properties(spirv_cross_msl PROPERTIES IMPORTED_LOCATION ${RT64_HOST_SPIRV_CROSS_MSL})
++    else()
++        add_subdirectory(src/tools/spirv_cross_msl)
++    endif()
+ 
+     target_sources(rt64 PRIVATE
+         "${PROJECT_SOURCE_DIR}/src/apple/rt64_apple.mm"
+     )
+     target_include_directories(rt64 PRIVATE "${PROJECT_SOURCE_DIR}/src/contrib/metal-cpp")
+-    target_link_libraries(rt64 "-framework Metal -framework QuartzCore -framework CoreGraphics -framework IOKit")
++    if (IOS)
++        target_link_libraries(rt64 "-framework Metal -framework QuartzCore -framework CoreGraphics -framework UIKit")
++    else()
++        target_link_libraries(rt64 "-framework Metal -framework QuartzCore -framework CoreGraphics -framework IOKit")
++    endif()
+ endif()
+ 
+ # Add any Windows-specific source files and libraries
+--- a/src/apple/rt64_apple.mm
++++ b/src/apple/rt64_apple.mm
+@@ -1,7 +1,6 @@
+ #include "rt64_apple.h"
+ 
+-#import <AppKit/AppKit.h>
+-#import <Foundation/Foundation.h>
++#import <Foundation/Foundation.h>  // BlitzRecomp: Foundation only, so iOS builds it too
+ 
+ const char* GetHomeDirectory() {
+     return strdup([NSHomeDirectory() UTF8String]);
+--- a/src/common/rt64_user_paths.cpp
++++ b/src/common/rt64_user_paths.cpp
+@@ -2,6 +2,9 @@
+ // RT64
+ //
+ 
++#if defined(__APPLE__)
++#include <TargetConditionals.h>
++#endif
+ #include "rt64_user_paths.h"
+ 
+ #if defined(__linux__)
+@@ -42,12 +45,19 @@
+ #       endif
+         }
+ 
++#       if defined(__APPLE__) && TARGET_OS_IPHONE
++        // BlitzRecomp: an iOS app may only write under its container's Documents, Library and tmp.
+         if (homeDir != nullptr) {
++            return std::filesystem::path(homeDir) / "Library" / "Application Support" / (std::string(".") + std::string(appId.c_str()));
++        }
++#       endif
++        if (homeDir != nullptr) {
+             // Prefer to store in the .config directory if it exists. Use the home directory otherwise.
+             const std::string appDirName = std::string(".") + std::string(appId.c_str());
+             std::filesystem::path homePath = homeDir;
+             std::filesystem::path configPath = homePath / ".config";
+-            if (std::filesystem::exists(configPath)) {
++            std::error_code ec;
++            if (std::filesystem::exists(configPath, ec)) {
+                 resultPath = configPath / appDirName;
+             }
+             else {
+--- a/src/hle/rt64_application.cpp
++++ b/src/hle/rt64_application.cpp
+@@ -734,8 +734,10 @@
+     }
+ 
+     bool Application::checkDirectoryCreated(const std::filesystem::path &path) {
++        // BlitzRecomp: non-throwing (a sandbox that refuses the folder means no user files, not a crash).
+         std::filesystem::path dirPath(path);
+-        return std::filesystem::is_directory(dirPath) || std::filesystem::create_directories(dirPath);
++        std::error_code ec;
++        return std::filesystem::is_directory(dirPath, ec) || std::filesystem::create_directories(dirPath, ec);
+     }
+ 
+     void Application::updateUserConfig(bool discardFBs) {

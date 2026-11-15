@@ -1,0 +1,20 @@
+diff --git a/recompui/src/renderer/rt64_render_context.cpp b/recompui/src/renderer/rt64_render_context.cpp
+index d5c0cac..32cb6d8 100644
+--- a/recompui/src/renderer/rt64_render_context.cpp
++++ b/recompui/src/renderer/rt64_render_context.cpp
+@@ -1,3 +1,6 @@
++// Potato Mode's Sharpness (src/game/config.cpp): what "2x" means on a weak GPU.
++double blitz_2x_scale = 2.0;
++
+ #include <memory>
+ #include <cstring>
+ #include <variant>
+@@ -152,7 +155,7 @@ void set_application_user_config(RT64::Application* application, const ultramode
+             break;
+         case ultramodern::renderer::Resolution::Original2x:
+             application->userConfig.resolution = RT64::UserConfiguration::Resolution::Manual;
+-            application->userConfig.resolutionMultiplier = 2.0 * std::max(config.ds_option, 1);
++            application->userConfig.resolutionMultiplier = blitz_2x_scale * std::max(config.ds_option, 1);
+             application->userConfig.downsampleMultiplier = std::max(config.ds_option, 1);
+             break;
+     }

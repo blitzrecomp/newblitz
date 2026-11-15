@@ -1,0 +1,48 @@
+{
+  "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+  "format": 1,
+  "repo": "blitzrecomp/newblitz",
+  "name": "New Blitz 2027",
+  "game": {
+    "kind": "iso",
+    "label": "Your NFL Blitz 2000 cartridge dump: the USA v1.1 (.z64, .n64, .v64 or a .zip holding one)",
+    "check": { "ids": ["NBIE"] },
+    "dumps": [{ "name": "NFL Blitz 2000 (USA) (Rev 1)", "size": 16777216, "crc32": "b591cfea" }]
+  },
+  "start": {
+    "program": ["New Blitz.app/Contents/MacOS/BlitzRecompiled", "New Blitz/New Blitz.exe", "New Blitz/New Blitz"],
+    "args": ["--import-rom", "{game}"]
+  },
+  "saves": [
+    "{home}/Library/Application Support/Blitz2026Recompiled/saves",
+    "{home}/Library/Application Support/Blitz2026Recompiled/savestates",
+    "{home}/Library/Application Support/Blitz2026Recompiled/rules",
+    "{home}/Library/Application Support/Blitz2026Recompiled/*.json",
+    "{home}/Library/Application Support/Blitz2026Recompiled/*.bin",
+    "{local}/Blitz2026Recompiled/saves",
+    "{local}/Blitz2026Recompiled/savestates",
+    "{local}/Blitz2026Recompiled/rules",
+    "{local}/Blitz2026Recompiled/*.json",
+    "{local}/Blitz2026Recompiled/*.bin",
+    "{config}/Blitz2026Recompiled/saves",
+    "{config}/Blitz2026Recompiled/savestates",
+    "{config}/Blitz2026Recompiled/rules",
+    "{config}/Blitz2026Recompiled/*.json",
+    "{config}/Blitz2026Recompiled/*.bin"
+  ],
+  "folders": {
+    "logs": [
+      { "path": "{home}/Library/Application Support/Blitz2026Recompiled", "if": "{home}/Library/Application Support/Blitz2026Recompiled" },
+      { "path": "{local}/Blitz2026Recompiled", "if": "{local}/Blitz2026Recompiled" },
+      { "path": "{config}/Blitz2026Recompiled" }
+    ],
+    "app": [
+      { "path": "{home}/Library/Application Support/Blitz2026Recompiled", "if": "{home}/Library/Application Support/Blitz2026Recompiled" },
+      { "path": "{local}/Blitz2026Recompiled", "if": "{local}/Blitz2026Recompiled" },
+      { "path": "{config}/Blitz2026Recompiled" }
+    ]
+  },
+  "actions": [
+    { "id": "open_app_folder", "label": "Open the app folder", "help": "Saves, settings, logs and Add-Ons.", "open": "app" }
+  ]
+}

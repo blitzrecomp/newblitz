@@ -1,0 +1,574 @@
+# N64Recomp config for NFL Blitz 2000 (USA, v1.1).
+# Generate inputs first: make rom-import && make syms
+[input]
+entrypoint = 0x80000400
+# Paths are relative to this file.
+output_func_path = "build/RecompiledFuncs"
+symbols_file_path = "build/syms/blitz2000.syms.toml"
+rom_file_path = "build/baserom.z64"
+recomp_include = "#include \"recomp.h\"\n#include \"blitz_hooks.h\""
+
+[patches]
+# Implemented in src/game/threads.cpp: libultra semantics for thread control that the runtime
+# lacks (stopping/starting/re-prioritising other threads, yielding).
+ignored = ["blitz_osStopThread", "blitz_osStartThread", "blitz_osSetThreadPri", "blitz_osYieldThread",
+           "blitz_osDestroyThread",
+           # The game's debug printf, implemented in src/game/debug_print.cpp.
+           "blitz_debug_printf", "blitz_debug_printf_2",
+           # Controller Pak hardware layer, implemented in src/game/controller_pak.cpp.
+           "blitz_ContRamRead", "blitz_ContRamWrite", "blitz_PfsGetStatus", "blitz_osMotorInit",
+           # Audio interface status, implemented in src/game/ai.cpp.
+           "blitz_osAiGetStatus", "blitz_osAiGetLength"]
+
+# ovl_a_func_8032421C is no longer stubbed: its `jal 0x80377D20` calls the stadium blob that ovl_a
+# 0x803244AC DMAs there (the blob's code loads the stadium textures). The blobs are sections
+# ovl_stadium1-5 (tools/gen_syms.py), registered on DMA by src/game/overlays.cpp; the jal is
+# ambiguous between them, so N64Recomp resolves it through the runtime function lookup.
+stubs = []
+
+# Direct hardware accesses the runtime can't service (see tools/hazards.py, NOTES "Recompile hazards").
+# Each is replaced with a nop (0x00000000).
+
+# Pre-NMI (reset) path: SP_STATUS |= SET_HALT (0xA4040010). There is no RSP to halt on PC.
+[[patches.instruction]]
+func = "sched_thread"
+vram = 0x800015D4
+value = 0x00000000  # lw   $v0, 0x0($s0)
+[[patches.instruction]]
+func = "sched_thread"
+vram = 0x800015E0
+value = 0x00000000  # sw   $v0, 0x0($s0)
+[[patches.instruction]]
+func = "sched_thread"
+vram = 0x80001684
+value = 0x00000000  # lw   $v0, 0x0($s0)
+[[patches.instruction]]
+func = "sched_thread"
+vram = 0x80001690
+value = 0x00000000  # sw   $v0, 0x0($s0)
+
+# Brightness ramp stored to 0xA8000228 (cartridge domain 2: nothing there on N64, so the
+# hardware drops it). Probably arcade leftover. The rest of each function (fade state,
+# completion callback) still runs.
+[[patches.instruction]]
+func = "fade_tick_a8000228"
+vram = 0x8027BA68
+value = 0x00000000  # sw   $a1, 0x0($a3)
+[[patches.instruction]]
+func = "fade_set_a8000228"
+vram = 0x8027BC60
+value = 0x00000000  # sw   $a1, 0x0($a3)
+
+# Code segment registration (src/game/overlays.cpp): the runtime only learns which overlay is
+# resident when told the whole range, but the game loads overlays through dma_read in chunks.
+# M4 widescreen (src/game/widescreen.cpp): while Expand is on, gfx_build_frame fills the colour buffer
+# every frame with its own clear mode (0x8002B684), so the widened sides of 2D-only screens (legal,
+# team select) are black instead of keeping old frames. 0x8000F3D4 tests v1 = that mode.
+# M4 HUD and full-screen art in widescreen (src/game/gfx_ext.cpp): per-frame state reset, then just
+# before sprite_texrect emits each sprite, rect aspect/alignment commands. At 0x8001337C a1 is still
+# the sprite list node; at 0x80013DA4 t0 is the display-list cursor pointer (Gfx**).
+[[patches.hook]]
+func = "gfx_build_frame"
+before_vram = 0x8000F218
+text = "    blitz_gfx_frame_begin();"
+
+[[patches.hook]]
+func = "sprites_draw_fg"
+before_vram = 0x80013E54            # the pass is about to set the game's own full-screen scissor
+text = "    blitz_gfx_scissor_reset();"
+
+[[patches.hook]]
+func = "sprite_draw"
+before_vram = 0x8001337C
+text = "    blitz_sprite_node(rdram, (int32_t)ctx->r5); blitz_tall_sprite_begin(rdram, (int32_t)ctx->r5);"
+
+[[patches.hook]]
+func = "sprite_draw"
+before_vram = 0x80013DA4
+text = "    blitz_sprite_before_texrect(rdram, (int32_t)ctx->r8);"
+
+[[patches.hook]]
+func = "sprite_draw"
+before_vram = 0x80013DB0
+text = "    blitz_sprite_after_texrect(rdram);"
+
+[[patches.hook]]
+func = "gfx_build_frame"
+before_vram = 0x8000F3D4
+text = "    if (blitz_force_color_clear()) ctx->r3 = 1;"
+
+# Content packs (src/game/content_pack.cpp). At 0x80001748 dma_read has finished (both the loop exit
+# and the size-0 branch land here): s3 = ROM end, s2 = RDRAM end. When the transfer was ovl_b (ROM
+# ..0x129A90 -> RDRAM ..0x8033B5B0), its team table and rosters are fresh from ROM: apply the active
+# pack. ovl_b 0x802F5360 later copies the chosen teams into main's bss, so menus and gameplay agree.
+[[patches.hook]]
+func = "dma_read"
+before_vram = 0x80001748
+text = "    blitz_on_dma_done(rdram, (uint32_t)ctx->r19, (int32_t)ctx->r18);"
+
+[[patches.hook]]
+func = "dma_read"
+before_vram = 0x800016B8
+text = "    blitz_on_code_dma(rdram, (uint32_t)ctx->r4, (int32_t)ctx->r5, (uint32_t)ctx->r6);"
+
+# load_main_segment DMAs main directly with osPiStartDma (ROM 0x2FC20-0x93EC0 -> 0x80248F00).
+[[patches.hook]]
+func = "load_main_segment"
+before_vram = 0x80004970
+text = "    blitz_on_code_dma(rdram, 0x2FC20, (int32_t)0x80248F00, 0x642A0);"
+
+# The process system reads its threads' OSThread.state (process+0x40) expecting libultra values
+# (4 running, 8 waiting); the runtime stores its own enum there. Right after each such load,
+# replace the value with the libultra state (src/game/threads.cpp blitz_libultra_thread_state).
+[[patches.hook]]
+func = "process_dispatcher"
+before_vram = 0x80273FB0
+text = "    ctx->r2 = blitz_libultra_thread_state(rdram, (int32_t)(ctx->r5 + 0x30));"
+
+[[patches.hook]]
+func = "process_dispatcher"
+before_vram = 0x80274060
+text = "    ctx->r3 = blitz_libultra_thread_state(rdram, (int32_t)(ctx->r4 + 0x30));"
+
+[[patches.hook]]
+func = "func_80274500"
+before_vram = 0x802747A0
+text = "    ctx->r3 = blitz_libultra_thread_state(rdram, (int32_t)(ctx->r16 + 0x30));"
+
+[[patches.hook]]
+func = "func_80274500"
+before_vram = 0x802748AC
+text = "    ctx->r2 = blitz_libultra_thread_state(rdram, (int32_t)(ctx->r16 + 0x30));"
+
+[[patches.hook]]
+func = "func_802749A4"
+before_vram = 0x802749F0
+text = "    ctx->r2 = blitz_libultra_thread_state(rdram, (int32_t)(ctx->r16 + 0x30));"
+
+[[patches.hook]]
+func = "func_802749A4"
+before_vram = 0x80274B18
+text = "    ctx->r2 = blitz_libultra_thread_state(rdram, (int32_t)(ctx->r16 + 0x30));"
+
+[[patches.hook]]
+func = "process_kill"
+before_vram = 0x80274E60
+text = "    ctx->r3 = blitz_libultra_thread_state(rdram, (int32_t)(ctx->r16 + 0x30));"
+
+[[patches.hook]]
+func = "process_kill"
+before_vram = 0x80274F78
+text = "    ctx->r3 = blitz_libultra_thread_state(rdram, (int32_t)(ctx->r16 + 0x30));"
+
+[[patches.hook]]
+func = "func_80275058"
+before_vram = 0x802750F0
+text = "    ctx->r3 = blitz_libultra_thread_state(rdram, (int32_t)(ctx->r16 + 0x30));"
+
+[[patches.hook]]
+func = "func_80275058"
+before_vram = 0x8027526C
+text = "    ctx->r2 = blitz_libultra_thread_state(rdram, (int32_t)(ctx->r16 + 0x30));"
+
+# process_dispatcher marks a process that stayed WAITING through 100000 polls as RUNNING (4) so
+# it gets killed. That store would put a value the runtime doesn't know into its state field;
+# dropped (error path only; logged by the game via osSyncPrintf).
+[[patches.instruction]]
+func = "process_dispatcher"
+vram = 0x80274040
+value = 0x00000000  # sh   $v0, 0x40($v1)
+
+# Development counters (BLITZ_MONITOR prints them; cheap atomic increments).
+[[patches.hook]]
+func = "__scMain"
+before_vram = 0x80006178
+text = "    blitz_count(0);"
+[[patches.hook]]
+func = "__scHandleRetrace"
+before_vram = 0x80006244
+text = "    blitz_count(1);"
+[[patches.hook]]
+func = "audio_wait_retrace"
+before_vram = 0x8000AFC8
+text = "    blitz_count(2);"
+[[patches.hook]]
+func = "audio_wait_retrace"
+before_vram = 0x8000AFF0
+text = "    blitz_count(3);"
+[[patches.hook]]
+func = "audio_thread"
+before_vram = 0x8000B2A0
+text = "    blitz_count(4);"
+[[patches.hook]]
+func = "audio_thread"
+before_vram = 0x8000B280
+text = "    if (ctx->r2) blitz_count(5);"
+[[patches.hook]]
+func = "audio_thread"
+before_vram = 0x8000B318
+text = "    blitz_count(ctx->r3 ? 6 : 7);"
+[[patches.hook]]
+func = "n_alSynAddPlayer"
+before_vram = 0x8000D940
+text = "    blitz_log_add_player(rdram, (int32_t)ctx->r4);"
+# Graphics task capture for BLITZ_DUMP_RDRAM_AT (a0 = the OSTask about to be loaded).
+[[patches.hook]]
+func = "rsp_task_start"
+before_vram = 0x8000670C
+text = "    blitz_on_sp_task(rdram, (int32_t)ctx->r4); blitz_gfx_prologue(rdram, (int32_t)ctx->r4);"
+# Season standings and playoff seeding by host code: the NFL tiebreakers setting
+# (src/game/season_tiebreak.cpp) and, in the 2026 app, Advanced mode. No effect otherwise.
+[[patches.hook]]
+func = "ovl_b_func_802FEA74"
+before_vram = 0x802FEA74
+text = "    if (blitz_season_standings(rdram, (int32_t)ctx->r4, (int32_t)ctx->r5)) return;"
+[[patches.hook]]
+func = "ovl_b_func_802FEEC4"
+before_vram = 0x802FEEC4
+text = "    if (blitz_season_seeding(rdram)) return;"
+# Settings → General → Skip Intro Screens: the legal/logo and title screens' wait loops (ovl_b) see
+# their frame counter past the time limit, so each ends at once by the game's own timeout path (a
+# button press is only read after a minimum time, so faking one doesn't help).
+[[patches.hook]]
+func = "ovl_b_func_802F4AB0"
+before_vram = 0x802F4D84
+text = "    if (blitz_skip_intros()) ctx->r16 = 0x7FFFFF00;"
+[[patches.hook]]
+func = "ovl_b_func_802F4E78"
+before_vram = 0x802F5028
+text = "    if (blitz_skip_intros()) ctx->r16 = 0x7FFFFF00;"
+# Settings → Rules (src/game/house_rules.cpp): standing Blitz codes, set right after the VS screen's
+# code process clears them, before any input (main func_8024B784).
+[[patches.hook]]
+func = "func_8024B784"
+before_vram = 0x8024B880
+text = "    blitz_house_rules(rdram);"
+# Play Clock (Settings → Rules): a3 = the play select timer's start in seconds (9 in Q1, 5 after), on both
+# paths into the process create at 0x8032C4D0. Byte-identical in team+.
+[[patches.hook]]
+func = "ovl_a_func_8032B330"
+before_vram = 0x8032C4C0
+text = "    ctx->r7 = blitz_play_clock_seconds(rdram, (int32_t)ctx->r7);"
+# Realism → Extra Points Can Miss (house_rules.cpp): 0x8032CF10 is the free extra point's "KICK WAS GOOD!"
+# path; the game's own rare miss is the code at 0x8032CEEC (text, miss flag 0x80336B10, no point).
+# Byte-identical in team+.
+[[patches.hook]]
+func = "ovl_a_func_8032B330"
+before_vram = 0x8032CF10
+text = "    if (blitz_pat_missed(rdram)) goto L_8032CEEC;"
+# Settings → Rules → Smarter Play Calling (src/game/cpu_smart.cpp; build/analysis/cpu_logic.md). The CPU's
+# play call (ovl_a 803300E8): the offense's call code in s1 at its switch; the rolls that turn a 4th-down
+# try into a fake punt (rand(2)), fake a punt (rand(5), rand(10)) or fake a field goal (rand(100)), each
+# hooked just after rand returns; and the go-for-two decision (8033067C) at its entry. Byte-identical in team+.
+[[patches.hook]]
+func = "ovl_a_func_803300E8"
+before_vram = 0x80330300
+text = "    blitz_cpu_offense_call(rdram, ctx);"
+[[patches.hook]]
+func = "ovl_a_func_803300E8"
+before_vram = 0x803303FC
+text = "    blitz_cpu_fourth_down_fake(rdram, ctx);"
+[[patches.hook]]
+func = "ovl_a_func_803300E8"
+before_vram = 0x80330334
+text = "    blitz_cpu_punt_fake(rdram, ctx, 0);"
+[[patches.hook]]
+func = "ovl_a_func_803300E8"
+before_vram = 0x8033034C
+text = "    blitz_cpu_punt_fake(rdram, ctx, 1);"
+[[patches.hook]]
+func = "ovl_a_func_803300E8"
+before_vram = 0x80330388
+text = "    blitz_cpu_fg_fake(rdram, ctx);"
+[[patches.hook]]
+func = "ovl_a_func_8033067C"
+before_vram = 0x8033067C
+text = "    if (blitz_cpu_go_for_two(rdram, ctx)) return;"
+# Interpolation tags (src/game/gfx_ext.cpp): the camera's matrix group, renewed on cuts...
+# Tall view experiment (src/game/tall_view.cpp).
+[[patches.hook]]
+func = "gfx_build_frame"
+before_vram = 0x8000F21C
+text = "    blitz_tall_frame_begin(rdram); blitz_board_frame(rdram);"
+[[patches.hook]]
+func = "sprite_draw"
+before_vram = 0x80013DB8
+text = "    blitz_tall_sprite_end(rdram);"
+[[patches.hook]]
+func = "gfx_load_camera"
+before_vram = 0x8000F9E0
+text = "    blitz_tall_camera(rdram, (int32_t)ctx->r29 + 0x28); ctx->r3 = (gpr)blitz_tall_far((int32_t)ctx->r3);"
+[[patches.hook]]
+func = "gfx_load_camera"
+before_vram = 0x8000FA10
+text = "    ctx->r6 = (gpr)(int32_t)blitz_tall_fov((uint32_t)ctx->r6);"
+[[patches.hook]]
+func = "gfx_load_camera"
+before_vram = 0x8000FABC
+text = "    blitz_camera_tag(rdram, (int32_t)ctx->r19, (int32_t)ctx->r29 + 0x28);"
+[[patches.hook]]
+func = "func_8027139C"
+before_vram = 0x80271DDC
+text = "    blitz_player_tag(rdram, (int32_t)ctx->r16);"
+[[patches.hook]]
+func = "func_8027139C"
+before_vram = 0x802723E8
+text = "    blitz_player_tag(rdram, (int32_t)ctx->r16); blitz_mixed_body(rdram, (int32_t)ctx->r16);"
+[[patches.hook]]
+func = "func_8027139C"
+before_vram = 0x802726F8
+text = "    blitz_player_tag(rdram, (int32_t)ctx->r16); blitz_mixed_helmet(rdram, (int32_t)ctx->r16);"
+[[patches.hook]]
+func = "func_8027139C"
+before_vram = 0x8027283C
+text = "    blitz_player_tag(rdram, (int32_t)ctx->r16);"
+[[patches.hook]]
+func = "func_8027139C"
+before_vram = 0x80272E74
+text = "    blitz_player_tag(rdram, (int32_t)ctx->r16);"
+[[patches.hook]]
+func = "func_8027139C"
+before_vram = 0x80272FDC
+text = "    blitz_player_tag(rdram, (int32_t)ctx->r16);"
+[[patches.hook]]
+func = "func_80273084"
+before_vram = 0x80273468
+text = "    blitz_player_tag(rdram, (int32_t)ctx->r16);"
+# ...and back to the scene's group after the player passes.
+[[patches.hook]]
+func = "func_8027139C"
+before_vram = 0x8027304C
+text = "    blitz_player_tags_end(rdram);"
+[[patches.hook]]
+func = "func_80273084"
+before_vram = 0x802734FC
+text = "    blitz_player_tags_end(rdram);"
+# Skin tones (src/game/skin_tones.cpp): the game has a light (record skin 1) and a dark set (anything else)
+# of arm and face textures; values 2-4 are three tones in between. The render parameters (one 0x44 entry
+# per player at 0x802EB2E0) read the record's skin just before these xori: v0 = the raw value, a1 / a0 =
+# the entry. The hook notes the tone and returns the base set the game should use (1 light, 0 dark).
+[[patches.hook]]
+func = "func_80255180"
+before_vram = 0x802551FC
+text = "    ctx->r2 = (gpr)(int32_t)blitz_skin_param(rdram, (int32_t)ctx->r5, (int32_t)ctx->r2);"
+[[patches.hook]]
+func = "func_80255718"
+before_vram = 0x802557B0
+text = "    ctx->r2 = (gpr)(int32_t)blitz_skin_param(rdram, (int32_t)ctx->r4, (int32_t)ctx->r2);"
+# The skin pass: v1 = the player's tile pair (0 light, 2 dark), s0 = its entry, a1 = the display-list
+# cursor. For an in-between tone the hook loads that tone's palettes, points tiles 4/5 at the base set and
+# returns 4; the arm then draws with tile 4 and the face with tile 5.
+[[patches.hook]]
+func = "func_8027139C"
+before_vram = 0x80271E24
+text = "    blitz_skin_pass(rdram, ctx);"
+# The bare head after a knocked-off helmet: t1 = segment 0xD for the RGBA16 head at +0x840 (hed_sal or
+# hed_rob); an in-between tone gets a tinted copy.
+[[patches.hook]]
+func = "func_8027139C"
+before_vram = 0x80272904
+text = "    blitz_skin_bare_head(rdram, ctx);"
+# Settings → General → Skip Rumble Pak Screen: ovl_b 802F8D24 only draws "RUMBLE PAK / PLEASE INSERT
+# RUMBLE PAKS INTO CONTROLLERS NOW" and waits (Arcade and Tournament, between Controller Select and team
+# select). It probes nothing; team select, called next, clears the screen and sets rumble up itself,
+# and its own 40-frame entry delay keeps the A from Controller Select from carrying over.
+[[patches.hook]]
+func = "ovl_b_func_802F8D24"
+before_vram = 0x802F8D24
+text = "    if (blitz_skip_rumble_screen()) return;"
+# <app folder>/plays.log (src/game/play_log.cpp): ovl_a 0x80301E0C is where every play-outcome path of
+# the game loop joins (the label L_80301E0C), once per play including kickoffs and extra points.
+# tools/teamplus.py renames the function for team+ (tp_game_process; same address and word there).
+# Settings → Rules → Realism (src/game/house_rules.cpp) adjusts the next play's spot and first-down
+# marker here first, so plays.log and everything after see the result.
+[[patches.hook]]
+func = "ovl_a_func_802FEF08"
+before_vram = 0x80301E0C
+text = "    blitz_rules_play_ended(rdram); blitz_play_ended(rdram);"
+# Realism → Overtime (house_rules.cpp): at 0x80302128 the end of the 4th quarter or an overtime with the
+# score tied compares the quarter (v1) with 6, the 3rd overtime; equal ends the game as a tie.
+[[patches.hook]]
+func = "ovl_a_func_802FEF08"
+before_vram = 0x80302128
+text = "    if (blitz_rules_end_tied_game(rdram, (int32_t)ctx->r3)) ctx->r2 = ctx->r3;"
+# Receiver Buttons (src/game/receiver_targets.cpp): a human quarterback's pass goes to the receiver the stick picks
+# (func_802FBED0 returns his index, stored at QB+0xB64; the throw process then flies to him). At 0x802F1B78 v0 is that
+# pick and s2 the quarterback: a receiver button's press puts its own receiver there.
+[[patches.hook]]
+func = "ovl_a_func_802F1574"
+before_vram = 0x802F1B78
+text = "    ctx->r2 = (int32_t)blitz_pass_target(rdram, (int32_t)ctx->r18, (int32_t)ctx->r2);"
+# Resume an interrupted game (src/game/checkpoint.cpp; Settings → General → Resume Interrupted Games).
+# Same code at these addresses in team+ (tools/teamplus.py renames the game loop to tp_game_process).
+[[patches.hook]]
+func = "ovl_a_func_802FEF08"
+before_vram = 0x802FF684
+text = "    blitz_checkpoint_restore(rdram);"
+[[patches.hook]]
+func = "ovl_a_func_802FEF08"
+before_vram = 0x802FF8E8
+text = "    blitz_checkpoint_save(rdram);"
+[[patches.hook]]
+func = "ovl_a_func_802FEF08"
+before_vram = 0x80302138
+text = "    blitz_checkpoint_clear(rdram);"
+[[patches.hook]]
+func = "ovl_a_func_80303644"
+before_vram = 0x80303690
+text = "    blitz_checkpoint_clock(rdram, ctx);"
+# Pause menu → QUIT GAME → YES: "SAVE THIS GAME?" (main func_80262D90; same in team+).
+[[patches.hook]]
+func = "func_80262D90"
+before_vram = 0x802634DC
+text = "    blitz_checkpoint_pause_quit(rdram, ctx);"
+# Instant Replay: a REPLAY row in the pause menu (src/game/replay.cpp, docs/REPLAY.md; main func_80262D90, same in team+).
+# Four rows, not three: the row loop's count, and the cursor's wrap at both ends. QUIT GAME's row goes from 2 to 3; row 2,
+# REPLAY, then falls through the code's dispatch to the j at 0x80263308, which is where its press is noticed.
+[[patches.instruction]]
+func = "func_80262D90"
+vram = 0x80262F94
+value = 0x2AC20004  # slti $v0, $s6, 4 (was 3)
+[[patches.instruction]]
+func = "func_80262D90"
+vram = 0x8026317C
+value = 0x24130003  # addiu $s3, $zero, 3 (was 2)
+[[patches.instruction]]
+func = "func_80262D90"
+vram = 0x802631A8
+value = 0x2A620004  # slti $v0, $s3, 4 (was 3)
+[[patches.instruction]]
+func = "func_80262D90"
+vram = 0x802632EC
+value = 0x24020003  # addiu $v0, $zero, 3 (was 2)
+[[patches.hook]]
+func = "func_80262D90"
+before_vram = 0x80262EDC
+text = "    blitz_replay_pause_setup(rdram);"
+[[patches.hook]]
+func = "func_80262D90"
+before_vram = 0x80262F4C
+text = "    blitz_replay_pause_label(rdram, ctx);"
+[[patches.hook]]
+func = "func_80262D90"
+before_vram = 0x80262F54
+text = "    blitz_replay_pause_label_done(rdram);"
+[[patches.hook]]
+func = "func_80262D90"
+before_vram = 0x80263220
+text = "    blitz_replay_pause_grey(rdram, ctx);"
+[[patches.hook]]
+func = "func_80262D90"
+before_vram = 0x80263308
+text = "    blitz_replay_pause_item();"
+# VS screen: "RESUMING ..." under the helmets when a saved game between these teams will be resumed.
+[[patches.hook]]
+func = "func_8024C264"
+before_vram = 0x8024C8E4
+text = "    blitz_checkpoint_vs(rdram, ctx);"
+# Uniform picker (src/game/uniform_picker.cpp; Settings → Rules → Uniform Picker): the sets picked at team select
+# replace the clash rule's, just before func_80256850(team0, set0, team1, set1). Same in vanilla and team+.
+[[patches.hook]]
+func = "ovl_a_func_80302ED4"
+before_vram = 0x80302F40
+text = "    blitz_uniform_kickoff(ctx);"
+# Choose your CPU opponent (src/game/opponent_select.cpp; Settings → Rules → Choose CPU Opponent): the
+# CPU side's team select process, parked until a human joins, is let in with the player's controller.
+# Same addresses and words in vanilla and team+.
+[[patches.hook]]
+func = "ovl_b_func_802F8594"
+before_vram = 0x802F8594
+text = "    blitz_opp_reset(rdram); blitz_e32_team_select(rdram);"
+[[patches.hook]]
+func = "ovl_b_func_802F90B8"
+before_vram = 0x802F9174
+text = "    if (blitz_opp_wake(rdram, (int32_t)ctx->r21)) ctx->r16 = 0xF;"
+[[patches.hook]]
+func = "ovl_b_func_802F90B8"
+before_vram = 0x802F91F8
+text = "    blitz_opp_setup(rdram, (int32_t)ctx->r21, &ctx->r23, &ctx->r22); blitz_uniform_reset((int32_t)ctx->r21);"
+[[patches.hook]]
+func = "ovl_b_func_802F90B8"
+before_vram = 0x802F9A10
+text = "    blitz_opp_uniform(rdram, ctx); blitz_uniform_picker(rdram, ctx);"
+[[patches.hook]]
+func = "ovl_b_func_802F90B8"
+before_vram = 0x802F9A18
+text = "    blitz_opp_input(ctx);"
+[[patches.hook]]
+func = "ovl_b_func_802F90B8"
+before_vram = 0x802F9A28
+text = "    blitz_opp_input(ctx);"
+[[patches.hook]]
+func = "ovl_b_func_802F90B8"
+before_vram = 0x802F9A34
+text = "    blitz_opp_input(ctx);"
+[[patches.hook]]
+func = "ovl_b_func_802F90B8"
+before_vram = 0x802F9CD0
+text = "    blitz_opp_label_off(rdram, ctx);"
+[[patches.hook]]
+func = "ovl_b_func_802F5868"
+before_vram = 0x802F591C
+text = "    if (blitz_opp_panel_off((int32_t)ctx->r17)) ctx->r2 = 1;"
+[[patches.hook]]
+func = "ovl_b_func_802F8594"
+before_vram = 0x802F89CC
+text = "    if (blitz_opp_hold(rdram) || (ctx->r2 == 0 && blitz_crew_wait(rdram))) ctx->r2 = 1;"
+[[patches.hook]]
+func = "ovl_b_func_802F8594"
+before_vram = 0x802F8BC8
+text = "    blitz_opp_restore(rdram);"
+# Blitz Party tournaments (src/game/tournament.cpp): the Tournament menu takes a tournament made in
+# Settings → Party or the autosave; after a game is recorded, the tournament is saved. Same in team+.
+[[patches.hook]]
+func = "func_80257EB0"
+before_vram = 0x80257EB0
+text = "    blitz_tournament_menu(rdram);"
+[[patches.hook]]
+func = "ovl_a_func_803033A4"
+before_vram = 0x80303434
+text = "    blitz_tournament_recorded(rdram);"
+
+# Save states (src/game/savestate.cpp): the process dispatcher's loop head, once a frame.
+[[patches.hook]]
+func = "process_dispatcher"
+before_vram = 0x80273D7C
+text = "    blitz_replay_gate(rdram); blitz_savestate_tick(rdram, ctx);"
+
+# Button icons for each player's own controller (src/game/button_glyphs.cpp). Every icon is a sprite from
+# func_8027785C (a0 = asset id). func_80260620 reads a controller's buttons for an action (a0 = the
+# controller) just before func_80260768 draws that controller's row of icons (a0 loaded from the table at
+# 0x8028BEFC at 0x802607EC): the play-select help and Controller Setup. Every other icon (menu footers)
+# goes to the menu owner. Same code in team+.
+[[patches.hook]]
+func = "func_80260620"
+before_vram = 0x80260624
+text = "    blitz_glyph_owner((int32_t)ctx->r4);"
+[[patches.hook]]
+func = "func_80260768"
+before_vram = 0x802607F0
+text = "    ctx->r4 = (gpr)blitz_glyph_id(rdram, (int32_t)ctx->r4, 1);"
+[[patches.hook]]
+func = "func_8027785C"
+before_vram = 0x80277868
+text = "    ctx->r4 = (gpr)blitz_glyph_id(rdram, (int32_t)ctx->r4, 0);"
+[[patches.hook]]
+func = "func_80014B54"
+before_vram = 0x80014B54
+text = "    blitz_loader_enter((uint32_t)ctx->r4, (uint32_t)ctx->r31);"
+[[patches.hook]]
+func = "func_80014B54"
+before_vram = 0x80014B80
+text = "    blitz_loader_opened(rdram, (uint32_t)ctx->r2);"
+[[patches.hook]]
+func = "func_80014B54"
+before_vram = 0x80014CA4
+text = "    blitz_board_image((uint32_t)ctx->r18);"
+[[patches.hook]]
+func = "func_80014AB4"
+before_vram = 0x80014AB4
+text = "    blitz_loader_enter((uint32_t)ctx->r4, (uint32_t)ctx->r31);"
+[[patches.hook]]
+func = "func_80014AB4"
+before_vram = 0x80014AD8
+text = "    blitz_loader_opened(rdram, (uint32_t)ctx->r2);"

@@ -1,0 +1,46 @@
+diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
+index 50b2adc..fc46a15 100644
+--- a/src/hle/rt64_state.cpp
++++ b/src/hle/rt64_state.cpp
+@@ -6,7 +6,7 @@
+ 
+ #include <atomic>
+ #include <chrono>
+-namespace RT64 { extern std::atomic<uint64_t> statGpuWaitMs, statRamPasses, statRamSkips; extern std::atomic<bool> liteNoRenderToRAM; }
++namespace RT64 { extern std::atomic<uint64_t> statGpuWaitMs, statRamPasses, statRamSkips; extern std::atomic<int> renderToRAMMode; }
+ 
+ #include <cassert>
+ #include <cinttypes>
+@@ -1141,7 +1141,11 @@ namespace RT64 {
+         });
+ 
+         // Potato Mode: the second drawing of a frame, into the N64's RAM, only when this frame's textures read a framebuffer.
+-        if (renderToRDRAM && liteNoRenderToRAM.load()) {
++        const int ramMode = renderToRAMMode.load();
++        if (renderToRDRAM && (ramMode == 2)) {
++            renderToRDRAM = false;
++        }
++        else if (renderToRDRAM && (ramMode == 0)) {
+             bool readsFramebuffer = false;
+             for (uint32_t f = 0; (f < workload.fbPairCount) && !readsFramebuffer; f++) {
+                 readsFramebuffer = workload.fbPairs[f].syncRequired;
+diff --git a/src/render/rt64_raster_shader_cache.cpp b/src/render/rt64_raster_shader_cache.cpp
+index 00cfe51..b2fd4cd 100644
+--- a/src/render/rt64_raster_shader_cache.cpp
++++ b/src/render/rt64_raster_shader_cache.cpp
+@@ -12,11 +12,12 @@
+ namespace RT64 {
+     // Where a weak device's time goes (Potato Mode's log, src/main/fps_counter.cpp).
+     std::atomic<uint64_t> statQueued{0}, statCompiled{0}, statCompileMs{0}, statDrawsUber{0}, statDrawsFast{0}, statGpuWaitMs{0}, statTextureSlots{0}, statFrameGpuMs{0}, statFrameWaitMs{0}, statRamPasses{0}, statRamSkips{0};
+-    std::atomic<bool> liteNoRenderToRAM{false};
++    std::atomic<int> renderToRAMMode{1};
+ }
+ 
+-// Potato Mode, and live with "RT64 ram 0|1" (dev_input.cpp): the second drawing of each frame, into the N64's own RAM.
+-extern "C" void blitz_rt64_render_to_ram(int on) { RT64::liteNoRenderToRAM = on == 0; }
++// Settings → Frame Copy in Potato Mode, and live with "RT64 ram 0|1|2" (dev_input.cpp): the second drawing of each frame, into
++// the N64's own RAM. 0 when a texture reads a framebuffer, 1 always, 2 never.
++extern "C" void blitz_rt64_render_to_ram(int mode) { RT64::renderToRAMMode = mode; }
+ 
+ extern "C" void blitz_rt64_stats(uint64_t *queued, uint64_t *compiled, uint64_t *compileMs, uint64_t *uber, uint64_t *fast, uint64_t *gpuWaitMs, uint64_t *textureSlots, uint64_t *frameGpuMs, uint64_t *frameWaitMs, uint64_t *ramPasses, uint64_t *ramSkips) {
+     *queued = RT64::statQueued.load();

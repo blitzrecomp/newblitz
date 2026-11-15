@@ -1,0 +1,79 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 79dfc38..1b7ddcd 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -65,13 +65,25 @@ else()
+     endif()
+ endif()
+ 
++# Cross-compiling (BlitzRecomp: Windows built on a Mac): the shader compiler runs on the build host.
++if (RT64_HOST_DXC)
++    set (DXC ${RT64_HOST_DXC})
++endif()
++
+ set(ZSTD_LEGACY_SUPPORT OFF)
+ set(ZSTD_BUILD_STATIC ON)
+ set(ZSTD_BUILD_SHARED OFF)
+ 
+-add_subdirectory(src/tools/file_to_c)
++if (RT64_HOST_FILE_TO_C)  # cross-compiling: the build host's own file_to_c
++    add_executable(file_to_c IMPORTED GLOBAL)
++    set_target_properties(file_to_c PROPERTIES IMPORTED_LOCATION ${RT64_HOST_FILE_TO_C})
++else()
++    add_subdirectory(src/tools/file_to_c)
++endif()
+ add_subdirectory(src/contrib/re-spirv)
+-add_subdirectory(src/contrib/nativefiledialog-extended)
++if (NOT RT64_NO_FILE_DIALOG)  # BlitzRecomp: consoles (PS5 homebrew) have no native file dialog
++    add_subdirectory(src/contrib/nativefiledialog-extended)
++endif()
+ add_subdirectory(src/contrib/zstd/build/cmake)
+ 
+ if (CMAKE_SYSTEM_NAME MATCHES "Linux" AND RT64_SDL_WINDOW_VULKAN)
+@@ -441,7 +453,11 @@ set_target_properties(rt64 PROPERTIES PREFIX "")
+ 
+ # Add common libraries.
+ target_link_libraries(rt64 re-spirv)
+-target_link_libraries(rt64 nfd)
++if (NOT RT64_NO_FILE_DIALOG)
++    target_link_libraries(rt64 nfd)
++else()
++    target_compile_definitions(rt64 PRIVATE RT64_NO_FILE_DIALOG)
++endif()
+ target_link_libraries(rt64 libzstd_static)
+ target_link_libraries(rt64 plume)
+ 
+diff --git a/src/gui/rt64_file_dialog.cpp b/src/gui/rt64_file_dialog.cpp
+index 72faede..f95c6c2 100644
+--- a/src/gui/rt64_file_dialog.cpp
++++ b/src/gui/rt64_file_dialog.cpp
+@@ -6,8 +6,21 @@
+ 
+ #include <cassert>
+ 
++#ifndef RT64_NO_FILE_DIALOG
+ #include <nfd.h>
++#endif
+ 
++#ifdef RT64_NO_FILE_DIALOG
++// No native file dialog on this platform (BlitzRecomp: PS5 homebrew): every dialog is cancelled.
++namespace RT64 {
++    std::atomic<bool> FileDialog::isOpen = false;
++    void FileDialog::initialize() {}
++    void FileDialog::finish() {}
++    std::filesystem::path FileDialog::getDirectoryPath() { return {}; }
++    std::filesystem::path FileDialog::getOpenFilename(const std::vector<FileFilter> &) { return {}; }
++    std::filesystem::path FileDialog::getSaveFilename(const std::vector<FileFilter> &) { return {}; }
++};
++#else
+ namespace RT64 {
+     // FileDialog
+ 
+@@ -76,4 +89,5 @@ namespace RT64 {
+         isOpen = false;
+         return path;
+     }
+-};
+\ No newline at end of file
++};
++#endif

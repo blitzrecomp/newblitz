@@ -1,0 +1,90 @@
+# Daily rosters for New Blitz, from open data (nflverse; tools/roster_nflverse.py), at 6:17 a.m. Pacific: nflverse's
+# files refresh around 06:00 UTC, so the morning run has the overnight moves. Off the hour because GitHub delays
+# on-the-hour schedules (7:00 started around noon, 2026-10-26 to 28). GitHub's schedules are UTC, so it's scheduled at
+# both 13:17 and 14:17 UTC and only the one that's 6:17 in Los Angeles goes on (PDT and PST alike).
+# Each club's slots in a week's checkpoint freeze at its kickoff. A day with no changes commits nothing.
+# The ESPN flow is the backup: rosters-espn.yml (run by hand), tag espn-flow.
+name: Rosters
+on:
+  schedule:
+    - cron: "17 13 * * *"
+    - cron: "17 14 * * *"
+  workflow_dispatch:
+    inputs:
+      week:
+        description: "Regular-season week number (blank: the week in play)"
+        required: false
+permissions:
+  contents: write
+concurrency: rosters
+jobs:
+  daily:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 6:17 a.m. in Los Angeles?
+        id: when
+        # 13:17 UTC is 6:17 a.m. under daylight time (UTC-7), 14:17 under standard time (UTC-8). Each schedule goes on
+        # only in its season, however late GitHub starts it.
+        run: |
+          offset=$(TZ=America/Los_Angeles date +%z)
+          go=yes
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            case "${{ github.event.schedule }}|$offset" in
+              "17 13 * * *|-0700"|"17 14 * * *|-0800") go=yes ;;
+              *) go=no; echo "Los Angeles is at $offset: the other schedule runs today's job." ;;
+            esac
+          fi
+          echo "go=$go" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1, pinned to its commit
+        if: steps.when.outputs.go == 'yes'
+      - name: Rosters
+        if: steps.when.outputs.go == 'yes'
+        run: python3 tools/roster_season.py week --dir . --source nflverse ${{ inputs.week && format('--week {0}', inputs.week) || '' }}
+      - name: Publish
+        if: steps.when.outputs.go == 'yes'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add players.json lineups psp manifest.json
+          if git diff --cached --quiet; then echo "No changes today."; exit 0; fi
+          latest=$(python3 -c 'import json; print(json.load(open("manifest.json"))["latest"])')
+          git commit -q -m "Rosters: $latest ($(date -u +%F\ %H:%MZ), nflverse)" && git push
+      - name: Upload to the post office
+        if: steps.when.outputs.go == 'yes'
+        env:
+          URL: ${{ vars.HUB_UPLOAD_URL }}
+          SECRET: ${{ secrets.HUB_UPLOAD_SECRET }}
+        # Every device follows the post office (tools/rosters_hub_worker): the files, the manifest last, so a device
+        # never reads a manifest naming files that haven't arrived. psp/pack.txt is the PSP's copy (docs/PSP_PORT.md §6).
+        run: |
+          [ -n "$URL" ] || { echo "no HUB_UPLOAD_URL: skipped"; exit 0; }
+          # A refused PSP pack must not hold back everyone else's rosters: it's a warning, the PSP keeps its saved pack
+          # (its SHA-1 check fails on the old one). Any other file stops the step before the manifest.
+          for f in players.json lineups/*.json psp/*.txt manifest.json; do
+            [ -f "$f" ] || continue
+            if ! curl -fsS --retry 3 -X PUT -H "Authorization: Bearer $SECRET" --data-binary "@$f" "$URL/$f" > /dev/null; then
+              case "$f" in
+                psp/*) echo "::warning::$f wasn't taken by the post office: the PSP keeps its saved rosters"; continue ;;
+              esac
+              exit 1
+            fi
+            echo "uploaded $f"
+          done
+      - name: Upload to the public season server
+        if: steps.when.outputs.go == 'yes'
+        # The public New Blitz's weekly rosters (the season server, tools/rosters_hub_worker/wrangler.public.toml, on the
+        # public project's own account; served at /paks/rosters/ while its catalog allows). The same files, the manifest
+        # last; no PSP pack. A failure here is a warning: it never holds back the private post office above.
+        continue-on-error: true
+        env:
+          URL: ${{ vars.PUBLIC_UPLOAD_URL }}
+          SECRET: ${{ secrets.PUBLIC_UPLOAD_SECRET }}
+        run: |
+          [ -n "$URL" ] || { echo "no PUBLIC_UPLOAD_URL: skipped"; exit 0; }
+          for f in players.json lineups/*.json manifest.json; do
+            [ -f "$f" ] || continue
+            curl -fsS --retry 3 -X PUT -H "Authorization: Bearer $SECRET" --data-binary "@$f" "$URL/$f" > /dev/null \
+              || { echo "::warning::the public season server didn't take $f"; exit 1; }
+            echo "uploaded $f"
+          done

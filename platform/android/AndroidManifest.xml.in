@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The Android app (docs/ANDROID.md): one landscape game activity (SDL's SDLActivity, subclassed as BlitzActivity),
+     Vulkan required, controllers and touch. tools/android/build_apk.sh fills versionCode and the SDK levels. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="@BLITZ_ANDROID_PACKAGE@"
+    android:versionCode="@BLITZ_BUILD@"
+    android:versionName="@BLITZ_VERSION@"
+    android:installLocation="auto">
+
+    <uses-feature android:glEsVersion="0x00020000" />
+    <uses-feature android:name="android.hardware.vulkan.version" android:version="0x401000" android:required="true" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <uses-feature android:name="android.hardware.gamepad" android:required="false" />
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+    <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
+    <uses-feature android:name="android.software.leanback" android:required="false" />
+
+    <!-- Weekly rosters and headshots; Phone Pads and the Roster Room on the local network -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.REORDER_TASKS" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+    <!-- Plain HTTP is allowed for a rosters hub or Phone Pads on the local network (docs/PLATFORMS.md).
+         HWUI is off here so Potato Mode can go without it; the game's windows turn it back on everywhere else (BlitzActivity.hwui). -->
+    <application android:label="@BLITZ_BUNDLE_NAME@"
+        android:icon="@mipmap/ic_launcher"
+        android:allowBackup="true"
+        android:extractNativeLibs="false"
+        android:isGame="true"
+        android:appCategory="game"
+        android:hardwareAccelerated="false"
+        android:requestLegacyExternalStorage="false"
+        android:usesCleartextTraffic="true"
+        android:enableOnBackInvokedCallback="false"
+        android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+
+        <activity android:name="com.blitzrecomp.newblitz.BlitzActivity"
+            android:label="@BLITZ_BUNDLE_NAME@"
+            android:exported="true"
+            android:alwaysRetainTaskState="true"
+            android:launchMode="singleInstance"
+            android:screenOrientation="sensorLandscape"
+            android:resizeableActivity="true"
+            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation|density"
+            android:preferMinimalPostProcessing="true">
+            <!-- Open a ROM, a content pack or an add-on .zip from the Files app -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" android:mimeType="application/octet-stream" />
+                <data android:scheme="content" android:mimeType="application/zip" />
+            </intent-filter>
+        </activity>
+        <activity android:name="com.blitzrecomp.newblitz.BlitzSecondScreen"
+            android:exported="false"
+            android:launchMode="standard"
+            android:screenOrientation="sensorLandscape"
+            android:resizeableActivity="true"
+            android:excludeFromRecents="true"
+            android:noHistory="false"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|density"
+            android:theme="@android:style/Theme.NoTitleBar.Fullscreen" />
+        <!-- GammaOS: a see-through activity that closes at once; the game resuming after it finishes Android's boot, which
+             turns input on (BlitzNudge.java). -->
+        <activity android:name="com.blitzrecomp.newblitz.BlitzNudge"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:noHistory="true" />
+        <activity android:name="com.blitzrecomp.newblitz.BlitzRomFirst"
+            android:label="@BLITZ_BUNDLE_NAME@"
+            android:exported="false" />
+        <activity android:name="com.blitzrecomp.newblitz.BlitzLauncher"
+            android:label="@BLITZ_BUNDLE_NAME@"
+            android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <provider android:name="com.blitzrecomp.newblitz.BlitzFiles" android:authorities="@BLITZ_ANDROID_PACKAGE@.files"
+            android:exported="false" android:grantUriPermissions="true" />
+        <!-- Test builds: remote testing (BlitzRemote.java). Its own process, so it outlives a crash of the game. -->
+        <service android:name="com.blitzrecomp.newblitz.BlitzRemote" android:process=":remote" android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="remote testing" />
+        </service>
+        <service android:name="com.blitzrecomp.newblitz.BlitzRemoteLocal" android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="remote testing" />
+        </service>
+    </application>
+</manifest>

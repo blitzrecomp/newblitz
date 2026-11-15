@@ -1,0 +1,29 @@
+diff --git a/ultramodern/include/ultramodern/renderer_context.hpp b/ultramodern/include/ultramodern/renderer_context.hpp
+index e6b3168..c7aaaba 100644
+--- a/ultramodern/include/ultramodern/renderer_context.hpp
++++ b/ultramodern/include/ultramodern/renderer_context.hpp
+@@ -45,6 +45,9 @@ namespace ultramodern {
+             unsigned int VI_Y_SCALE_REG;
+         };
+         ViRegs* get_vi_regs();
++        // The VI origin the VI thread itself has just set (get_vi_regs is the renderer's copy, updated on its own thread a
++        // moment later). For the VI callback: a frame counter that reads it sees every swap on the VI it happens.
++        uint32_t get_vi_origin_now();
+ 
+ #if defined(_WIN32)
+         // Native HWND handle to the target window.
+diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
+index 36ca9ab..661fba1 100644
+--- a/ultramodern/src/events.cpp
++++ b/ultramodern/src/events.cpp
+@@ -141,6 +141,10 @@ ultramodern::renderer::ViRegs* ultramodern::renderer::get_vi_regs() {
+     return &events_context.vi.update_screen_regs;
+ }
+ 
++uint32_t ultramodern::renderer::get_vi_origin_now() {
++    return events_context.vi.regs.VI_ORIGIN_REG;
++}
++
+ extern "C" void osSetEventMesg(RDRAM_ARG OSEvent event_id, PTR(OSMesgQueue) mq_, OSMesg msg) {
+     std::lock_guard lock{ events_context.message_mutex };
+ 

@@ -1,0 +1,24 @@
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index 18daf6b..a6aca3f 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -4606,7 +4606,9 @@ namespace plume {
+         // Vulkan counts a stage's sampled images over every entry of a pipeline layout's sets (VkPipelineLayoutCreateInfo), whether
+         // a shader reads them or not. So on a limit of 256 one array bound for both 2D and 1D views is legal only up to about 126,
+         // short of the 151 Blitz has been measured to load in a frame, which is why the two arrays get their own sizes. They share
+-        // what's left after the 3 sampled images in the other sets, plus one spare, with room for far more 2D than raw TMEM.
++        // what's left after the 3 sampled images in the other sets, plus one spare, with room for far more 2D than raw TMEM. Layouts
++        // use every stage, so the stage's total also counts what isn't a sampled image: 49 entries in RT64's raster layout (47 in
++        // its common set, FbParams and one colour attachment).
+         depthClampSupported = deviceFeatures.features.depthClamp;
+         {
+             const VkPhysicalDeviceLimits &limits = physicalDeviceProperties.limits;
+@@ -4614,7 +4616,7 @@ namespace plume {
+ 
+             const char *texmode = getenv("BLITZ_RECIPE_TEXMODE");
+             const bool compactAsked = (texmode != nullptr) && (strcmp(texmode, "compact") == 0);
+-            const uint32_t stageResources = (limits.maxPerStageResources > 8) ? (limits.maxPerStageResources - 8) : 0;
++            const uint32_t stageResources = (limits.maxPerStageResources > 49) ? (limits.maxPerStageResources - 49) : 0;
+             const uint32_t imageLimit = std::min({ limits.maxPerStageDescriptorSampledImages, limits.maxDescriptorSetSampledImages, stageResources });
+             const uint32_t imageBudget = (imageLimit > 4) ? (imageLimit - 4) : 0;
+             if (capabilities.smallTextureLimit && !rayTracingSupported && compactAsked && (imageBudget >= 64) && deviceFeatures.features.shaderSampledImageArrayDynamicIndexing) {

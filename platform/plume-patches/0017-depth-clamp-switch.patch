@@ -1,0 +1,43 @@
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index a6aca3f..95fc70b 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -1746,7 +1746,8 @@ namespace plume {
+         VkPipelineRasterizationStateCreateInfo rasterization = {};
+         rasterization.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+         // Compact textures keep to the spec here too: no clamp from a driver without the feature. Legacy stays what has been measured.
+-        rasterization.depthClampEnable = !desc.depthClipEnabled && (device->depthClampSupported || (device->capabilities.compactTextures2D == 0));
++        // Recipe depthclamp=spec|legacy picks either on its own, so a texmode=compact run can be told apart from this.
++        rasterization.depthClampEnable = !desc.depthClipEnabled && (device->depthClampSupported || !device->depthClampSpec);
+         rasterization.rasterizerDiscardEnable = VK_FALSE;
+         rasterization.polygonMode = VK_POLYGON_MODE_FILL;
+         rasterization.lineWidth = 1.0f;
+@@ -4624,10 +4625,14 @@ namespace plume {
+                 capabilities.compactTextures2D = imageBudget - capabilities.compactTexturesTMEM;
+             }
+ 
+-            fprintf(stderr, "[vulkan] textures: mode %s (asked %s), small limit %d, arrays %u 2D and %u TMEM. Per stage: %u resources, %u storage images, %u storage buffers. Depth clamp %d\n",
++            const char *clamp = getenv("BLITZ_RECIPE_DEPTHCLAMP");
++            depthClampSpec = (clamp != nullptr) ? (strcmp(clamp, "spec") == 0) : (capabilities.compactTextures2D > 0);
++            const char *evictFix = getenv("BLITZ_RECIPE_EVICTFIX");
++            fprintf(stderr, "[vulkan] textures: mode %s (asked %s), small limit %d, arrays %u 2D and %u TMEM. Per stage: %u resources, %u storage images, %u storage buffers. Depth clamp %d, without it %s. Eviction fix %s\n",
+                 (capabilities.compactTextures2D > 0) ? "compact" : "legacy", (texmode != nullptr) ? texmode : "nothing", capabilities.smallTextureLimit,
+                 capabilities.compactTextures2D, capabilities.compactTexturesTMEM, limits.maxPerStageResources, limits.maxPerStageDescriptorStorageImages,
+-                limits.maxPerStageDescriptorStorageBuffers, deviceFeatures.features.depthClamp);
++                limits.maxPerStageDescriptorStorageBuffers, deviceFeatures.features.depthClamp, depthClampSpec ? "spec" : "legacy",
++                !capabilities.smallTextureLimit ? "not needed" : ((evictFix != nullptr) && (strcmp(evictFix, "0") == 0)) ? "off" : "on");
+         }
+ 
+         capabilities.bufferDeviceAddress = bufferDeviceAddressSupported;
+diff --git a/plume_vulkan.h b/plume_vulkan.h
+index 73d3db1..30cb35c 100644
+--- a/plume_vulkan.h
++++ b/plume_vulkan.h
+@@ -427,6 +427,7 @@ namespace plume {
+         bool loadStoreOpNoneSupported = false;
+         bool nullDescriptorSupported = false;
+         bool depthClampSupported = false;
++        bool depthClampSpec = false;  // no depth clamp from a driver without the feature (by recipe, or with compact textures)
+ 
+         VulkanDevice(VulkanInterface *renderInterface, const std::string &preferredDeviceName);
+         ~VulkanDevice() override;

@@ -1,0 +1,173 @@
+diff --git a/ultramodern/include/ultramodern/ultramodern.hpp b/ultramodern/include/ultramodern/ultramodern.hpp
+--- a/ultramodern/include/ultramodern/ultramodern.hpp
++++ b/ultramodern/include/ultramodern/ultramodern.hpp
+@@ -128,6 +128,20 @@
+ 
+ bool is_game_started();
+ void quit();
++
++#if defined(ULTRAMODERN_LOCKSTEP)
++// BlitzRecomp (PSP port, psp-host --lockstep, docs/PSP_PORT.md §3.4): the game on virtual time, so two builds can be compared
++// RDRAM CRC by RDRAM CRC. Once enabled (before recomp::start), a VI happens only when the game asks for one: a game thread
++// waiting for an external message finds none queued and hands the VI thread one VI step, synchronously. RSP and RDP
++// tasks complete on the game thread at submit, and osGetCount/osGetTime count VIs (plus a fixed step per read).
++namespace lockstep {
++    void enable();
++    bool enabled();
++    uint64_t vi_count();            // VIs stepped since the game started
++    uint64_t virtual_ticks();       // osGetCount's clock: 46.875 MHz over the VIs, plus 64 ticks per read in a VI
++    void run_one_vi();              // game thread: one VI step on the VI thread, returns once it is done
++}
++#endif
+ void join_event_threads();
+ void join_thread_cleaner_thread();
+ void join_saving_thread();
+diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
+--- a/ultramodern/src/events.cpp
++++ b/ultramodern/src/events.cpp
+@@ -173,7 +173,26 @@
+ 
+ uint64_t total_vis = 0;
+ 
++#if defined(ULTRAMODERN_LOCKSTEP)
++static std::atomic_bool lockstep_on{false};
++static ultramodern::host_sem lockstep_step_request;
++static ultramodern::host_sem lockstep_step_done;
++static std::atomic<uint64_t> lockstep_reads_in_vi{0};
+ 
++void ultramodern::lockstep::enable() { lockstep_on = true; }
++bool ultramodern::lockstep::enabled() { return lockstep_on.load(); }
++uint64_t ultramodern::lockstep::vi_count() { return total_vis; }
++uint64_t ultramodern::lockstep::virtual_ticks() {
++    // 46,875 counts per ms: 781,250 per VI at 60 Hz.
++    return total_vis * 781250ull + 64ull * (lockstep_reads_in_vi++);
++}
++void ultramodern::lockstep::run_one_vi() {
++    lockstep_step_request.signal();
++    lockstep_step_done.wait();
++}
++#endif
++
++
+ extern std::atomic_bool exited;
+ extern ultramodern::host_sem graphics_shutdown_ready;
+ 
+@@ -188,6 +207,44 @@
+ 
+     int remaining_retraces = 1;
+ 
++#if defined(ULTRAMODERN_LOCKSTEP)
++    if (lockstep_on) {
++        // No VI until the game starts, then exactly one per request from a waiting game thread (run_one_vi), while that
++        // thread is blocked: the same steps as below, on virtual time.
++        while (!exited && !ultramodern::is_game_started()) {
++            ultramodern::sleep_milliseconds(1);
++        }
++        while (!exited) {
++            if (!lockstep_step_request.wait(10000)) {
++                continue;
++            }
++            total_vis++;
++            lockstep_reads_in_vi = 0;
++            events_context.action_queue.enqueue(ScreenUpdateAction{ events_context.vi.regs });
++            events_context.vi.update_vi();
++            {
++                remaining_retraces--;
++                std::lock_guard lock{ events_context.message_mutex };
++                ViState* cur_state = events_context.vi.get_cur_state();
++                if (remaining_retraces == 0) {
++                    if (cur_state->mq != NULLPTR) {
++                        ultramodern::enqueue_external_message(cur_state->mq, cur_state->msg, false, false);
++                    }
++                    remaining_retraces = cur_state->retrace_count;
++                }
++                if (events_context.ai.mq != NULLPTR) {
++                    ultramodern::enqueue_external_message(events_context.ai.mq, events_context.ai.msg, false, false);
++                }
++            }
++            if (events_callbacks.vi_callback != nullptr) {
++                events_callbacks.vi_callback();
++            }
++            lockstep_step_done.signal();
++        }
++        return;
++    }
++#endif
++
+     while (!exited) {
+         // Determine the next VI time (more accurate than adding 16ms each VI interrupt)
+         auto next = ultramodern::get_start() + (total_vis * 1000000us) / (60 * ultramodern::get_speed_multiplier());
+@@ -571,6 +628,22 @@
+     OSTask* task = TO_PTR(OSTask, task_);
+     rsp_tasks_in_flight++;
+ 
++#if defined(ULTRAMODERN_LOCKSTEP)
++    if (lockstep_on) {
++        // Lockstep: the task completes here, on the game thread, in the game's order (a graphics task isn't drawn).
++        if (task->t.type != M_GFXTASK && !ultramodern::rsp::run_task(PASS_RDRAM task)) {
++            fprintf(stderr, "Failed to execute task type: %" PRIu32 "\n", task->t.type);
++            ULTRAMODERN_QUICK_EXIT();
++        }
++        sp_complete();
++        if (task->t.type == M_GFXTASK) {
++            dp_complete();
++        }
++        rsp_tasks_in_flight--;
++        return;
++    }
++#endif
++
+     // Send gfx tasks to the graphics action queue
+     if (task->t.type == M_GFXTASK) {
+         events_context.action_queue.enqueue(SpTaskAction{ *task });
+diff --git a/ultramodern/src/mesgqueue.cpp b/ultramodern/src/mesgqueue.cpp
+--- a/ultramodern/src/mesgqueue.cpp
++++ b/ultramodern/src/mesgqueue.cpp
+@@ -66,6 +66,19 @@
+ 
+ void ultramodern::wait_for_external_message(RDRAM_ARG1) {
+     QueuedMessage to_send;
++#if defined(ULTRAMODERN_LOCKSTEP)
++    if (ultramodern::lockstep::enabled()) {
++        // Lockstep: nothing queued means the game is waiting for the hardware, so time moves on by one VI.
++        while (!external_messages.try_dequeue(to_send)) {
++            ultramodern::lockstep::run_one_vi();
++        }
++        if (!send_external(PASS_RDRAM to_send) && to_send.requeue_if_blocked) {
++            external_messages.enqueue(to_send);
++            ultramodern::lockstep::run_one_vi();  // it can't be delivered yet: let time pass instead of spinning
++        }
++        return;
++    }
++#endif
+     external_messages.wait_dequeue(to_send);
+     if (!send_external(PASS_RDRAM to_send) && to_send.requeue_if_blocked) {
+         external_messages.enqueue(to_send);
+@@ -74,6 +87,12 @@
+ 
+ void ultramodern::wait_for_external_message_timed(RDRAM_ARG u32 millis) {
+     QueuedMessage to_send;
++#if defined(ULTRAMODERN_LOCKSTEP)
++    if (ultramodern::lockstep::enabled()) {
++        ultramodern::wait_for_external_message(PASS_RDRAM1);  // no real time to wait out: the next event, in VIs
++        return;
++    }
++#endif
+     if (external_messages.wait_dequeue_timed(to_send, std::chrono::milliseconds{millis})) {
+         if (!send_external(PASS_RDRAM to_send) && to_send.requeue_if_blocked) {
+             external_messages.enqueue(to_send);
+diff --git a/ultramodern/src/timer.cpp b/ultramodern/src/timer.cpp
+--- a/ultramodern/src/timer.cpp
++++ b/ultramodern/src/timer.cpp
+@@ -63,6 +63,11 @@
+ }
+ 
+ uint64_t time_now() {
++#if defined(ULTRAMODERN_LOCKSTEP)
++    if (ultramodern::lockstep::enabled()) {
++        return ultramodern::lockstep::virtual_ticks();
++    }
++#endif
+     return duration_to_ticks(std::chrono::high_resolution_clock::now() - start_time);
+ }
+ 

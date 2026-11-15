@@ -1,0 +1,158 @@
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index 95fc70b..4b585ab 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -8,10 +8,33 @@
+ #define VMA_IMPLEMENTATION
+ #define VOLK_IMPLEMENTATION 
+ 
++#include <algorithm>
++#include <cstdlib>
++
++// VMA's block size in MB, 0 for VMA's own: BLITZ_VMA_BLOCK_MB, or 4 in Potato Mode (BLITZ_LEAN). VMA takes a heap of 1 GB or less as
++// small and makes its blocks an eighth of it whatever size is asked (128 MB on a 1 GB phone, each memory type with its own), so
++// with a size asked no heap counts as small. Measured on an RG DS (Mali-G52, 950 MB): 167 MB of blocks held 45 MB of allocations
++// with VMA's own; 47 MB with 4 MB blocks.
++static int blitzVmaBlockMB() {
++    const char *blockMB = getenv("BLITZ_VMA_BLOCK_MB");
++    if (blockMB != nullptr) {
++        return std::max(atoi(blockMB), 0);
++    }
++
++    return (getenv("BLITZ_LEAN") != nullptr) ? 4 : 0;
++}
++
++static unsigned long long blitzVmaSmallHeapMax() {
++    return (blitzVmaBlockMB() > 0) ? 0ull : (1024ull * 1024 * 1024);
++}
++
++#define VMA_SMALL_HEAP_MAX_SIZE (blitzVmaSmallHeapMax())
++
+ #include "plume_vulkan.h"
+ 
+ #include <algorithm>
+ #include <atomic>
++#include <chrono>
+ #include <cmath>
+ #include <climits>
+ #include <unordered_map>
+@@ -29,6 +52,38 @@
+ // - Fix resource pools.
+ 
+ namespace plume {
++    // Potato Mode (BLITZ_LEAN) or BLITZ_VMA_LOG: where the GPU memory goes. Allocations of 512 KB or more as they're made, and
++    // VMA's totals every 10 s from present: what its blocks hold against what they reserve.
++    static bool blitzMemoryLog() {
++        static const bool on = (getenv("BLITZ_LEAN") != nullptr) || (getenv("BLITZ_VMA_LOG") != nullptr);
++        return on;
++    }
++
++    static void blitzNoteAllocation(const char *kind, VkDeviceSize size, uint32_t a, uint32_t b, uint32_t c, uint32_t memoryType, bool dedicated) {
++        static std::atomic<int> lines{ 0 };
++        if (!blitzMemoryLog() || (size < (512 * 1024)) || (lines.fetch_add(1) >= 400)) {
++            return;
++        }
++
++        fprintf(stderr, "[vulkan] alloc %s %llu KB (%u %u %u), memory type %u%s\n", kind, (unsigned long long)(size >> 10), a, b, c, memoryType, dedicated ? ", dedicated" : "");
++    }
++
++    static void blitzReportMemory(VmaAllocator allocator, const char *why) {
++        VmaTotalStatistics stats = {};
++        vmaCalculateStatistics(allocator, &stats);
++        const VmaStatistics &t = stats.total.statistics;
++        fprintf(stderr, "[vulkan] memory (%s): %u blocks %llu KB, %u allocations %llu KB, %llu KB reserved but unused.", why, t.blockCount,
++            (unsigned long long)(t.blockBytes >> 10), t.allocationCount, (unsigned long long)(t.allocationBytes >> 10), (unsigned long long)((t.blockBytes - t.allocationBytes) >> 10));
++        for (uint32_t i = 0; i < VK_MAX_MEMORY_TYPES; i++) {
++            const VmaStatistics &m = stats.memoryType[i].statistics;
++            if (m.blockBytes > 0) {
++                fprintf(stderr, " Type %u: %u blocks %llu KB, %u allocations %llu KB.", i, m.blockCount, (unsigned long long)(m.blockBytes >> 10), m.allocationCount, (unsigned long long)(m.allocationBytes >> 10));
++            }
++        }
++
++        fprintf(stderr, "\n");
++    }
++
+     // PS5 homebrew (BlitzRecomp, from Nazky/plume-ps5): the static RADV's loader, and a display-plane surface.
+ #if defined(__PROSPERO__)
+     extern "C" int sceSystemServiceHideSplashScreen();
+@@ -1008,6 +1063,10 @@ namespace plume {
+             res = vmaCreateBuffer(device->allocator, &bufferInfo, &createInfo, &vk, &allocation, &allocationInfo);
+         }
+ 
++        if (res == VK_SUCCESS) {
++            blitzNoteAllocation("buffer", allocationInfo.size, uint32_t(desc.flags), uint32_t(desc.heapType), 0, allocationInfo.memoryType, desc.committed);
++        }
++
+         if (res != VK_SUCCESS) {
+             fprintf(stderr, "vmaCreateBuffer failed with error code 0x%X.\n", res);
+             return;
+@@ -1028,10 +1087,15 @@ namespace plume {
+             return nullptr;
+         }
+ 
++        // Memory that's host cached but not coherent (Mali's readback type, flags 0xB on an RG DS) needs its CPU cache invalidated
++        // before a read, or a readback can return what the cache held from earlier. VMA does nothing here for coherent memory.
++        vmaInvalidateAllocation(device->allocator, allocation, 0, VK_WHOLE_SIZE);
+         return data;
+     }
+ 
+     void VulkanBuffer::unmap(uint32_t subresource, const RenderRange *writtenRange) {
++        // And flushed after a write, for the same memory. Nothing for coherent memory.
++        vmaFlushAllocation(device->allocator, allocation, 0, VK_WHOLE_SIZE);
+         vmaUnmapMemory(device->allocator, allocation);
+     }
+ 
+@@ -1128,6 +1192,10 @@ namespace plume {
+         }
+ 
+         VkResult res = vmaCreateImage(device->allocator, &imageInfo, &createInfo, &vk, &allocation, &allocationInfo);
++        if (res == VK_SUCCESS) {
++            blitzNoteAllocation("texture", allocationInfo.size, desc.width, desc.height, uint32_t(desc.format) | (desc.arraySize << 16), allocationInfo.memoryType, desc.committed);
++        }
++
+         if (res != VK_SUCCESS) {
+             fprintf(stderr, "vmaCreateImage failed with error code 0x%X.\n", res);
+             return;
+@@ -2568,6 +2636,15 @@ namespace plume {
+     }
+ 
+     bool VulkanSwapChain::present(uint32_t textureIndex, RenderCommandSemaphore **waitSemaphores, uint32_t waitSemaphoreCount) {
++        if (blitzMemoryLog()) {
++            static std::atomic<int64_t> nextReport{ 0 };
++            const int64_t now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++            int64_t due = nextReport.load();
++            if ((now >= due) && nextReport.compare_exchange_strong(due, now + 10)) {
++                blitzReportMemory(commandQueue->device->allocator, "every 10 s");
++            }
++        }
++
+         thread_local std::vector<VkSemaphore> waitSemaphoresVector;
+         waitSemaphoresVector.clear();
+         for (uint32_t i = 0; i < waitSemaphoreCount; i++) {
+@@ -4544,6 +4621,26 @@ namespace plume {
+         allocatorInfo.instance = renderInterface->instance;
+         allocatorInfo.vulkanApiVersion = renderInterface->appInfo.apiVersion;
+ 
++        // See blitzVmaBlockMB at the top.
++        if (blitzVmaBlockMB() > 0) {
++            allocatorInfo.preferredLargeHeapBlockSize = VkDeviceSize(blitzVmaBlockMB()) << 20;
++        }
++
++        if (blitzMemoryLog()) {
++            VkPhysicalDeviceMemoryProperties memoryProperties = {};
++            vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memoryProperties);
++            fprintf(stderr, "[vulkan] VMA block size %llu KB asked (0 is VMA's own).", (unsigned long long)(allocatorInfo.preferredLargeHeapBlockSize >> 10));
++            for (uint32_t i = 0; i < memoryProperties.memoryHeapCount; i++) {
++                fprintf(stderr, " Heap %u: %llu MB, flags 0x%X.", i, (unsigned long long)(memoryProperties.memoryHeaps[i].size >> 20), memoryProperties.memoryHeaps[i].flags);
++            }
++
++            for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; i++) {
++                fprintf(stderr, " Type %u: heap %u, flags 0x%X.", i, memoryProperties.memoryTypes[i].heapIndex, memoryProperties.memoryTypes[i].propertyFlags);
++            }
++
++            fprintf(stderr, "\n");
++        }
++
+         res = vmaCreateAllocator(&allocatorInfo, &allocator);
+         if (res != VK_SUCCESS) {
+             fprintf(stderr, "vmaCreateAllocator failed with error code 0x%X.\n", res);

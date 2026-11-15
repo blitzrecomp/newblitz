@@ -1,0 +1,415 @@
+diff --git a/src/common/rt64_blitz_watch.h b/src/common/rt64_blitz_watch.h
+index 8c07812..423105e 100644
+--- a/src/common/rt64_blitz_watch.h
++++ b/src/common/rt64_blitz_watch.h
+@@ -31,6 +31,11 @@ namespace RT64 {
+     extern std::atomic<uint64_t> statFirstPresents, statSecondPresents;
+     extern std::atomic<uint64_t> statViPasses, statViPassUs, statViPassMaxUs, statAcquireUs, statPresentUs, statSecondPasses, statSecondPassUs;
+     extern std::atomic<uint64_t> statTextureHighest, statTexturesPast256, statTextureDraws;
++    // The [present] line's: presents picked and dropped, how many newer ones waited at each pick (0, 1, 2 or more), the time
++    // from a drawn present's workload done to the next workload let go, the workload thread's wait for that, the gfx thread's
++    // wait for a free workload, the drop rule last used, and presents drawn picture-first (rt64_present_queue.cpp).
++    extern std::atomic<uint64_t> statPresentPicks, statPresentSkips, statPresentNewer0, statPresentNewer1, statPresentNewer2, statPresentHoldUs;
++    extern std::atomic<uint64_t> statWaitPresentUs, statWorkloadFullUs, statPresentRule, statPictureFirst;
+     extern std::atomic<uint32_t> statTargetWidth, statTargetHeight, statScaleHundredths, statChainWidth, statChainHeight, statChainImages, statSecondWidth, statSecondHeight, statSecondImages;
+ 
+     // A short name that lives forever: a string literal.
+diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
+index e1c0deb..fc29ef8 100644
+--- a/src/hle/rt64_present_queue.cpp
++++ b/src/hle/rt64_present_queue.cpp
+@@ -41,6 +41,10 @@ extern "C" {
+     // BLITZ_PRESENT_SKIP, or live "RT64 skip N" (dev_input.cpp): -1 unset (two screens 2, one screen 1); see threadLoop.
+     static std::atomic<int> blitz_present_skip_rule{ []() { const char *v = getenv("BLITZ_PRESENT_SKIP"); return (v != nullptr) ? atoi(v) : -1; }() };
+     void blitz_rt64_present_skip(int rule) { blitz_present_skip_rule = rule; }
++    // BLITZ_DS_PICTURE_FIRST=1, or live "RT64 pfirst 1": Stylus draws the second screen first and lets the next workload go
++    // before the first screen's pass (threadPresent). Off by default; -1 until the first present reads the env.
++    static std::atomic<int> blitz_ds_picture_first{ -1 };
++    void blitz_rt64_picture_first(int on) { blitz_ds_picture_first = on; }
+ 
+     static std::mutex blitz_ds_window_mutex;
+     static std::condition_variable blitz_ds_window_changed;
+@@ -340,6 +344,58 @@ namespace RT64 {
+             statChainImages = textureCount;
+         }
+ 
++        // The game's picture for a pass, recorded into its open command list: the resolve or downsample, then Instant Replay.
++        auto buildPicture = [&](RenderCommandList *commandList, VIRenderer::RenderParams &renderParams) {
++            if (colorTarget != nullptr) {
++                renderParams.device = ext.device;
++                renderParams.commandList = commandList;
++                renderParams.swapChain = ext.swapChain;
++                renderParams.shaderLibrary = ext.shaderLibrary;
++                renderParams.textureFormat = colorTarget->format;
++                renderParams.resolutionScale = colorTarget->resolutionScale;
++                renderParams.downsamplingScale = 1;
++                renderParams.filtering = filtering;
++                renderParams.vi = &present.screenVI;
++                renderParams.removeBlackBorders = removeBlackBorders;
++                // BLITZ DS: this window's share of the picture over both screens.
++                if ((blitz_ds_mode == 1) && (secondChain != nullptr) && secondValid) {
++                    renderParams.part = true;
++                    renderParams.partTop = (blitz_ds_second_on_top != 0) ? blitz_ds_split : 0.0f;
++                    renderParams.partBottom = (blitz_ds_second_on_top != 0) ? 1.0f : blitz_ds_split;
++                }
++
++                const bool useDownsampling = (colorTarget->downsampleMultiplier > 1);
++                if (useDownsampling) {
++                    colorTarget->downsampleTarget(ext.presentGraphicsWorker, ext.shaderLibrary);
++                    renderParams.texture = colorTarget->downsampledTexture.get();
++                    renderParams.textureWidth = colorTarget->width / colorTarget->downsampleMultiplier;
++                    renderParams.textureHeight = colorTarget->height / colorTarget->downsampleMultiplier;
++                    renderParams.downsamplingScale = colorTarget->downsampleMultiplier;
++                }
++                else {
++                    colorTarget->resolveTarget(ext.presentGraphicsWorker, ext.shaderLibrary);
++                    renderParams.texture = colorTarget->getResolvedTexture();
++                    renderParams.textureWidth = colorTarget->width;
++                    renderParams.textureHeight = colorTarget->height;
++                }
++
++                statTargetWidth = colorTarget->width;
++                statTargetHeight = colorTarget->height;
++                statScaleHundredths = uint32_t(float(colorTarget->resolutionScale.y) * 100.0f);
++            }
++
++            // Instant Replay: this frame into the ring, or a frame from it in place of the game's.
++            blitzReplayFrame(ext.device, commandList, ext.swapChain, ext.shaderLibrary, present.screenVI, filtering, removeBlackBorders, (secondChain != nullptr) && secondValid, renderParams);
++        };
++
++        int pictureFirstOn = blitz_ds_picture_first.load(std::memory_order_relaxed);
++        if (pictureFirstOn < 0) {
++            const char *v = getenv("BLITZ_DS_PICTURE_FIRST");
++            int expected = -1;
++            blitz_ds_picture_first.compare_exchange_strong(expected, (v != nullptr) ? atoi(v) : 0);
++            pictureFirstOn = blitz_ds_picture_first.load(std::memory_order_relaxed);
++        }
++
+         for (int32_t i = 0; i < framesToPresent; i++) {
+             uint32_t frameCountersNextPresented = 0;
+             if ((framesToPresent > 1) && (usingMSAA || (i > 0))) {
+@@ -375,6 +431,53 @@ namespace RT64 {
+             uint32_t secondIndex = 0;
+             bool secondPresent = false;
+             const bool presentFrame = (i < framesToPresent) && swapChainValid;
++
++            // Done with the game's picture: the workload thread may go on. Once per frame here, whichever way it was drawn.
++            bool released = false;
++            auto releaseWorkload = [&]() {
++                released = true;
++                if (lockedWorkloadMutex) {
++                    ext.sharedResources->workloadMutex.unlock();
++                    lockedWorkloadMutex = false;
++                }
++
++                if (frameCountersNextPresented > 0) {
++                    {
++                        std::unique_lock<std::mutex> interpolatedLock(ext.sharedResources->interpolatedMutex);
++                        frameCounters.presented = frameCountersNextPresented;
++                    }
++
++                    ext.sharedResources->interpolatedCondition.notify_all();
++                }
++
++                // As soon as we're done with the first render target, we notify the workload queue it can proceed.
++                if (i == 0) {
++                    statPresentHoldUs.fetch_add(blitzUsSince(holdStart), std::memory_order_relaxed);
++                    notifyPresentId(present);
++                }
++            };
++
++            // BLITZ DS picture-first (Stylus, BLITZ_DS_PICTURE_FIRST=1 or "RT64 pfirst 1"): RT64 lets the next workload go only
++            // once every pass of this present is drawn and waited for. Stylus has the picture on the second screen and only the UI
++            // on the first, so the second is drawn first, with the picture built into its own pass, and the workload let go
++            // straight after; the first screen's UI pass follows while the next frame renders. Both are presented as ever. If the
++            // second can't be drawn (no image to draw into), nothing of it was recorded and this present goes the usual way.
++            bool pictureDrawn = false;
++            if (presentFrame && (i == 0) && (framesToPresent == 1) && (pictureFirstOn != 0) && (blitz_ds_mode == 3) && (secondChain != nullptr) && secondValid) {
++                VIRenderer::RenderParams pictureParams;
++                blitzPhase(BlitzWatchPresent, "second");
++                secondPresent = secondDraw(pictureParams, secondIndex, [&](RenderCommandList *commandList) { buildPicture(commandList, pictureParams); });
++                blitzPhase(BlitzWatchPresent, "frame");
++                if (secondPresent) {
++                    pictureDrawn = true;
++                    statPictureFirst.fetch_add(1, std::memory_order_relaxed);
++                    blitzPhase(BlitzWatchPresent, "replay");
++                    blitzReplayRead(ext.presentGraphicsWorker);
++                    blitzPhase(BlitzWatchPresent, "frame");
++                    releaseWorkload();
++                }
++            }
++
+             if (presentFrame) {
+                 blitzPhase(BlitzWatchPresent, "acquire");
+                 const auto acquireStart = std::chrono::steady_clock::now();
+@@ -392,48 +495,12 @@ namespace RT64 {
+                 commandList->begin();
+                 commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(swapChainTexture, RenderTextureLayout::COLOR_WRITE));
+                 
++                // Picture-first: the picture is on the second screen already, and this pass is the UI alone.
+                 VIRenderer::RenderParams renderParams;
+-                if (colorTarget != nullptr) {
+-                    renderParams.device = ext.device;
+-                    renderParams.commandList = commandList;
+-                    renderParams.swapChain = ext.swapChain;
+-                    renderParams.shaderLibrary = ext.shaderLibrary;
+-                    renderParams.textureFormat = colorTarget->format;
+-                    renderParams.resolutionScale = colorTarget->resolutionScale;
+-                    renderParams.downsamplingScale = 1;
+-                    renderParams.filtering = filtering;
+-                    renderParams.vi = &present.screenVI;
+-                    renderParams.removeBlackBorders = removeBlackBorders;
+-                    // BLITZ DS: this window's share of the picture over both screens.
+-                    if ((blitz_ds_mode == 1) && (secondChain != nullptr) && secondValid) {
+-                        renderParams.part = true;
+-                        renderParams.partTop = (blitz_ds_second_on_top != 0) ? blitz_ds_split : 0.0f;
+-                        renderParams.partBottom = (blitz_ds_second_on_top != 0) ? 1.0f : blitz_ds_split;
+-                    }
+-
+-                    const bool useDownsampling = (colorTarget->downsampleMultiplier > 1);
+-                    if (useDownsampling) {
+-                        colorTarget->downsampleTarget(ext.presentGraphicsWorker, ext.shaderLibrary);
+-                        renderParams.texture = colorTarget->downsampledTexture.get();
+-                        renderParams.textureWidth = colorTarget->width / colorTarget->downsampleMultiplier;
+-                        renderParams.textureHeight = colorTarget->height / colorTarget->downsampleMultiplier;
+-                        renderParams.downsamplingScale = colorTarget->downsampleMultiplier;
+-                    }
+-                    else {
+-                        colorTarget->resolveTarget(ext.presentGraphicsWorker, ext.shaderLibrary);
+-                        renderParams.texture = colorTarget->getResolvedTexture();
+-                        renderParams.textureWidth = colorTarget->width;
+-                        renderParams.textureHeight = colorTarget->height;
+-                    }
+-
+-                    statTargetWidth = colorTarget->width;
+-                    statTargetHeight = colorTarget->height;
+-                    statScaleHundredths = uint32_t(float(colorTarget->resolutionScale.y) * 100.0f);
++                if (!pictureDrawn) {
++                    buildPicture(commandList, renderParams);
+                 }
+ 
+-                // Instant Replay: this frame into the ring, or a frame from it in place of the game's.
+-                blitzReplayFrame(ext.device, commandList, ext.swapChain, ext.shaderLibrary, present.screenVI, filtering, removeBlackBorders, (secondChain != nullptr) && secondValid, renderParams);
+-
+                 commandList->setFramebuffer(swapChainFramebuffer);
+                 commandList->clearColor();
+ 
+@@ -470,32 +537,19 @@ namespace RT64 {
+                 statViPassUs.fetch_add(viPassUs, std::memory_order_relaxed);
+                 blitzNotePeak(statViPassMaxUs, viPassUs);
+ 
+-                blitzPhase(BlitzWatchPresent, "replay");
+-                blitzReplayRead(ext.presentGraphicsWorker);
+-
+-                // Also reached with no game frame to show (renderParams without a VI): the hook still draws.
+-                blitzPhase(BlitzWatchPresent, "second");
+-                secondPresent = secondDraw(renderParams, secondIndex);
+-                blitzPhase(BlitzWatchPresent, "frame");
+-            }
++                if (!pictureDrawn) {
++                    blitzPhase(BlitzWatchPresent, "replay");
++                    blitzReplayRead(ext.presentGraphicsWorker);
+ 
+-            if (lockedWorkloadMutex) {
+-                ext.sharedResources->workloadMutex.unlock();
+-                lockedWorkloadMutex = false;
+-            }
+-            
+-            if (frameCountersNextPresented > 0) {
+-                {
+-                    std::unique_lock<std::mutex> interpolatedLock(ext.sharedResources->interpolatedMutex);
+-                    frameCounters.presented = frameCountersNextPresented;
++                    // Also reached with no game frame to show (renderParams without a VI): the hook still draws.
++                    blitzPhase(BlitzWatchPresent, "second");
++                    secondPresent = secondDraw(renderParams, secondIndex);
++                    blitzPhase(BlitzWatchPresent, "frame");
+                 }
+-
+-                ext.sharedResources->interpolatedCondition.notify_all();
+             }
+ 
+-            // As soon as we're done with the first render target, we notify the workload queue it can proceed.
+-            if (i == 0) {
+-                notifyPresentId(present);
++            if (!released) {
++                releaseWorkload();
+             }
+ 
+             if (presentFrame && swapChainValid) {
+@@ -531,6 +585,18 @@ namespace RT64 {
+                 blitzPhase(BlitzWatchPresent, "frame");
+                 presentProfiler.logAndRestart();
+             }
++            else if (pictureDrawn && secondPresent) {
++                // Picture-first with the first screen's acquire failed: the second, drawn already, still goes up, or its image
++                // would stay taken and its semaphore signalled.
++                blitzPhase(BlitzWatchPresent, "second-present");
++                RenderCommandSemaphore *secondWait = secondDrawSemaphores[secondIndex].get();
++                secondValid = secondChain->present(secondIndex, &secondWait, 1);
++                if (secondValid) {
++                    statSecondPresents.fetch_add(1, std::memory_order_relaxed);
++                }
++
++                blitzPhase(BlitzWatchPresent, "frame");
++            }
+         }
+     }
+ 
+@@ -606,8 +672,9 @@ namespace RT64 {
+         }
+     }
+ 
+-    // Draws the second screen and waits for it; present it with index afterwards. False: nothing to present.
+-    bool PresentQueue::secondDraw(const VIRenderer::RenderParams &first, uint32_t &index) {
++    // Draws the second screen and waits for it; present it with index afterwards. False: nothing to present, and nothing
++    // recorded (preRecord not called).
++    bool PresentQueue::secondDraw(const VIRenderer::RenderParams &first, uint32_t &index, const std::function<void(RenderCommandList *)> &preRecord) {
+         if ((secondChain == nullptr) || !secondValid) {
+             return false;
+         }
+@@ -636,6 +703,11 @@ namespace RT64 {
+         RenderCommandList *commandList = ext.presentGraphicsWorker->commandList.get();
+         commandList->begin();
+ 
++        // Picture-first: the game's picture built here, into first, before anything below copies first.
++        if (preRecord) {
++            preRecord(commandList);
++        }
++
+         // The clip. A new play starts it over; 15 frames a second of the last 8 seconds, at 256x384.
+         constexpr uint32_t ClipLength = 120, ClipWidth = 256, ClipHeight = 384;
+         if ((blitz_ds_clip_enabled == 0) && !clipTextures.empty()) {
+@@ -825,6 +897,9 @@ namespace RT64 {
+             }
+ 
+             if (processCursor >= 0) {
++                statPresentPicks.fetch_add(1, std::memory_order_relaxed);
++                std::atomic<uint64_t> &newerAtPick = (newerPresents <= 0) ? statPresentNewer0 : ((newerPresents == 1) ? statPresentNewer1 : statPresentNewer2);
++                newerAtPick.fetch_add(1, std::memory_order_relaxed);
+                 blitzPhase(BlitzWatchPresent, "lock");
+                 std::unique_lock<std::mutex> threadLock(threadMutex);
+                 blitzPhase(BlitzWatchPresent, "second-setup");
+@@ -880,18 +955,21 @@ namespace RT64 {
+                     skipPresent = (newerPresents >= 2);
+                 }
+ 
++                statPresentRule.store(uint64_t(skipRule), std::memory_order_relaxed);
+                 skipPresent = skipPresent || ext.swapChain->isEmpty();
+ 
+                 Present &present = presents[processCursor];
+                 blitzPhase(BlitzWatchPresent, "wait-workload");
+                 ext.workloadQueue->waitForWorkloadId(present.workloadId);
+                 blitzPhase(BlitzWatchPresent, "frame");
++                holdStart = std::chrono::steady_clock::now();
+ 
+                 if (!presentThreadRunning) {
+                     continue;
+                 }
+ 
+                 if (skipPresent) {
++                    statPresentSkips.fetch_add(1, std::memory_order_relaxed);
+                     skipInterpolation();
+                     notifyPresentId(present);
+                 }
+diff --git a/src/hle/rt64_present_queue.h b/src/hle/rt64_present_queue.h
+index adbf869..4a2feb5 100644
+--- a/src/hle/rt64_present_queue.h
++++ b/src/hle/rt64_present_queue.h
+@@ -5,6 +5,7 @@
+ #pragma once
+ 
+ #include <chrono>
++#include <functional>
+ #include "common/rt64_profiling_timer.h"
+ #include "gui/rt64_inspector.h"
+ #include "render/rt64_vi_renderer.h"
+@@ -77,6 +78,7 @@ namespace RT64 {
+         Timestamp presentTimestamp;
+         VIHistory viHistory;
+         bool presentWaitEnabled = false;
++        std::chrono::steady_clock::time_point holdStart;  // the present being drawn: when its workload was done ([present]'s hold)
+ 
+         PresentQueue();
+         ~PresentQueue();
+@@ -90,7 +92,8 @@ namespace RT64 {
+         void threadPresent(const Present &present, bool &swapChainValid);
+         // BLITZ DS: the second screen's swap chain, in step with blitz_ds_set_window.
+         void secondUpdate();
+-        bool secondDraw(const VIRenderer::RenderParams &first, uint32_t &index);
++        // preRecord, if given, records into the open command list before anything else of it, and may fill first (picture-first).
++        bool secondDraw(const VIRenderer::RenderParams &first, uint32_t &index, const std::function<void(RenderCommandList *)> &preRecord = nullptr);
+         void skipInterpolation();
+         void notifyPresentId(const Present &present);
+         void threadAdvanceBarrier();
+diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
+index 95c17d9..a0d9906 100644
+--- a/src/hle/rt64_workload_queue.cpp
++++ b/src/hle/rt64_workload_queue.cpp
+@@ -64,12 +64,18 @@ namespace RT64 {
+         // Stall the thread until the barrier is lifted if we're trying to write on a workload being used by the GPU.
+         const char *phaseBefore = blitzPhaseNow(BlitzWatchGfx);
+         blitzPhase(BlitzWatchGfx, "workload-full");
++        const auto fullStart = std::chrono::steady_clock::now();
+         bool waitForBarrier;
++        bool waited = false;
+         do {
+             const std::scoped_lock lock(cursorMutex);
+             waitForBarrier = (nextWriteCursor == barrierCursor);
++            waited = waited || waitForBarrier;
+         } while (waitForBarrier);
+         blitzPhase(BlitzWatchGfx, phaseBefore);
++        if (waited) {
++            statWorkloadFullUs.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - fullStart).count()), std::memory_order_relaxed);
++        }
+ 
+         // Modify the cursor and notify anything waiting on the queue.
+         {
+@@ -961,7 +967,9 @@ namespace RT64 {
+                 std::unique_lock<std::mutex> threadLock(threadMutex);
+                 Workload &workload = workloads[processCursor];
+                 blitzPhase(BlitzWatchWorkload, "wait-present");
++                const auto waitPresentStart = std::chrono::steady_clock::now();
+                 ext.presentQueue->waitForPresentId(workload.presentId);
++                statWaitPresentUs.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - waitPresentStart).count()), std::memory_order_relaxed);
+                 blitzPhase(BlitzWatchWorkload, "draw");
+ 
+                 if (!threadsRunning) {
+diff --git a/src/render/rt64_raster_shader_cache.cpp b/src/render/rt64_raster_shader_cache.cpp
+index e7ce67d..5300ac4 100644
+--- a/src/render/rt64_raster_shader_cache.cpp
++++ b/src/render/rt64_raster_shader_cache.cpp
+@@ -22,13 +22,16 @@ namespace RT64 {
+     std::atomic<uint64_t> statFirstPresents{0}, statSecondPresents{0};
+     std::atomic<uint64_t> statViPasses{0}, statViPassUs{0}, statViPassMaxUs{0}, statAcquireUs{0}, statPresentUs{0}, statSecondPasses{0}, statSecondPassUs{0};
+     std::atomic<uint64_t> statTextureHighest{0}, statTexturesPast256{0}, statTextureDraws{0};
++    std::atomic<uint64_t> statPresentPicks{0}, statPresentSkips{0}, statPresentNewer0{0}, statPresentNewer1{0}, statPresentNewer2{0}, statPresentHoldUs{0};
++    std::atomic<uint64_t> statWaitPresentUs{0}, statWorkloadFullUs{0}, statPresentRule{0}, statPictureFirst{0};
+     std::atomic<uint32_t> statTargetWidth{0}, statTargetHeight{0}, statScaleHundredths{0}, statChainWidth{0}, statChainHeight{0}, statChainImages{0}, statSecondWidth{0}, statSecondHeight{0}, statSecondImages{0};
+ }
+ 
+-// The stall watchdog's reading (src/main/fps_counter.cpp, which declares the same struct). All running totals.
++// The stall watchdog's reading (src/main/fps_counter.cpp, which declares the same struct). All running totals, but presentRule.
+ struct BlitzRt64Watch {
+     uint64_t evictions, uploads, uploadWaitUs, compileMs, firstPresents, secondPresents;
+     uint64_t viPasses, viPassUs, acquireUs, presentUs, secondPasses, secondPassUs, textureDraws, texturesPast256;
++    uint64_t presentPicks, presentSkips, presentNewer0, presentNewer1, presentNewer2, presentHoldUs, waitPresentUs, workloadFullUs, presentRule, pictureFirst;
+ };
+ 
+ extern "C" void blitz_rt64_watch_read(BlitzRt64Watch *w) {
+@@ -46,6 +49,16 @@ extern "C" void blitz_rt64_watch_read(BlitzRt64Watch *w) {
+     w->secondPassUs = RT64::statSecondPassUs.load(std::memory_order_relaxed);
+     w->textureDraws = RT64::statTextureDraws.load(std::memory_order_relaxed);
+     w->texturesPast256 = RT64::statTexturesPast256.load(std::memory_order_relaxed);
++    w->presentPicks = RT64::statPresentPicks.load(std::memory_order_relaxed);
++    w->presentSkips = RT64::statPresentSkips.load(std::memory_order_relaxed);
++    w->presentNewer0 = RT64::statPresentNewer0.load(std::memory_order_relaxed);
++    w->presentNewer1 = RT64::statPresentNewer1.load(std::memory_order_relaxed);
++    w->presentNewer2 = RT64::statPresentNewer2.load(std::memory_order_relaxed);
++    w->presentHoldUs = RT64::statPresentHoldUs.load(std::memory_order_relaxed);
++    w->waitPresentUs = RT64::statWaitPresentUs.load(std::memory_order_relaxed);
++    w->workloadFullUs = RT64::statWorkloadFullUs.load(std::memory_order_relaxed);
++    w->presentRule = RT64::statPresentRule.load(std::memory_order_relaxed);
++    w->pictureFirst = RT64::statPictureFirst.load(std::memory_order_relaxed);
+ }
+ 
+ // The peaks since the last call: one reader, the watchdog's report.

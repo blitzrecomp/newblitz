@@ -1,0 +1,46 @@
+diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
+index 44ce5c2..57eb0f4 100644
+--- a/src/hle/rt64_present_queue.cpp
++++ b/src/hle/rt64_present_queue.cpp
+@@ -16,6 +16,7 @@
+ // BLITZ DS (the game's src/game/ds_view.cpp, docs/BLITZ_DS.md): a second screen, drawn by this thread right after the
+ // first and presented right after it. Each gets its own submit and wait, in turn, since the emulator's Android stalls
+ // when two swap chains are drawn within one (tools/android/probe, 2026-10-31).
++//   blitz_ds_mode 3: the picture on the second, nothing of it on the first.
+ //   blitz_ds_mode 0: one screen, as ever. 1: the picture over both. 2: the picture on the first, the second has only
+ //   the hook's drawing.
+ extern "C" {
+@@ -401,7 +402,8 @@ namespace RT64 {
+                 commandList->setFramebuffer(swapChainFramebuffer);
+                 commandList->clearColor();
+ 
+-                if (renderParams.texture != nullptr) {
++                const bool pictureOnSecond = (blitz_ds_mode == 3) && (secondChain != nullptr) && secondValid;  // BLITZ DS
++                if ((renderParams.texture != nullptr) && !pictureOnSecond) {
+                     commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(renderParams.texture, RenderTextureLayout::SHADER_READ));
+                     viRenderer->render(renderParams);
+                 }
+@@ -645,6 +647,14 @@ namespace RT64 {
+             p.storedRect = RenderRect(0, 0, (height * 2) / 3, height);
+             viRenderer->render(p);
+         }
++        else if ((mode == 3) && (first.texture != nullptr)) {
++            VIRenderer::RenderParams p = first;
++            p.commandList = commandList;
++            p.swapChain = secondChain.get();
++            p.part = false;
++            commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(p.texture, RenderTextureLayout::SHADER_READ));
++            viRenderer->render(p);
++        }
+         else if ((mode == 1) && (first.texture != nullptr)) {
+             VIRenderer::RenderParams p = first;
+             p.commandList = commandList;
+@@ -656,7 +666,7 @@ namespace RT64 {
+             viRenderer->render(p);
+         }
+ 
+-        if (blitz_ds_second_hook != nullptr) {
++        if ((blitz_ds_second_hook != nullptr) && (mode != 3)) {
+             blitz_ds_second_hook(commandList, framebuffer);
+         }
+ 

@@ -1,0 +1,24 @@
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index b378177..70463f4 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -1768,7 +1768,8 @@ namespace plume {
+ 
+         VkResult res = vkCreateGraphicsPipelines(device->vk, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &vk);
+         if (res != VK_SUCCESS) {
+-            fprintf(stderr, "vkCreateGraphicsPipelines failed with error code 0x%X.\n", res);
++            fprintf(stderr, "vkCreateGraphicsPipelines failed with error code 0x%X: %u stages, first '%s', %d samples.\n", res, pipelineInfo.stageCount,
++                pipelineInfo.stageCount > 0 ? pipelineInfo.pStages[0].pName : "", (int)pipelineInfo.pMultisampleState->rasterizationSamples);
+             return;
+         }
+     }
+@@ -4205,6 +4206,9 @@ namespace plume {
+         }
+ 
+         const bool descriptorIndexingSupported = indexingFeatures.descriptorBindingPartiallyBound && indexingFeatures.descriptorBindingVariableDescriptorCount && indexingFeatures.runtimeDescriptorArray;
++        fprintf(stderr, "[vulkan] descriptor indexing: partially bound %d, variable count %d, runtime array %d, non-uniform images %d, update after bind %d\n",
++            indexingFeatures.descriptorBindingPartiallyBound, indexingFeatures.descriptorBindingVariableDescriptorCount, indexingFeatures.runtimeDescriptorArray,
++            indexingFeatures.shaderSampledImageArrayNonUniformIndexing, indexingFeatures.descriptorBindingSampledImageUpdateAfterBind);
+         if (descriptorIndexingSupported) {
+             indexingFeatures.pNext = createDeviceChain;
+             createDeviceChain = &indexingFeatures;

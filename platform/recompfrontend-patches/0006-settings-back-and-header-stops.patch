@@ -1,0 +1,131 @@
+diff --git a/recompui/src/config/ui_config.cpp b/recompui/src/config/ui_config.cpp
+--- a/recompui/src/config/ui_config.cpp
++++ b/recompui/src/config/ui_config.cpp
+@@ -163,7 +163,9 @@
+         header_right->set_gap(9.0f);
+         auto frame_icon = [](IconButton *button, const char *title, const char *text) {
+             button->set_kit_framed(60.0f, 30.0f);
+-            button->set_focus_callback([title, text](bool active) {
++            int stop = config_modal->add_header_stop(button);  // in the L1 / R1 cycle after the tabs
++            button->set_focus_callback([title, text, stop](bool active) {
++                config_modal->header_stop_focus(stop, active);
+                 if (active) {
+                     config::describe_header_button(title, text);
+                 }
+diff --git a/recompui/src/elements/ui_modal.cpp b/recompui/src/elements/ui_modal.cpp
+--- a/recompui/src/elements/ui_modal.cpp
++++ b/recompui/src/elements/ui_modal.cpp
+@@ -392,7 +392,10 @@
+ ) : Modal(rid, parent, modal_root_context, modal_type)
+ {
+     set_menu_action_callback(MenuAction::Back, [this]() {
+-        if (this->tabs != nullptr) {
++        // Blitz '27: Back goes up to the tab row, and from the tab row or the header buttons it closes.
++        if (this->header_focus >= 0 || (this->tabs != nullptr && this->tabs->any_tab_focused())) {
++            this->close();
++        } else if (this->tabs != nullptr) {
+             this->tabs->focus_on_active_tab();
+         }
+     }, "Back");
+@@ -440,11 +443,49 @@
+     return modal;
+ }
+ 
++void TabbedModal::header_stop_focus(int index, bool active) {
++    if (active) {
++        header_focus = index;
++    } else if (header_focus == index) {
++        header_focus = -1;
++    }
++}
++
+ void TabbedModal::navigate_tab_direction(int direction) {
+     if (tab_contexts.size() == 0 || tabs == nullptr) {
+         return;
+     }
++    // Blitz '27: one cycle of the tabs, then the header buttons. On a header button, L1 / R1 move along them,
++    // and off either end go to the last / first tab.
++    int stops = static_cast<int>(header_stops.size());
++    if (header_focus >= 0) {
++        int next_stop = header_focus + direction;
++        if (next_stop >= 0 && next_stop < stops) {
++            header_stops[next_stop]->focus();
++            return;
++        }
++        int edge = tabs->get_next_tab_in_direction(direction > 0 ? static_cast<int>(tab_contexts.size()) - 1 : 0, direction > 0 ? 1 : -1);
++        if (edge < 0) {
++            return;
++        }
++        header_focus = -1;
++        if (edge == current_tab_index) {
++            tabs->focus_on_active_tab();
++        } else {
++            set_selected_tab(edge);
++            if (current_tab_index == edge) {
++                tabs->focus_on_active_tab();
++            }
++        }
++        return;
++    }
+     int next_index = tabs->get_next_tab_in_direction(tabs->get_active_tab(), direction);
++    // Wrapping past the last tab (R1) or the first (L1) lands on the header buttons instead.
++    bool wraps = direction > 0 ? next_index <= tabs->get_active_tab() : next_index >= tabs->get_active_tab();
++    if (stops > 0 && wraps) {
++        header_stops[direction > 0 ? 0 : stops - 1]->focus();
++        return;
++    }
+     set_selected_tab(next_index);
+     // Only focus if the tab changed to the intended tab, otherwise the tab change was cancelled.
+     if (current_tab_index == next_index) {
+diff --git a/recompui/src/elements/ui_modal.h b/recompui/src/elements/ui_modal.h
+--- a/recompui/src/elements/ui_modal.h
++++ b/recompui/src/elements/ui_modal.h
+@@ -113,6 +113,8 @@
+         int previous_tab_index = -1;
+         int current_tab_index = -1;
+         int content_focus_frames = 0;  // Blitz '27: frames left to put focus in the content after opening
++        std::vector<Element *> header_stops;  // Blitz '27: header buttons L1 / R1 reach after the last tab
++        int header_focus = -1;                // the one of them with focus, -1 for none
+         virtual void process_event(const Event &e) override;
+         std::string_view get_type_name() override { return "TabbedModal"; }
+         void on_tab_change(int tab_index);
+@@ -135,5 +137,9 @@
+         void set_selected_tab(const std::string &id);
+         Element *get_active_tab() { return tabs != nullptr ? static_cast<Tab*>(tabs->get_active_tab_element()) : nullptr; }
+         void set_tab_visible(const std::string &id, bool is_visible);
++        // Blitz '27: a header button joins the L1 / R1 cycle after the tabs; its focus callback reports with
++        // header_stop_focus so Back and the cycle know where focus is.
++        int add_header_stop(Element *element) { header_stops.push_back(element); return static_cast<int>(header_stops.size()) - 1; }
++        void header_stop_focus(int index, bool active);
+     };
+ } // namespace recompui
+diff --git a/recompui/src/elements/ui_tab_set.cpp b/recompui/src/elements/ui_tab_set.cpp
+--- a/recompui/src/elements/ui_tab_set.cpp
++++ b/recompui/src/elements/ui_tab_set.cpp
+@@ -173,6 +173,15 @@
+     }
+ };
+ 
++bool TabSet::any_tab_focused() const {
++    for (Tab *tab : tabs) {
++        if (tab->has_focus()) {
++            return true;
++        }
++    }
++    return false;
++}
++
+ int TabSet::get_next_tab_in_direction(int index, int direction) {
+     if (tabs.size() == 0) {
+         return -1;
+diff --git a/recompui/src/elements/ui_tab_set.h b/recompui/src/elements/ui_tab_set.h
+--- a/recompui/src/elements/ui_tab_set.h
++++ b/recompui/src/elements/ui_tab_set.h
+@@ -49,6 +49,7 @@
+         int add_tab(std::string_view text);
+         void set_active_tab(int tab_index, bool report_change = true);
+         void focus_on_active_tab();
++        bool any_tab_focused() const;  // Blitz '27: focus is on the tab row
+         Element *get_active_tab_element() const { return active_tab >= 0 && active_tab < static_cast<int>(tabs.size()) ? tabs[active_tab] : nullptr; };
+         int get_active_tab() const { return active_tab; }
+         void set_tab_visible(int tab_index, bool is_visible);

@@ -1,0 +1,192 @@
+diff --git a/src/common/rt64_blitz_watch.h b/src/common/rt64_blitz_watch.h
+index 423105e..7880de1 100644
+--- a/src/common/rt64_blitz_watch.h
++++ b/src/common/rt64_blitz_watch.h
+@@ -33,9 +33,10 @@ namespace RT64 {
+     extern std::atomic<uint64_t> statTextureHighest, statTexturesPast256, statTextureDraws;
+     // The [present] line's: presents picked and dropped, how many newer ones waited at each pick (0, 1, 2 or more), the time
+     // from a drawn present's workload done to the next workload let go, the workload thread's wait for that, the gfx thread's
+-    // wait for a free workload, the drop rule last used, and presents drawn picture-first (rt64_present_queue.cpp).
++    // wait for a free workload, the drop rule last used, presents drawn picture-first, and of those, the ones whose first window
++    // was left as it was (BLITZ_DS_UI_EVERY) (rt64_present_queue.cpp).
+     extern std::atomic<uint64_t> statPresentPicks, statPresentSkips, statPresentNewer0, statPresentNewer1, statPresentNewer2, statPresentHoldUs;
+-    extern std::atomic<uint64_t> statWaitPresentUs, statWorkloadFullUs, statPresentRule, statPictureFirst;
++    extern std::atomic<uint64_t> statWaitPresentUs, statWorkloadFullUs, statPresentRule, statPictureFirst, statUiSkips;
+     extern std::atomic<uint32_t> statTargetWidth, statTargetHeight, statScaleHundredths, statChainWidth, statChainHeight, statChainImages, statSecondWidth, statSecondHeight, statSecondImages;
+ 
+     // A short name that lives forever: a string literal.
+diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
+index 0f8f2d9..6fc0351 100644
+--- a/src/hle/rt64_present_queue.cpp
++++ b/src/hle/rt64_present_queue.cpp
+@@ -45,6 +45,15 @@ extern "C" {
+     // before the first screen's pass (threadPresent). Off by default; -1 until the first present reads the env.
+     static std::atomic<int> blitz_ds_picture_first{ -1 };
+     void blitz_rt64_picture_first(int on) { blitz_ds_picture_first = on; }
++    // BLITZ_DS_UI_EVERY=N, or live "RT64 uievery N": picture-first draws the first window, the UI alone, on every Nth picture
++    // frame only, and on the next one whenever the UI may have changed (blitz_ds_ui_wake) or 250 ms have gone by; in between
++    // it keeps what it shows (PresentQueue::uiSkip). 1: every frame. -1 until read: 2 in Potato Mode, else 1.
++    static std::atomic<int> blitz_ds_ui_every{ -1 };
++    void blitz_rt64_ui_every(int every) { blitz_ds_ui_every = every; }
++    // The UI (recompui): an event it acts on queued, a property or text changed, a context shown or hidden, a menu up. Any thread,
++    // after the change, so a present that sees the count sees what changed.
++    static std::atomic<uint32_t> blitz_ds_ui_wakes{ 0 };
++    void blitz_ds_ui_wake(void) { blitz_ds_ui_wakes.fetch_add(1, std::memory_order_release); }
+ 
+     static std::mutex blitz_ds_window_mutex;
+     static std::condition_variable blitz_ds_window_changed;
+@@ -331,6 +340,7 @@ namespace RT64 {
+         }
+ 
+         // Create the framebuffers if necessary.
++        const bool firstChainNew = swapChainFramebuffers.empty();  // BLITZ_DS_UI_EVERY: a new or resized chain is drawn
+         if (swapChainFramebuffers.empty()) {
+             uint32_t textureCount = ext.swapChain->getTextureCount();
+             swapChainFramebuffers.resize(textureCount);
+@@ -463,7 +473,9 @@ namespace RT64 {
+             // on the first, so the second is drawn first, with the picture built into its own pass, and the workload let go
+             // straight after; the first screen's UI pass follows while the next frame renders. Both are presented as ever. If the
+             // second can't be drawn (no image to draw into), nothing of it was recorded and this present goes the usual way.
++            // BLITZ_DS_UI_EVERY: the first screen's pass may then be left out (firstSkipped), and the second goes up alone.
+             bool pictureDrawn = false;
++            bool firstSkipped = false;
+             if (presentFrame && (i == 0) && (framesToPresent == 1) && (pictureFirstOn != 0) && (blitz_ds_mode == 3) && (secondChain != nullptr) && secondValid) {
+                 VIRenderer::RenderParams pictureParams;
+                 blitzPhase(BlitzWatchPresent, "second");
+@@ -476,17 +488,23 @@ namespace RT64 {
+                     blitzReplayRead(ext.presentGraphicsWorker);
+                     blitzPhase(BlitzWatchPresent, "frame");
+                     releaseWorkload();
++                    firstSkipped = uiSkip(firstChainNew);
+                 }
+             }
+ 
+             if (presentFrame) {
++                uiLastPictureFirst = pictureDrawn;
++            }
++
++            const bool drawFirst = presentFrame && !firstSkipped;
++            if (drawFirst) {
+                 blitzPhase(BlitzWatchPresent, "acquire");
+                 const auto acquireStart = std::chrono::steady_clock::now();
+                 swapChainValid = ext.swapChain->acquireTexture(acquiredSemaphore.get(), &swapChainIndex);
+                 statAcquireUs.fetch_add(blitzUsSince(acquireStart), std::memory_order_relaxed);
+             }
+ 
+-            if (presentFrame && swapChainValid) {
++            if (drawFirst && swapChainValid) {
+                 // Draw the framebuffer with the VI renderer.
+                 blitzPhase(BlitzWatchPresent, "vi-record");
+                 const auto viPassStart = std::chrono::steady_clock::now();
+@@ -553,7 +571,7 @@ namespace RT64 {
+                 releaseWorkload();
+             }
+ 
+-            if (presentFrame && swapChainValid) {
++            if (drawFirst && swapChainValid) {
+                 // Wait until the approximate time the next present should be at the current intended rate.
+                 if ((presentTimestamp != Timestamp()) && (targetRate > 0) && (targetRate > viOriginalRate)) {
+                     Timer::preciseSleepUntil(presentTimestamp + std::chrono::nanoseconds(1'000'000'000 / targetRate));
+@@ -587,8 +605,8 @@ namespace RT64 {
+                 presentProfiler.logAndRestart();
+             }
+             else if (pictureDrawn && secondPresent) {
+-                // Picture-first with the first screen's acquire failed: the second, drawn already, still goes up, or its image
+-                // would stay taken and its semaphore signalled.
++                // Picture-first with the first screen's pass left out (BLITZ_DS_UI_EVERY) or its acquire failed: the second, drawn
++                // already, still goes up, or its image would stay taken and its semaphore signalled.
+                 blitzPhase(BlitzWatchPresent, "second-present");
+                 RenderCommandSemaphore *secondWait = secondDrawSemaphores[secondIndex].get();
+                 secondValid = secondChain->present(secondIndex, &secondWait, 1);
+@@ -601,6 +619,37 @@ namespace RT64 {
+         }
+     }
+ 
++    // BLITZ_DS_UI_EVERY, for a picture-first frame whose picture is up on the second screen: whether the first, the UI alone, can
++    // keep what it shows. On an RG DS its 1024x768 pass and present came every frame, for a UI that mostly sits still. It's
++    // drawn on every Nth such frame, and always after the UI woke it (an event, a change, a menu up: blitz_ds_ui_wake), when
++    // 250 ms have gone by, when the frame before wasn't picture-first, and when its chain is new.
++    bool PresentQueue::uiSkip(bool firstChainNew) {
++        int every = blitz_ds_ui_every.load(std::memory_order_relaxed);
++        if (every < 0) {
++            const char *v = getenv("BLITZ_DS_UI_EVERY");
++            int expected = -1;
++            blitz_ds_ui_every.compare_exchange_strong(expected, (v != nullptr) ? atoi(v) : ((getenv("BLITZ_LEAN") != nullptr) ? 2 : 1));
++            every = blitz_ds_ui_every.load(std::memory_order_relaxed);
++        }
++
++        const uint32_t wakes = blitz_ds_ui_wakes.load(std::memory_order_acquire);
++        const auto now = std::chrono::steady_clock::now();
++        const bool skip = (every > 1) && uiLastPictureFirst && !firstChainNew && (wakes == uiWakesSeen) && ((uiSkipped + 1) < uint32_t(every)) &&
++            ((now - uiLastDraw) < std::chrono::milliseconds(250));
++        if (skip) {
++            uiSkipped++;
++            statUiSkips.fetch_add(1, std::memory_order_relaxed);
++        }
++        else {
++            // Taken before the hook runs: anything that wakes it from here on is drawn next frame.
++            uiSkipped = 0;
++            uiWakesSeen = wakes;
++            uiLastDraw = now;
++        }
++
++        return skip;
++    }
++
+     void PresentQueue::secondUpdate() {
+         std::unique_lock<std::mutex> lock(blitz_ds_window_mutex);
+         if (secondGeneration != blitz_ds_window_generation) {
+diff --git a/src/hle/rt64_present_queue.h b/src/hle/rt64_present_queue.h
+index 4a2feb5..88a03e7 100644
+--- a/src/hle/rt64_present_queue.h
++++ b/src/hle/rt64_present_queue.h
+@@ -79,6 +79,12 @@ namespace RT64 {
+         VIHistory viHistory;
+         bool presentWaitEnabled = false;
+         std::chrono::steady_clock::time_point holdStart;  // the present being drawn: when its workload was done ([present]'s hold)
++        // BLITZ_DS_UI_EVERY (uiSkip): the first window's last picture-first draw, the UI's wake count then, picture-first frames
++        // left out since, and whether the last frame shown was picture-first.
++        std::chrono::steady_clock::time_point uiLastDraw;
++        uint32_t uiWakesSeen = 0;
++        uint32_t uiSkipped = 0;
++        bool uiLastPictureFirst = false;
+ 
+         PresentQueue();
+         ~PresentQueue();
+@@ -94,6 +100,7 @@ namespace RT64 {
+         void secondUpdate();
+         // preRecord, if given, records into the open command list before anything else of it, and may fill first (picture-first).
+         bool secondDraw(const VIRenderer::RenderParams &first, uint32_t &index, const std::function<void(RenderCommandList *)> &preRecord = nullptr);
++        bool uiSkip(bool firstChainNew);
+         void skipInterpolation();
+         void notifyPresentId(const Present &present);
+         void threadAdvanceBarrier();
+diff --git a/src/render/rt64_raster_shader_cache.cpp b/src/render/rt64_raster_shader_cache.cpp
+index 5300ac4..4ddc0bf 100644
+--- a/src/render/rt64_raster_shader_cache.cpp
++++ b/src/render/rt64_raster_shader_cache.cpp
+@@ -23,7 +23,7 @@ namespace RT64 {
+     std::atomic<uint64_t> statViPasses{0}, statViPassUs{0}, statViPassMaxUs{0}, statAcquireUs{0}, statPresentUs{0}, statSecondPasses{0}, statSecondPassUs{0};
+     std::atomic<uint64_t> statTextureHighest{0}, statTexturesPast256{0}, statTextureDraws{0};
+     std::atomic<uint64_t> statPresentPicks{0}, statPresentSkips{0}, statPresentNewer0{0}, statPresentNewer1{0}, statPresentNewer2{0}, statPresentHoldUs{0};
+-    std::atomic<uint64_t> statWaitPresentUs{0}, statWorkloadFullUs{0}, statPresentRule{0}, statPictureFirst{0};
++    std::atomic<uint64_t> statWaitPresentUs{0}, statWorkloadFullUs{0}, statPresentRule{0}, statPictureFirst{0}, statUiSkips{0};
+     std::atomic<uint32_t> statTargetWidth{0}, statTargetHeight{0}, statScaleHundredths{0}, statChainWidth{0}, statChainHeight{0}, statChainImages{0}, statSecondWidth{0}, statSecondHeight{0}, statSecondImages{0};
+ }
+ 
+@@ -32,6 +32,7 @@ struct BlitzRt64Watch {
+     uint64_t evictions, uploads, uploadWaitUs, compileMs, firstPresents, secondPresents;
+     uint64_t viPasses, viPassUs, acquireUs, presentUs, secondPasses, secondPassUs, textureDraws, texturesPast256;
+     uint64_t presentPicks, presentSkips, presentNewer0, presentNewer1, presentNewer2, presentHoldUs, waitPresentUs, workloadFullUs, presentRule, pictureFirst;
++    uint64_t uiSkips;
+ };
+ 
+ extern "C" void blitz_rt64_watch_read(BlitzRt64Watch *w) {
+@@ -59,6 +60,7 @@ extern "C" void blitz_rt64_watch_read(BlitzRt64Watch *w) {
+     w->workloadFullUs = RT64::statWorkloadFullUs.load(std::memory_order_relaxed);
+     w->presentRule = RT64::statPresentRule.load(std::memory_order_relaxed);
+     w->pictureFirst = RT64::statPictureFirst.load(std::memory_order_relaxed);
++    w->uiSkips = RT64::statUiSkips.load(std::memory_order_relaxed);
+ }
+ 
+ // The peaks since the last call: one reader, the watchdog's report.

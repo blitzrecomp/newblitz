@@ -1,0 +1,59 @@
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index 72d3138..236263b 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -1396,6 +1396,40 @@ namespace plume {
+ 
+     // VulkanShader
+ 
++    // A driver without descriptor indexing (Mali-G52) refuses pipelines from SPIR-V that asks for non-uniform indexing, though a
++    // draw's texture index is the same for all of it: drop the capability, the extension and the decorations.
++    static std::vector<uint32_t> withoutNonUniform(const void *data, uint64_t size) {
++        const uint32_t *words = reinterpret_cast<const uint32_t *>(data);
++        const size_t count = size / sizeof(uint32_t);
++        std::vector<uint32_t> out(words, words + std::min<size_t>(count, 5));
++        out.reserve(count);
++        for (size_t i = 5; i < count; ) {
++            const uint32_t opcode = words[i] & 0xFFFF;
++            const uint32_t length = words[i] >> 16;
++            if ((length == 0) || (i + length > count)) {
++                return std::vector<uint32_t>(words, words + count);  // not what we thought: leave it for the driver to judge
++            }
++
++            bool drop = false;
++            if ((opcode == 17) && (length == 2)) {  // OpCapability: ShaderNonUniform, *ArrayNonUniformIndexing
++                const uint32_t capability = words[i + 1];
++                drop = (capability == 5301) || ((capability >= 5306) && (capability <= 5312));
++            }
++            else if (opcode == 10) {  // OpExtension
++                drop = strncmp(reinterpret_cast<const char *>(&words[i + 1]), "SPV_EXT_descriptor_indexing", (length - 1) * sizeof(uint32_t)) == 0;
++            }
++            else if ((opcode == 71) && (length == 3)) {  // OpDecorate: NonUniform
++                drop = words[i + 2] == 5300;
++            }
++
++            if (!drop) {
++                out.insert(out.end(), words + i, words + i + length);
++            }
++            i += length;
++        }
++        return out;
++    }
++
+     VulkanShader::VulkanShader(VulkanDevice *device, const void *data, uint64_t size, const char *entryPointName, RenderShaderFormat format) {
+         assert(device != nullptr);
+         assert(data != nullptr);
+@@ -1407,6 +1441,13 @@ namespace plume {
+         this->format = format;
+         this->entryPointName = (entryPointName != nullptr) ? std::string(entryPointName) : std::string();
+ 
++        std::vector<uint32_t> plainCode;
++        if (!device->capabilities.descriptorIndexing) {
++            plainCode = withoutNonUniform(data, size);
++            data = plainCode.data();
++            size = plainCode.size() * sizeof(uint32_t);
++        }
++
+         this->codeSize = size;
+ 
+         VkShaderModuleCreateInfo shaderInfo = {};

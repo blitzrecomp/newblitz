@@ -1,0 +1,63 @@
+diff --git a/src/render/rt64_raster_shader_cache.cpp b/src/render/rt64_raster_shader_cache.cpp
+index f9b6485..b736a89 100644
+--- a/src/render/rt64_raster_shader_cache.cpp
++++ b/src/render/rt64_raster_shader_cache.cpp
+@@ -11,16 +11,17 @@
+ 
+ namespace RT64 {
+     // Where a weak device's time goes (Potato Mode's log, src/main/fps_counter.cpp).
+-    std::atomic<uint64_t> statQueued{0}, statCompiled{0}, statCompileMs{0}, statDrawsUber{0}, statDrawsFast{0}, statGpuWaitMs{0};
++    std::atomic<uint64_t> statQueued{0}, statCompiled{0}, statCompileMs{0}, statDrawsUber{0}, statDrawsFast{0}, statGpuWaitMs{0}, statTextureSlots{0};
+ }
+ 
+-extern "C" void blitz_rt64_stats(uint64_t *queued, uint64_t *compiled, uint64_t *compileMs, uint64_t *uber, uint64_t *fast, uint64_t *gpuWaitMs) {
++extern "C" void blitz_rt64_stats(uint64_t *queued, uint64_t *compiled, uint64_t *compileMs, uint64_t *uber, uint64_t *fast, uint64_t *gpuWaitMs, uint64_t *textureSlots) {
+     *queued = RT64::statQueued.load();
+     *compiled = RT64::statCompiled.load();
+     *compileMs = RT64::statCompileMs.exchange(0);
+     *uber = RT64::statDrawsUber.exchange(0);
+     *fast = RT64::statDrawsFast.exchange(0);
+     *gpuWaitMs = RT64::statGpuWaitMs.exchange(0);
++    *textureSlots = RT64::statTextureSlots.load();
+ }
+ 
+ #define ENABLE_OPTIMIZED_SHADER_GENERATION
+diff --git a/src/render/rt64_texture_cache.cpp b/src/render/rt64_texture_cache.cpp
+index 0848f3e..36521db 100644
+--- a/src/render/rt64_texture_cache.cpp
++++ b/src/render/rt64_texture_cache.cpp
+@@ -22,6 +22,11 @@
+ 
+ #define ONLY_USE_LOW_MIP_CACHE 0
+ 
++#include <atomic>
++#include <cstdlib>
++
++namespace RT64 { extern std::atomic<uint64_t> statTextureSlots; }
++
+ namespace RT64 {
+     // ReplacementMap
+     
+@@ -225,6 +230,7 @@ namespace RT64 {
+         }
+         else {
+             textureIndex = static_cast<uint32_t>(textures.size());
++            statTextureSlots = textureIndex + 1;
+             textures.push_back(nullptr);
+             cachedTextureDimensions.emplace_back();
+             textureReplacements.push_back(nullptr);
+@@ -337,7 +343,13 @@ namespace RT64 {
+             const uint64_t MinimumMaxAge = WORKLOAD_QUEUE_SIZE * 2;
+             const uint64_t MaximumMaxAge = WORKLOAD_QUEUE_SIZE * 32;
+             const uint64_t age = submissionFrame - it->second;
+-            const uint64_t maxAge = std::clamp(it->second - creationFrames[it->first], MinimumMaxAge, MaximumMaxAge);
++            uint64_t maxAge = std::clamp(it->second - creationFrames[it->first], MinimumMaxAge, MaximumMaxAge);
++
++            // Mali-G52 can sample 256 textures per stage, and past that reads black, so a weak device keeps fewer around.
++            static const bool fewerTextures = getenv("BLITZ_LEAN") != nullptr;
++            if (fewerTextures && (hashMap.size() > 180)) {
++                maxAge = MinimumMaxAge;
++            }
+ 
+             // Evict all entries that are present in the access list and are older than the frame by the specified margin.
+             if (age >= maxAge) {

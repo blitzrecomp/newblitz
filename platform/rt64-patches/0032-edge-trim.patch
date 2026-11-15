@@ -1,0 +1,36 @@
+diff --git a/src/render/rt64_vi_renderer.cpp b/src/render/rt64_vi_renderer.cpp
+--- a/src/render/rt64_vi_renderer.cpp
++++ b/src/render/rt64_vi_renderer.cpp
+@@ -42,6 +42,10 @@
+     }
+ 
+     extern "C" volatile float blitz_tall_aspect_on;  // rt64_workload_queue.cpp
++    // Blitz: pixels of the picture's left and right edges kept off the screen. The game's frame has a few columns of its
++    // border colour at each side, and the rounded scissor can stop short of the window's edge: on two screens they show as a
++    // line down each side (team, RG DS). The game sets it (ds_view.cpp); 0 leaves the picture as it was.
++    extern "C" { volatile int blitz_edge_trim_px = 0; }
+ 
+     void VIRenderer::render(const RenderParams &p) {
+         const ShaderRecord *shader = nullptr;
+@@ -109,6 +113,21 @@
+             viewport = RenderViewport(float(scissor.left), float(scissor.top), float(scissor.right - scissor.left), float(scissor.bottom - scissor.top));
+         }
+ 
++        const float targetWidth = float((p.targetWidth > 0) ? p.targetWidth : p.swapChain->getWidth());
++        const float trim = float(blitz_edge_trim_px) * targetWidth / 1024.0f;  // as many on a 1024-wide screen; ~1 in a 176 clip
++        const int32_t pictureW = scissor.right - scissor.left;
++        if ((trim > 0.0f) && !p.stored && (float(pictureW) > 4.0f * trim)) {
++            // Widen the picture about its middle so trim pixels of it go past each side of the scissor, which stays: a
++            // pillarboxed picture loses its border columns too. The scissor only lets out the 2 px a rounding can leave
++            // short of the screen's edge.
++            const float pivot = float(scissor.left + scissor.right) * 0.5f;
++            const float f = (float(pictureW) + 2.0f * trim) / float(pictureW);
++            viewport.x = pivot - (pivot - viewport.x) * f;
++            viewport.width *= f;
++            if (scissor.left <= 2) scissor.left = 0;
++            if (scissor.right >= int32_t(targetWidth) - 2) scissor.right = int32_t(targetWidth);
++        }
++
+         p.commandList->setViewports(viewport);
+         p.commandList->setScissors(scissor);
+ 

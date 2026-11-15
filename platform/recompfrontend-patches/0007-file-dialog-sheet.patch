@@ -1,0 +1,86 @@
+diff --git a/recompui/src/util/file.cpp b/recompui/src/util/file.cpp
+--- a/recompui/src/util/file.cpp
++++ b/recompui/src/util/file.cpp
+@@ -130,8 +130,8 @@
+ 
+     void file::open_file_dialog(std::function<void(bool success, const std::filesystem::path& path)> callback) {
+ #ifdef __APPLE__
+-        file::apple::dispatch_on_ui_thread([callback]() {
+-            perform_file_dialog_operation(callback);
++        file::apple::open_panel(false, [callback](bool success, const std::vector<std::filesystem::path>& paths) {
++            callback(success && !paths.empty(), paths.empty() ? std::filesystem::path{} : paths.front());
+         });
+ #else
+         perform_file_dialog_operation(callback);
+@@ -140,8 +140,8 @@
+ 
+     void file::open_file_dialog_multiple(std::function<void(bool success, const std::list<std::filesystem::path>& paths)> callback) {
+ #ifdef __APPLE__
+-        file::apple::dispatch_on_ui_thread([callback]() {
+-            perform_file_dialog_operation_multiple(callback);
++        file::apple::open_panel(true, [callback](bool success, const std::vector<std::filesystem::path>& paths) {
++            callback(success, std::list<std::filesystem::path>(paths.begin(), paths.end()));
+         });
+ #else
+         perform_file_dialog_operation_multiple(callback);
+diff --git a/recompui/src/util/file.h b/recompui/src/util/file.h
+--- a/recompui/src/util/file.h
++++ b/recompui/src/util/file.h
+@@ -23,6 +23,10 @@
+             std::optional<std::filesystem::path> get_application_support_directory();
+             std::filesystem::path get_bundle_resource_directory();
+             std::filesystem::path get_bundle_directory();
++            // Blitz: an open panel as an ordinary window (beginWithCompletionHandler), not a blocking runModal.
++            // Run from a main-queue block inside SDL's event pump, runModal stopped getting keyboard and mouse
++            // events and could neither finish nor cancel (the team's "file picker won't go away").
++            void open_panel(bool multiple, std::function<void(bool success, const std::vector<std::filesystem::path>& paths)> callback);
+         }
+         #endif
+     }
+diff --git a/recompui/src/util/support_apple.mm b/recompui/src/util/support_apple.mm
+--- a/recompui/src/util/support_apple.mm
++++ b/recompui/src/util/support_apple.mm
+@@ -1,11 +1,43 @@
+ #include "./file.h"
+ #import <Foundation/Foundation.h>
++#import <AppKit/AppKit.h>
+ #import <objc/runtime.h>
+ #import <objc/message.h>
+ #include <SDL.h>
+ #include "nfd.h"
+ 
+ namespace recompui::file {
++    void apple::open_panel(bool multiple, std::function<void(bool success, const std::vector<std::filesystem::path>& paths)> callback) {
++        dispatch_async(dispatch_get_main_queue(), ^{
++            NSOpenPanel* panel = [NSOpenPanel openPanel];
++            [panel setCanChooseFiles:YES];
++            [panel setCanChooseDirectories:NO];
++            [panel setAllowsMultipleSelection:multiple ? YES : NO];
++            [NSApp activateIgnoringOtherApps:YES];
++            auto cb = callback;  // copied into the block
++            void (^done)(NSModalResponse) = ^(NSModalResponse result) {
++                std::vector<std::filesystem::path> paths;
++                if (result == NSModalResponseOK) {
++                    for (NSURL* url in [panel URLs]) {
++                        if ([url isFileURL] && [url path] != nil) paths.emplace_back([[url path] UTF8String]);
++                    }
++                }
++                bool ok = result == NSModalResponseOK && !paths.empty();
++                // A pass later, so the panel is gone before the import (or a message box) runs.
++                dispatch_async(dispatch_get_main_queue(), ^{ cb(ok, paths); });
++            };
++            // A sheet on the game window: it stays the key window while it's up (a free-standing panel could
++            // lose key status to the game window, and then took no keys).
++            NSWindow* parent = [NSApp keyWindow] ?: [NSApp mainWindow] ?: [[NSApp windows] firstObject];
++            if (parent != nil && ![parent isKindOfClass:[NSPanel class]]) {
++                [panel beginSheetModalForWindow:parent completionHandler:done];
++            } else {
++                [panel beginWithCompletionHandler:done];
++                [panel makeKeyAndOrderFront:nil];
++            }
++        });
++    }
++
+     void apple::dispatch_on_ui_thread(std::function<void()> func) {
+         dispatch_async(dispatch_get_main_queue(), ^{
+             func();

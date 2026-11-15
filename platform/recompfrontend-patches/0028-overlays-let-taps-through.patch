@@ -1,0 +1,22 @@
+diff --git a/recompui/src/core/ui_context.cpp b/recompui/src/core/ui_context.cpp
+index ecc517d..0fe9832 100644
+--- a/recompui/src/core/ui_context.cpp
++++ b/recompui/src/core/ui_context.cpp
+@@ -536,6 +536,17 @@ void recompui::ContextId::set_captures_mouse(bool captures_mouse) {
+         return;
+     }
+     ctx->captures_mouse = captures_mouse;
++    // BlitzRecomp: RmlUi hit-tests every shown document whatever this flag says, so a full-screen overlay that takes no mouse
++    // (fps counter, toasts, hints, touch controls) still sat on top and took every tap: on Android the crew screen's GO PLAY
++    // and cards got none ([ui tap] ... hover body#). Its document lets pointers through instead.
++    if (ctx->document != nullptr) {
++        if (captures_mouse) {
++            ctx->document->RemoveProperty(Rml::PropertyId::PointerEvents);
++        }
++        else {
++            ctx->document->SetProperty(Rml::PropertyId::PointerEvents, Rml::Property(Rml::Style::PointerEvents::None));
++        }
++    }
+ }
+ 
+ recompui::ResourceId recompui::ContextId::create_resource_impl(bool is_element) {

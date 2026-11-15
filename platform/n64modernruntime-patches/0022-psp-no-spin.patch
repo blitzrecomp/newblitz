@@ -1,0 +1,33 @@
+diff --git a/thirdparty/concurrentqueue/concurrentqueue.h b/thirdparty/concurrentqueue/concurrentqueue.h
+--- a/thirdparty/concurrentqueue/concurrentqueue.h
++++ b/thirdparty/concurrentqueue/concurrentqueue.h
+@@ -378,7 +378,13 @@
+ 	// Recommended values are on the order of 1000-10000 unless the number of
+ 	// consumer threads exceeds the number of idle cores (in which case try 0-100).
+ 	// Only affects instances of the BlockingConcurrentQueue.
++#if defined(__PSP__)
++	// BlitzRecomp (PSP, docs/PSP_PORT.md §4.1): one core and strict priorities, so a waiter's spin can never see a
++	// signal from a lower-priority thread and only delays everyone below it: block at once.
++	static const int MAX_SEMA_SPINS = 0;
++#else
+ 	static const int MAX_SEMA_SPINS = 100;
++#endif
+ 
+ 	// Whether to recycle dynamically-allocated blocks into an internal free list or
+ 	// not. If false, only pre-allocated blocks (controlled by the constructor
+diff --git a/thirdparty/concurrentqueue/lightweightsemaphore.h b/thirdparty/concurrentqueue/lightweightsemaphore.h
+--- a/thirdparty/concurrentqueue/lightweightsemaphore.h
++++ b/thirdparty/concurrentqueue/lightweightsemaphore.h
+@@ -396,7 +396,12 @@
+ 	}
+ 
+ public:
++#if defined(__PSP__)
++	// BlitzRecomp (PSP): no spinning before blocking by default (one core; see MAX_SEMA_SPINS in concurrentqueue.h).
++	LightweightSemaphore(ssize_t initialCount = 0, int maxSpins = 0) : m_count(initialCount), m_maxSpins(maxSpins)
++#else
+ 	LightweightSemaphore(ssize_t initialCount = 0, int maxSpins = 10000) : m_count(initialCount), m_maxSpins(maxSpins)
++#endif
+ 	{
+ 		assert(initialCount >= 0);
+ 		assert(maxSpins >= 0);

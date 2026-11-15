@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Announcer Studio</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:ital,wght@1,700;1,800&family=Barlow:wght@400;500;600&display=swap">
+<style>
+  /* tools/announcer_studio.py serves this page on 127.0.0.1 (the microphone needs a local origin). */
+  :root {
+    color-scheme: dark;
+    --ground: #0b1020; --panel: #141b2e; --panel-2: #1b2440; --line: #2a3556;
+    --text: #e9edf6; --dim: #8e98b3; --yellow: #f6c945; --red: #ff5a5f; --green: #39d08a;
+    --display: "Barlow Condensed", "Arial Narrow", Arial, sans-serif;
+    --body: "Barlow", "Helvetica Neue", Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--ground); color: var(--text); font: 16px/1.5 var(--body); padding: 28px 16px 64px; }
+  .wrap { max-width: 900px; margin: 0 auto; display: grid; gap: 28px; }
+  h1 { font: italic 800 clamp(40px, 8vw, 60px)/.9 var(--display); text-transform: uppercase; margin: 0; }
+  h2 { font: italic 800 26px/1 var(--display); text-transform: uppercase; margin: 0; }
+  .eyebrow { font: 600 12px/1 var(--body); letter-spacing: .16em; text-transform: uppercase; color: var(--yellow); }
+  .lede, .dim { color: var(--dim); max-width: 68ch; margin: 0; }
+  .sec { display: grid; gap: 12px; }
+  .sec-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; border-bottom: 2px solid var(--yellow); padding-bottom: 6px; }
+  .steps { display: flex; flex-wrap: wrap; gap: 8px; }
+  .steps span { border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; font-size: 13px; color: var(--dim); }
+  .steps b { color: var(--yellow); margin-right: 6px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: grid; gap: 10px; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--dim); font-weight: 600; font-size: 13px; letter-spacing: .06em; text-transform: uppercase; }
+  ul.tips { margin: 0; padding-left: 20px; color: var(--dim); display: grid; gap: 4px; }
+  ul.tips b { color: var(--text); font-weight: 600; }
+  button, select { font: 600 14px/1 var(--body); color: var(--text); background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 9px 14px; cursor: pointer; }
+  button:hover, select:hover { border-color: var(--dim); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: var(--yellow); border-color: var(--yellow); color: #141b2e; }
+  button.rec { border-color: var(--red); color: var(--red); }
+  button.rec.on { background: var(--red); color: #fff; }
+  :focus-visible { outline: 2px solid var(--yellow); outline-offset: 2px; }
+  .tabs { display: flex; gap: 8px; flex-wrap: wrap; }
+  .tabs button[aria-selected="true"] { background: var(--yellow); color: #141b2e; border-color: var(--yellow); }
+  .clip { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 16px; align-items: center; }
+  .clip .say { font: italic 800 30px/1 var(--display); text-transform: uppercase; }
+  .clip .what { font-weight: 600; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .takes { display: flex; flex-wrap: wrap; gap: 6px; }
+  .take { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .take button { border: 0; border-radius: 0; padding: 7px 10px; background: transparent; }
+  .take button + button { border-left: 1px solid var(--line); }
+  .badge { font-size: 13px; font-weight: 600; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--dim); }
+  .badge.ok { color: #06210f; background: var(--green); border-color: var(--green); }
+  .meter { height: 6px; border-radius: 3px; background: #0e1527; overflow: hidden; width: 160px; }
+  .meter div { height: 100%; width: 0; background: var(--green); transition: width .05s; }
+  .meter div.hot { background: var(--red); }
+  pre.log { margin: 0; white-space: pre-wrap; font: 13px/1.5 ui-monospace, Menlo, monospace; color: #cfe1ff; background: #070b16; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .err { color: var(--red); }
+  @media (max-width: 640px) { .clip { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="sec">
+    <div class="eyebrow">NFL Blitz 2026 · local tool</div>
+    <h1>Announcer Studio</h1>
+    <p class="lede">Houston and Washington are silent in the 2026 app because the original game has no recordings for them, and the Raiders, Chargers and Rams still say Oakland, San Diego and St. Louis. Here you record short calls in your own voice; the builder trims them, takes them down to the game's 8.75 kHz voice and matches the tone and loudness of the original calls.</p>
+    <div class="steps"><span><b>1</b>Listen</span><span><b>2</b>Record</span><span><b>3</b>Build and compare</span><span><b>4</b>Install</span></div>
+  </header>
+
+  <section class="sec">
+    <div class="sec-head"><h2>1 · What a team bank is</h2></div>
+    <p class="dim">Every team has the same four calls. Pick a team to hear the game's own reads (decoded from your ROM, nothing saved).</p>
+    <div class="row"><label for="example">Example team</label><select id="example"></select></div>
+    <div class="card"><table>
+      <thead><tr><th>Call</th><th>When the game says it</th><th></th></tr></thead>
+      <tbody id="bankTable"></tbody>
+    </table></div>
+    <ul class="tips">
+      <li><b>Short and punchy.</b> The game's calls last about half a second to a second; it says a name between other lines.</li>
+      <li><b>Shout a little, from a hand's width away.</b> The builder compresses hard, so energy matters more than volume.</li>
+      <li><b>Three or four takes each</b>, then keep the best one. Takes stay in this page until you keep one.</li>
+      <li><b>A quiet room, laptop mic is fine.</b> Everything above 4 kHz is cut anyway, like the original.</li>
+      <li><b>Your own voice only</b>, or one you have the rights to.</li>
+    </ul>
+  </section>
+
+  <section class="sec">
+    <div class="sec-head"><h2>2 · Record</h2><span class="dim" id="micState"></span></div>
+    <div class="tabs" role="tablist" id="teamTabs"></div>
+    <div id="clips" class="sec"></div>
+  </section>
+
+  <section class="sec">
+    <div class="sec-head"><h2>3 · Build and compare</h2></div>
+    <div class="row"><label for="like">Match the tone of</label><select id="like"></select><button class="primary" id="build">Build bank</button></div>
+    <pre class="log" id="buildLog" hidden></pre>
+    <div class="card" id="compare" hidden><table><tbody id="compareRows"></tbody></table></div>
+  </section>
+
+  <section class="sec">
+    <div class="sec-head"><h2>4 · Install</h2></div>
+    <p class="dim" id="installNote"></p>
+    <div class="row"><button class="primary" id="install">Install into the game</button><span class="badge" id="installed"></span></div>
+    <pre class="log" id="installLog" hidden></pre>
+  </section>
+</div>
+
+<script>
+const WHEN = {
+  0: "In-play calls: the city alone.",
+  1: "Score and lead calls: the nickname alone.",
+  2: "VS screen, first team: the full name.",
+  3: "VS screen, second team: the full name, the longer read.",
+};
+let state = null;
+let team = null;              // bank name of the selected team
+const takes = {};             // "bank/clip" -> [Blob]
+let player = new Audio();
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const ctype = r.headers.get("Content-Type") || "";
+  return ctype.includes("json") ? r.json() : r;
+}
+
+function play(url) {
+  player.pause();
+  player = new Audio(url);
+  player.play().catch(() => {});
+}
+
+function el(tag, attrs = {}, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "on") for (const [ev, fn] of Object.entries(v)) e.addEventListener(ev, fn);
+    else if (k === "class") e.className = v;
+    else e.setAttribute(k, v);
+  }
+  for (const k of kids) e.append(k);
+  return e;
+}
+
+function selectedExample() { return document.getElementById("example").value; }
+function teamInfo() { return state.teams.find(t => t.bank === team); }
+function sayFor(t, c) { return { city: t.city, nickname: t.nickname, full: t.city + " " + t.nickname, full2: t.city + " " + t.nickname + "!" }[c.id]; }
+
+function renderBankTable() {
+  const tb = document.getElementById("bankTable");
+  tb.textContent = "";
+  for (const c of state.clips) {
+    tb.append(el("tr", {},
+      el("td", {}, el("span", { class: "what" }, c.label)),
+      el("td", { class: "dim" }, WHEN[c.fx]),
+      el("td", {}, el("button", { on: { click: () => play(`/api/example/${selectedExample()}/${c.fx}`) } }, "▶ Hear it"))));
+  }
+}
+
+function renderTabs() {
+  const tabs = document.getElementById("teamTabs");
+  tabs.textContent = "";
+  for (const t of state.teams) {
+    const done = state.clips.filter(c => t.saved[c.id] || (t.original && c.id === "nickname")).length;
+    tabs.append(el("button", { role: "tab", "aria-selected": String(t.bank === team), on: { click: () => { team = t.bank; renderAll(); } } },
+      `${t.city} ${t.nickname} · ${done}/${state.clips.length}`));
+  }
+}
+
+function renderClips() {
+  const root = document.getElementById("clips");
+  root.textContent = "";
+  const t = teamInfo();
+  for (const c of state.clips) {
+    const key = `${t.bank}/${c.id}`;
+    const list = takes[key] || [];
+    const meter = el("div", { class: "meter" }, el("div"));
+    const recBtn = el("button", { class: "rec" }, "● Record");
+    recBtn.addEventListener("click", () => toggleRecord(key, recBtn, meter));
+    const takeChips = el("div", { class: "takes" });
+    list.forEach((blob, i) => {
+      takeChips.append(el("span", { class: "take" },
+        el("button", { on: { click: () => play(URL.createObjectURL(blob)) } }, `▶ Take ${i + 1}`),
+        el("button", { on: { click: () => keep(t.bank, c.id, blob) } }, "Keep")));
+    });
+    const saved = t.saved[c.id];
+    const shared = t.shares && t.shares[c.id];
+    const gameKeeps = t.original && c.id === "nickname" && !saved;
+    const len = t.lengths && t.lengths[c.id];
+    const typical = state.game_lengths && state.game_lengths[c.id];
+    const lenText = len ? ` · built ${len.toFixed(2)} s` : "";
+    const badgeText = saved ? (shared ? `Kept (shared with ${shared})` : "Kept") + lenText : gameKeeps ? "The game's call is used" : "Not kept yet";
+    // Lengths are of the built (trimmed) calls; flag ones well over the game's typical length.
+    const long = len && typical && len > typical + 0.5;
+    root.append(el("div", { class: "card clip" },
+      el("div", {},
+        el("div", { class: "what" }, c.label),
+        el("div", { class: "say" }, sayFor(t, c)),
+        el("div", { class: "dim" }, c.hint + (t.original && c.id === "nickname" ? " Optional: the game's own call still fits, since the nickname didn't change." : "") + (shared ? ` One take serves both teams (shared with the ${shared}).` : ""))),
+      el("div", { class: "row" },
+        el("button", { on: { click: () => play(`/api/example/${selectedExample()}/${c.fx}`) } }, "▶ Example"),
+        recBtn, meter),
+      el("div", { class: "row" }, takeChips),
+      el("div", { class: "row" },
+        el("span", { class: "badge" + (saved || gameKeeps ? " ok" : "") }, badgeText),
+        long ? el("span", { class: "dim err" }, `Long: the game's are about ${typical.toFixed(1)} s. Tighter reads fit between other lines.`) : "",
+        saved ? el("button", { on: { click: () => play(`/api/take/${t.bank}/${c.id}?${Date.now()}`) } }, "▶ Kept take") : "")));
+  }
+}
+
+function renderBuild() {
+  const t = teamInfo();
+  document.getElementById("build").textContent = `Build ${t.nickname} bank`;
+  const cmp = document.getElementById("compare");
+  cmp.hidden = !t.built;
+  const rows = document.getElementById("compareRows");
+  rows.textContent = "";
+  if (t.built) {
+    for (const c of state.clips) {
+      rows.append(el("tr", {},
+        el("td", {}, el("span", { class: "what" }, c.label)),
+        el("td", {}, el("button", { on: { click: () => play(`/api/built/${t.bank}/${c.id}?${Date.now()}`) } }, "▶ Yours, as the game plays it")),
+        el("td", {}, el("button", { on: { click: () => play(`/api/example/${document.getElementById("like").value}/${c.fx}`) } }, "▶ The game's"))));
+    }
+  }
+  document.getElementById("install").disabled = !t.built;
+  document.getElementById("installNote").textContent =
+    `Copies ${t.bank}.wbk, .ptr and .bfx into ${state.app_folder}/announcer. The calls load at the app's next start; delete those files to go back to silence.`;
+  const b = document.getElementById("installed");
+  b.textContent = t.installed ? "Installed" : "Not installed";
+  b.className = "badge" + (t.installed ? " ok" : "");
+}
+
+function renderAll() { renderTabs(); renderClips(); renderBuild(); }
+
+// ---- recording (16-bit mono WAV at the device rate; the builder resamples) ----
+let mic = null, recording = null;
+
+async function ensureMic() {
+  if (mic) return mic;
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+  const ctx = new AudioContext();
+  const src = ctx.createMediaStreamSource(stream);
+  const proc = ctx.createScriptProcessor(2048, 1, 1);
+  src.connect(proc);
+  proc.connect(ctx.destination);
+  mic = { ctx, proc };
+  proc.onaudioprocess = e => {
+    if (!recording) return;
+    const data = e.inputBuffer.getChannelData(0);
+    recording.chunks.push(new Float32Array(data));
+    let peak = 0;
+    for (const v of data) peak = Math.max(peak, Math.abs(v));
+    const bar = recording.meter.firstChild;
+    bar.style.width = Math.min(100, peak * 100) + "%";
+    bar.classList.toggle("hot", peak > 0.95);
+  };
+  document.getElementById("micState").textContent = "Microphone on";
+  return mic;
+}
+
+async function toggleRecord(key, btn, meter) {
+  if (recording) {
+    const r = recording;
+    recording = null;
+    clearTimeout(r.timer);
+    r.btn.classList.remove("on");
+    r.btn.textContent = "● Record";
+    r.meter.firstChild.style.width = "0";
+    const blob = encodeWav(r.chunks, mic.ctx.sampleRate);
+    (takes[r.key] = takes[r.key] || []).push(blob);
+    if (takes[r.key].length > 6) takes[r.key].shift();
+    renderClips();
+    if (r.key === key) return;
+  }
+  try {
+    await ensureMic();
+    await mic.ctx.resume();
+  } catch (e) {
+    document.getElementById("micState").textContent = "Microphone blocked: allow it for 127.0.0.1 in the browser's site settings.";
+    document.getElementById("micState").className = "err";
+    return;
+  }
+  recording = { key, chunks: [], btn, meter, timer: setTimeout(() => recording && toggleRecord(key, btn, meter), 6000) };
+  btn.classList.add("on");
+  btn.textContent = "■ Stop";
+}
+
+function encodeWav(chunks, rate) {
+  const n = chunks.reduce((s, c) => s + c.length, 0);
+  const buf = new ArrayBuffer(44 + n * 2);
+  const v = new DataView(buf);
+  const str = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  str(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); str(8, "WAVE"); str(12, "fmt ");
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  str(36, "data"); v.setUint32(40, n * 2, true);
+  let o = 44;
+  for (const c of chunks) for (const s of c) { v.setInt16(o, Math.max(-1, Math.min(1, s)) * 32767, true); o += 2; }
+  return new Blob([buf], { type: "audio/wav" });
+}
+
+async function keep(bank, clip, blob) {
+  await fetch(`/api/take/${bank}/${clip}`, { method: "POST", body: blob });
+  state = await api("/api/state");
+  renderAll();
+}
+
+document.getElementById("build").addEventListener("click", async () => {
+  const log = document.getElementById("buildLog");
+  log.hidden = false;
+  log.textContent = "Building…";
+  const r = await api(`/api/build/${team}`, { method: "POST", body: JSON.stringify({ like: document.getElementById("like").value }) });
+  log.textContent = r.log || (r.ok ? "Built." : "Build failed.");
+  log.classList.toggle("err", !r.ok);
+  state = await api("/api/state");
+  renderAll();
+});
+
+document.getElementById("install").addEventListener("click", async () => {
+  const log = document.getElementById("installLog");
+  log.hidden = false;
+  const r = await api(`/api/install/${team}`, { method: "POST" });
+  log.textContent = r.log;
+  state = await api("/api/state");
+  renderAll();
+});
+
+(async () => {
+  state = await api("/api/state");
+  team = state.teams[0].bank;
+  for (const id of ["example", "like"]) {
+    const s = document.getElementById(id);
+    for (const e of state.examples) s.append(el("option", { value: e.bank }, e.name));
+    s.value = state.examples.some(e => e.bank === "titans") ? "titans" : state.examples[0].bank;
+  }
+  renderBankTable();
+  renderAll();
+})();
+</script>
+</body>
+</html>

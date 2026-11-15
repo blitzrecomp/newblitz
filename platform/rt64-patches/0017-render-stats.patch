@@ -1,0 +1,112 @@
+diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
+index 270fe0e..3704e0f 100644
+--- a/src/hle/rt64_state.cpp
++++ b/src/hle/rt64_state.cpp
+@@ -4,6 +4,10 @@
+ 
+ #include "rt64_state.h"
+ 
++#include <atomic>
++#include <chrono>
++namespace RT64 { extern std::atomic<uint64_t> statGpuWaitMs; }
++
+ #include <cassert>
+ #include <cinttypes>
+ 
+@@ -1473,7 +1477,9 @@ namespace RT64 {
+                 ext.framebufferGraphicsWorker->commandList->end();
+                 framebufferRenderer->waitForUploaders();
+                 ext.framebufferGraphicsWorker->execute();
++                const auto gpuWaitStart = std::chrono::steady_clock::now();
+                 ext.framebufferGraphicsWorker->wait();
++                statGpuWaitMs += std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - gpuWaitStart).count();
+ 
+                 pairCursor = framebufferPairCursor;
+                 while (pairCursor < maxFramebufferPair) {
+@@ -1583,7 +1589,9 @@ namespace RT64 {
+             ext.drawDataUploader->wait();
+             ext.transformsUploader->wait();
+             ext.framebufferGraphicsWorker->execute();
++            const auto gpuWaitStart = std::chrono::steady_clock::now();
+             ext.framebufferGraphicsWorker->wait();
++            statGpuWaitMs += std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - gpuWaitStart).count();
+             ext.textureCache->waitForGPUUploads();
+         }
+ 
+diff --git a/src/render/rt64_framebuffer_renderer.cpp b/src/render/rt64_framebuffer_renderer.cpp
+index 9fae0d4..82d1bad 100644
+--- a/src/render/rt64_framebuffer_renderer.cpp
++++ b/src/render/rt64_framebuffer_renderer.cpp
+@@ -4,6 +4,9 @@
+ 
+ #include "rt64_framebuffer_renderer.h"
+ 
++#include <atomic>
++namespace RT64 { extern std::atomic<uint64_t> statDrawsUber, statDrawsFast; }
++
+ #include "../include/rt64_extended_gbi.h"
+ 
+ #include "common/rt64_elapsed_timer.h"
+@@ -1610,8 +1613,10 @@ namespace RT64 {
+                         RasterShader *gpuShader = p.ubershadersOnly ? nullptr : p.rasterShaderCache->getGPUShader(call.shaderDesc);
+                         if (gpuShader != nullptr) {
+                             triangles.pipeline = gpuShader->pipeline.get();
++                            statDrawsFast++;
+                         }
+                         else {
++                            statDrawsUber++;
+                             const bool copyMode = (call.shaderDesc.otherMode.cycleType() == G_CYC_COPY);
+                             triangles.pipeline = rasterShaderUber->getPipeline(
+                                 !copyMode && call.shaderDesc.otherMode.zCmp() && (call.shaderDesc.otherMode.zMode() != ZMODE_DEC),
+diff --git a/src/render/rt64_raster_shader_cache.cpp b/src/render/rt64_raster_shader_cache.cpp
+index bf7b669..f9b6485 100644
+--- a/src/render/rt64_raster_shader_cache.cpp
++++ b/src/render/rt64_raster_shader_cache.cpp
+@@ -6,6 +6,23 @@
+ 
+ #include "common/rt64_thread.h"
+ 
++#include <atomic>
++#include <chrono>
++
++namespace RT64 {
++    // Where a weak device's time goes (Potato Mode's log, src/main/fps_counter.cpp).
++    std::atomic<uint64_t> statQueued{0}, statCompiled{0}, statCompileMs{0}, statDrawsUber{0}, statDrawsFast{0}, statGpuWaitMs{0};
++}
++
++extern "C" void blitz_rt64_stats(uint64_t *queued, uint64_t *compiled, uint64_t *compileMs, uint64_t *uber, uint64_t *fast, uint64_t *gpuWaitMs) {
++    *queued = RT64::statQueued.load();
++    *compiled = RT64::statCompiled.load();
++    *compileMs = RT64::statCompileMs.exchange(0);
++    *uber = RT64::statDrawsUber.exchange(0);
++    *fast = RT64::statDrawsFast.exchange(0);
++    *gpuWaitMs = RT64::statGpuWaitMs.exchange(0);
++}
++
+ #define ENABLE_OPTIMIZED_SHADER_GENERATION
+ 
+ namespace RT64 {
+@@ -60,12 +77,15 @@ namespace RT64 {
+                 assert((shaderCache->shaderUber != nullptr) && "Ubershader should've been created by the time a new shader is submitted to the cache.");
+                 const RenderPipelineLayout *uberPipelineLayout = shaderCache->shaderUber->pipelineLayout.get();
+                 const RenderMultisampling multisampling = shaderCache->multisampling;
++                const auto compileStart = std::chrono::steady_clock::now();
+                 std::unique_ptr<RasterShader> newShader = std::make_unique<RasterShader>(shaderCache->device, shaderDesc, uberPipelineLayout, shaderCache->shaderFormat, multisampling, shaderCache->shaderCompiler.get(), &shaderCache->optimizerCacheSPIRV);
+ 
+                 {
+                     const std::unique_lock<std::mutex> lock(shaderCache->GPUShadersMutex);
+                     shaderCache->GPUShaders[shaderDesc.hash()] = std::move(newShader);
+                 }
++                statCompiled++;
++                statCompileMs += std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - compileStart).count();
+             }
+         }
+     }
+@@ -129,6 +149,7 @@ namespace RT64 {
+         {
+             const std::unique_lock<std::mutex> queueLock(descQueueMutex);
+             descQueue.push(desc);
++            statQueued++;
+         }
+ 
+         descQueueChanged.notify_all();

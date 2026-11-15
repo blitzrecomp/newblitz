@@ -1,0 +1,112 @@
+{
+  "title": "NEW BLITZ 2027",
+  "subtitle": "A BLITZ RECOMP PROJECT. NFL BLITZ 2000, REBUILT TO RUN NATIVELY",
+  "credit_heading": "MADE POSSIBLE BY",
+  "credits": [
+    "NFL BLITZ 2000 - MIDWAY AND ITS ORIGINAL DEVELOPERS",
+    "N64RECOMP - WISEGUY",
+    "RT64 - DARIO AND THE RT64 CONTRIBUTORS",
+    "N64 MODERN RUNTIME AND RECOMP FRONTEND - THE ZELDA 64: RECOMPILED TEAM",
+    "TEAM EXTENSION RESEARCH - ZOINKITY",
+    "THE NFL BLITZ COMMUNITY - NFLBLITZFANS.COM AND NFL BLITZ RESURRECTION",
+    "ARMIPS - KINGCOM   LLVM   SDL   RMLUI",
+    "BUILT BY THE BLITZ RECOMP TEAM"
+  ],
+  "notice_heading": "NOTICE",
+  "notice_verbatim": "NEW BLITZ IS AN UNOFFICIAL, NON-COMMERCIAL PRESERVATION PROJECT. IT IS NOT\nAFFILIATED WITH, ENDORSED OR SPONSORED BY THE NFL, THE NFL PLAYERS ASSOCIATION,\nNFL PLAYERS INC., ANY NFL CLUB, OR MIDWAY. ALL NAMES, LOGOS AND TRADEMARKS\nBELONG TO THEIR OWNERS. NO GAME ASSETS ARE INCLUDED: IT NEEDS YOUR OWN COPY\nOF THE GAME. NOT FOR SALE.",
+  "notice_render_lines": [
+    "NEW BLITZ IS AN UNOFFICIAL, NON-COMMERCIAL PRESERVATION PROJECT. IT IS NOT",
+    "AFFILIATED WITH, ENDORSED OR SPONSORED BY THE NFL, THE NFL PLAYERS",
+    "ASSOCIATION, NFL PLAYERS INC., ANY NFL CLUB, OR MIDWAY. ALL NAMES, LOGOS",
+    "AND TRADEMARKS BELONG TO THEIR OWNERS. NO GAME ASSETS ARE INCLUDED: IT",
+    "NEEDS YOUR OWN COPY OF THE GAME. NOT FOR SALE."
+  ],
+  "body_bounds": [
+    [
+      97,
+      106,
+      415,
+      115
+    ],
+    [
+      192,
+      120,
+      320,
+      129
+    ],
+    [
+      133,
+      134,
+      378,
+      143
+    ],
+    [
+      23,
+      148,
+      488,
+      157
+    ],
+    [
+      145,
+      162,
+      367,
+      171
+    ],
+    [
+      31,
+      176,
+      481,
+      185
+    ],
+    [
+      147,
+      190,
+      365,
+      199
+    ],
+    [
+      158,
+      204,
+      353,
+      213
+    ]
+  ],
+  "notice_bounds": [
+    [
+      22,
+      264,
+      490,
+      275
+    ],
+    [
+      42,
+      278,
+      470,
+      289
+    ],
+    [
+      29,
+      292,
+      483,
+      303
+    ],
+    [
+      23,
+      306,
+      488,
+      315
+    ],
+    [
+      105,
+      320,
+      406,
+      329
+    ]
+  ],
+  "notice_words_unchanged": true,
+  "size": [
+    512,
+    384
+  ],
+  "opaque": true
+}

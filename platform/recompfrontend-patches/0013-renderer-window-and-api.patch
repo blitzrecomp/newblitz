@@ -1,0 +1,27 @@
+--- a/recompui/src/renderer/rt64_render_context.cpp
++++ b/recompui/src/renderer/rt64_render_context.cpp
+@@ -230,6 +230,10 @@
+ #elif defined(__APPLE__)
+     appCore.window.window = window_handle.window;
+     appCore.window.view = window_handle.view;
++#elif defined(__PROSPERO__)
++    // BlitzRecomp's PS5 build: the app's SDL window (events only), so RT64 doesn't make a second one; Plume draws to
++    // the display plane at the default 3840x2160.
++    appCore.window = decltype(appCore.window){window_handle.display};
+ #endif
+ 
+     appCore.checkInterrupts = dummy_check_interrupts;
+@@ -296,7 +300,13 @@
+             break;
+         case ultramodern::renderer::GraphicsApi::Auto:
+         default:
++#if defined(_WIN32) && defined(BLITZ_CROSS_BUILT_SHADERS)
++            // BlitzRecomp's Windows build is cross-compiled on a Mac, whose DXC can't sign DXIL: D3D12 would refuse
++            // the shaders, so Auto means Vulkan there (docs/WINDOWS_VULKAN.md).
++            app->userConfig.graphicsAPI = RT64::UserConfiguration::GraphicsAPI::Vulkan;
++#else
+             app->userConfig.graphicsAPI = RT64::UserConfiguration::GraphicsAPI::Automatic;
++#endif
+             break;
+     }
+ 

@@ -1,0 +1,158 @@
+--- a/plume_apple.mm
++++ b/plume_apple.mm
+@@ -7,6 +7,83 @@
+ 
+ #include "plume_apple.h"
+ 
++#include <TargetConditionals.h>
++#if TARGET_OS_IPHONE
++// BlitzRecomp: iOS (UIKit). The window is the app's UIWindow (SDL's, in the app's window scene); its size is the
++// drawable's in pixels (bounds x native scale); no fullscreen to toggle; the GPU is Apple's.
++#import <UIKit/UIKit.h>
++#import <Foundation/Foundation.h>
++
++namespace plume {
++    RenderDeviceVendor getRenderDeviceVendor(uint64_t) {
++        return RenderDeviceVendor::APPLE;
++    }
++
++    static CocoaWindowAttributes uikitAttributes(void *handle) {
++        UIWindow *window = (__bridge UIWindow *)handle;
++        CGRect bounds = window.bounds;
++        CGFloat scale = window.screen.nativeScale;
++        return CocoaWindowAttributes{0, 0, (int)round(bounds.size.width * scale), (int)round(bounds.size.height * scale)};
++    }
++
++    CocoaWindow::CocoaWindow(void *window) : windowHandle(window), cachedRefreshRate(0) {
++        cachedAttributes = {0, 0, 0, 0};
++        if ([NSThread isMainThread]) {
++            cachedAttributes = uikitAttributes(windowHandle);
++            cachedRefreshRate.store((int)((__bridge UIWindow *)windowHandle).screen.maximumFramesPerSecond);
++        } else {
++            updateWindowAttributesInternal(true);
++            updateRefreshRateInternal(true);
++        }
++    }
++
++    CocoaWindow::~CocoaWindow() {}
++
++    void CocoaWindow::updateWindowAttributesInternal(bool forceSync) {
++        auto updateBlock = ^{
++            CocoaWindowAttributes fresh = uikitAttributes(windowHandle);
++            std::lock_guard<std::mutex> lock(attributesMutex);
++            cachedAttributes = fresh;
++        };
++        if (forceSync) dispatch_sync(dispatch_get_main_queue(), updateBlock);
++        else dispatch_async(dispatch_get_main_queue(), updateBlock);
++    }
++
++    void CocoaWindow::updateRefreshRateInternal(bool forceSync) {
++        auto updateBlock = ^{
++            cachedRefreshRate.store((int)((__bridge UIWindow *)windowHandle).screen.maximumFramesPerSecond);
++        };
++        if (forceSync) dispatch_sync(dispatch_get_main_queue(), updateBlock);
++        else dispatch_async(dispatch_get_main_queue(), updateBlock);
++    }
++
++    void CocoaWindow::getWindowAttributes(CocoaWindowAttributes *attributes) const {
++        if ([NSThread isMainThread]) {
++            CocoaWindowAttributes fresh = uikitAttributes(windowHandle);
++            std::lock_guard<std::mutex> lock(attributesMutex);
++            const_cast<CocoaWindow *>(this)->cachedAttributes = fresh;
++            *attributes = fresh;
++        } else {
++            {
++                std::lock_guard<std::mutex> lock(attributesMutex);
++                *attributes = cachedAttributes;
++            }
++            const_cast<CocoaWindow *>(this)->updateWindowAttributesInternal(false);
++        }
++    }
++
++    int CocoaWindow::getRefreshRate() const {
++        int rate = cachedRefreshRate.load();
++        const_cast<CocoaWindow *>(this)->updateRefreshRateInternal(false);
++        return rate;
++    }
++
++    void CocoaWindow::setFullscreen(bool) {}
++    void CocoaWindow::toggleFullscreen() {}
++}
++#else
++
++
+ #import <AppKit/AppKit.h>
+ #import <Foundation/Foundation.h>
+ #import <IOKit/IOKitLib.h>
+@@ -192,3 +269,4 @@
+         }
+     }
+ }
++#endif  // TARGET_OS_IPHONE
+--- a/plume_metal.cpp
++++ b/plume_metal.cpp
+@@ -2021,11 +2021,18 @@
+     }
+ 
+     void MetalSwapChain::setVsyncEnabled(const bool vsyncEnabled) {
++#if PLUME_IOS
++        (void)vsyncEnabled;  // BlitzRecomp: iOS always syncs to the display (displaySyncEnabled is macOS-only)
++#else
+         MetalAutoreleasePool releasePool;
+         layer->setDisplaySyncEnabled(vsyncEnabled);
++#endif
+     }
+ 
+     bool MetalSwapChain::isVsyncEnabled() const {
++#if PLUME_IOS
++        return true;
++#endif
+         MetalAutoreleasePool releasePool;
+         return layer->displaySyncEnabled();
+     }
+@@ -3779,6 +3786,11 @@
+         this->renderInterface = renderInterface;
+ 
+         // Device Selection
++#if PLUME_IOS
++        // BlitzRecomp: iOS has one GPU and no MTLCopyAllDevices.
++        mtl = MTL::CreateSystemDefaultDevice();
++        mtl->retain();
++#else
+         NS::Array* devices = MTL::CopyAllDevices();
+         MTL::Device *preferredDevice = nullptr;
+         for (NS::UInteger i = 0; i < devices->count(); i++) {
+@@ -3793,10 +3805,15 @@
+         mtl = preferredDevice ? preferredDevice : MTL::CreateSystemDefaultDevice();
+         mtl->retain();
+         devices->release();
++#endif
+ 
+         const std::string deviceName(mtl->name()->utf8String());
+         description.name = deviceName;
++#if PLUME_IOS
++        description.type = RenderDeviceType::INTEGRATED;  // MTLDevice.location is macOS-only
++#else
+         description.type = mapDeviceType(mtl->location());
++#endif
+         description.driverVersion = 1; // Unavailable
+         description.vendor = mtl->supportsFamily(MTL::GPUFamilyApple1) ? RenderDeviceVendor::APPLE : getRenderDeviceVendor(mtl->registryID());
+         description.dedicatedVideoMemory = mtl->recommendedMaxWorkingSetSize();
+@@ -4193,11 +4210,17 @@
+         capabilities.shaderFormat = RenderShaderFormat::METAL;
+ 
+         // Fill device names.
++#if PLUME_IOS
++        MTL::Device *device = MTL::CreateSystemDefaultDevice();
++        deviceNames.push_back(std::string(device->name()->utf8String()));
++        device->release();
++#else
+         const NS::Array* devices = MTL::CopyAllDevices();
+         for (NS::UInteger i = 0; i < devices->count(); i++) {
+             NS::String* deviceName = ((MTL::Device *)devices->object(i))->name();
+             deviceNames.push_back(std::string(deviceName->utf8String()));
+         }
++#endif
+     }
+ 
+     MetalInterface::~MetalInterface() {}

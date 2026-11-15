@@ -1,0 +1,37 @@
+diff --git a/recompui/src/elements/ui_button.cpp b/recompui/src/elements/ui_button.cpp
+index 7e6cf83..aea32aa 100644
+--- a/recompui/src/elements/ui_button.cpp
++++ b/recompui/src/elements/ui_button.cpp
+@@ -1,4 +1,5 @@
+ #include "ui_button.h"
++#include <cstdio>
+ #include "ui_label.h"
+ #include "ui_pseudo_border.h"
+ 
+@@ -104,6 +105,7 @@ namespace recompui {
+     void Button::process_event(const Event &e) {
+         switch (e.type) {
+         case EventType::Click:
++            fprintf(stderr, "[ui click] button %s: enabled %d, %zu callback(s)\n", get_debug_id_or_id().c_str(), is_enabled() ? 1 : 0, pressed_callbacks.size());
+             if (is_enabled()) {
+                 for (const auto &function : pressed_callbacks) {
+                     function();
+diff --git a/recompui/src/elements/ui_element.cpp b/recompui/src/elements/ui_element.cpp
+index 96051e3..dcba54e 100644
+--- a/recompui/src/elements/ui_element.cpp
++++ b/recompui/src/elements/ui_element.cpp
+@@ -234,6 +234,14 @@ void Element::ProcessEvent(Rml::Event &event) {
+     // Events that are processed during any phase.
+     switch (event.GetId()) {
+     case Rml::EventId::Click:
++        {   // BlitzRecomp: where a click lands, for menu taps that go missing on Android (the first 30)
++            static int told = 0;
++            if (told++ < 30) {
++                Rml::Element* t = event.GetTargetElement();
++                fprintf(stderr, "[ui click] at %s#%s, target %s#%s, phase %d, click events %d\n", base->GetTagName().c_str(), base->GetId().c_str(),
++                    t ? t->GetTagName().c_str() : "none", t ? t->GetId().c_str() : "", (int)event.GetPhase(), (events_enabled & Events(EventType::Click)) ? 1 : 0);
++            }
++        }
+         handle_event(Event::click_event(event.GetParameter("mouse_x", 0.0f), event.GetParameter("mouse_y", 0.0f)));
+         break;
+     case Rml::EventId::Mousedown:

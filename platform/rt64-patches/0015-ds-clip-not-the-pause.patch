@@ -1,0 +1,21 @@
+diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
+index 4ffbea3..2244e50 100644
+--- a/src/hle/rt64_present_queue.cpp
++++ b/src/hle/rt64_present_queue.cpp
+@@ -31,6 +31,7 @@ extern "C" {
+     volatile float blitz_ds_second_ms = 0.0f;    // the last frame's time on this thread, second screen's part
+     volatile int blitz_ds_clip_enabled = 0;      // keep the last play (memory: about 47 MB)
+     volatile int blitz_ds_clip_restart = 0;      // the next frame starts a new clip (set as play select ends)
++    volatile int blitz_ds_clip_hold = 0;         // don't record now
+     volatile int blitz_ds_clip_show = 0;         // show it now, on the left of the second screen
+     volatile int blitz_ds_clip_frames = 0;       // how many frames it has
+     volatile int blitz_ds_second_dirty = 1;      // the panel changed (recompui::ds_panel_set)
+@@ -609,7 +610,7 @@ namespace RT64 {
+             }
+             fprintf(stderr, "[ds] clip memory made: %u frames at %ux%u\n", ClipLength, ClipWidth, ClipHeight);
+         }
+-        if ((blitz_ds_clip_enabled != 0) && (mode == 1) && (first.texture != nullptr) && !first.stored && ((start - clipLastCapture) > std::chrono::milliseconds(62))) {
++        if ((blitz_ds_clip_enabled != 0) && (blitz_ds_clip_hold == 0) && (mode == 1) && (first.texture != nullptr) && !first.stored && ((start - clipLastCapture) > std::chrono::milliseconds(62))) {
+             clipLastCapture = start;
+             RenderTexture *clipTexture = clipTextures[clipHead].get();
+             commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(clipTexture, RenderTextureLayout::COLOR_WRITE));

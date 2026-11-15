@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://newblitz.pages.dev/sitemap.xml

@@ -1,0 +1,1256 @@
+diff --git a/src/common/rt64_blitz_watch.h b/src/common/rt64_blitz_watch.h
+new file mode 100644
+index 0000000..8c07812
+--- /dev/null
++++ b/src/common/rt64_blitz_watch.h
+@@ -0,0 +1,68 @@
++//
++// RT64
++//
++// Potato Mode's stall watchdog (src/main/fps_counter.cpp) reads these from a thread of its own, since a stalled thread can't
++// report itself: what each renderer thread is doing right now, and running totals. Only ever relaxed atomics, so cheap enough
++// for every device; only Potato Mode reads them. Defined in rt64_raster_shader_cache.cpp, beside the other stats.
++//
++
++#pragma once
++
++#include <atomic>
++#include <cstdint>
++
++#if defined(__ANDROID__)
++#   include <unistd.h>
++#endif
++
++namespace RT64 {
++    enum BlitzWatchThread {
++        BlitzWatchGfx = 0,
++        BlitzWatchPresent,
++        BlitzWatchWorkload,
++        BlitzWatchTexture,
++        BlitzWatchThreads
++    };
++
++    extern std::atomic<const char *> blitzWatchPhase[BlitzWatchThreads];
++    extern std::atomic<int> blitzWatchTid[BlitzWatchThreads];
++
++    extern std::atomic<uint64_t> statEvictions, statUploads, statUploadWaitUs, statCompileMsTotal;
++    extern std::atomic<uint64_t> statFirstPresents, statSecondPresents;
++    extern std::atomic<uint64_t> statViPasses, statViPassUs, statViPassMaxUs, statAcquireUs, statPresentUs, statSecondPasses, statSecondPassUs;
++    extern std::atomic<uint64_t> statTextureHighest, statTexturesPast256, statTextureDraws;
++    extern std::atomic<uint32_t> statTargetWidth, statTargetHeight, statScaleHundredths, statChainWidth, statChainHeight, statChainImages, statSecondWidth, statSecondHeight, statSecondImages;
++
++    // A short name that lives forever: a string literal.
++    inline void blitzPhase(BlitzWatchThread thread, const char *phase) {
++        blitzWatchPhase[thread].store(phase, std::memory_order_relaxed);
++    }
++
++    inline const char *blitzPhaseNow(BlitzWatchThread thread) {
++        return blitzWatchPhase[thread].load(std::memory_order_relaxed);
++    }
++
++    // On the thread itself, so the watchdog can read its faults and state from /proc.
++    inline void blitzWatchRegister(BlitzWatchThread thread) {
++#   if defined(__ANDROID__)
++        blitzWatchTid[thread].store(int(gettid()), std::memory_order_relaxed);
++#   else
++        (void)thread;
++#   endif
++    }
++
++    inline void blitzNotePeak(std::atomic<uint64_t> &peak, uint64_t value) {
++        if (value > peak.load(std::memory_order_relaxed)) {
++            peak.store(value, std::memory_order_relaxed);
++        }
++    }
++
++    // A texture index going into a draw. What the GPU really samples, unlike the last slot handed out.
++    inline void blitzNoteTexture(uint32_t index) {
++        statTextureDraws.fetch_add(1, std::memory_order_relaxed);
++        blitzNotePeak(statTextureHighest, index);
++        if (index >= 256) {
++            statTexturesPast256.fetch_add(1, std::memory_order_relaxed);
++        }
++    }
++}
+diff --git a/src/hle/rt64_application.cpp b/src/hle/rt64_application.cpp
+index dd325ef..7ffdcc4 100644
+--- a/src/hle/rt64_application.cpp
++++ b/src/hle/rt64_application.cpp
+@@ -8,6 +8,7 @@
+ #include <cinttypes>
+ #include <filesystem>
+ 
++#include "common/rt64_blitz_watch.h"
+ #include "common/rt64_dynamic_libraries.h"
+ #include "common/rt64_elapsed_timer.h"
+ #include "common/rt64_math.h"
+@@ -87,6 +88,7 @@ namespace RT64 {
+     }
+ 
+     Application::SetupResult Application::setup(uint32_t threadId) {
++        blitzWatchRegister(BlitzWatchGfx);
+ #   ifdef _WIN64
+         if (!DynamicLibraries::load()) {
+             fprintf(stderr, "Failed to load dynamic libraries. Make sure the dependencies are next to the Plugin's DLL.\n");
+@@ -368,6 +370,9 @@ namespace RT64 {
+         // Create the texture cache.
+         const uint32_t textureCacheThreads = std::max(threadsAvailable / 4U, 1U);
+         textureCache = std::make_unique<TextureCache>(textureDirectWorker.get(), textureCopyWorker.get(), textureCacheThreads, shaderLibrary.get());
++        if (device->getCapabilities().compactTextures2D > 0) {
++            textureCache->createMissTextures(workloadGraphicsWorker.get());
++        }
+ 
+         // Compute the approximate pool for texture replacements from the dedicated video memory.
+         const uint64_t MinimumTexturePoolSize = 512 * 1024 * 1024;
+@@ -465,6 +470,7 @@ namespace RT64 {
+     Application::~Application() {}
+ 
+     void Application::processDisplayLists(uint8_t *memory, uint32_t dlStartAddress, uint32_t dlEndAddress, bool isHLE) {
++        blitzPhase(BlitzWatchGfx, "dl");
+         if (state->debuggerInspector.paused) {
+             // TODO: It'd be necessary to parse the display list to see if it actually does a fullSync before sending the interrupt.
+             state->dpInterrupt();
+@@ -511,12 +517,15 @@ namespace RT64 {
+             saveConfiguration();
+             state->configurationSaveQueued = false;
+         }
++        blitzPhase(BlitzWatchGfx, "idle");
+     }
+ 
+     void Application::updateScreen() {
++        blitzPhase(BlitzWatchGfx, "screen");
+         appWindow->sdlCheckFilterInstallation();
+         screenApiProfiler.logAndRestart();
+         state->updateScreen(core.decodeVI(), false);
++        blitzPhase(BlitzWatchGfx, "idle");
+     }
+ 
+     void Application::destroyShaderCache() {
+diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
+index 2244e50..4072947 100644
+--- a/src/hle/rt64_present_queue.cpp
++++ b/src/hle/rt64_present_queue.cpp
+@@ -4,6 +4,7 @@
+ 
+ #include "rt64_present_queue.h"
+ 
++#include "common/rt64_blitz_watch.h"
+ #include "common/rt64_thread.h"
+ #include "rhi/rt64_render_hooks.h"
+ 
+@@ -12,6 +13,7 @@
+ 
+ #include <chrono>
+ #include <condition_variable>
++#include <cstdlib>
+ #include <mutex>
+ 
+ // BLITZ DS (the game's src/game/ds_view.cpp, docs/BLITZ_DS.md): a second screen, drawn by this thread right after the
+@@ -63,6 +65,10 @@ extern "C" {
+ }
+ 
+ namespace RT64 {
++    static uint64_t blitzUsSince(std::chrono::steady_clock::time_point start) {
++        return uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
++    }
++
+     // PresentQueue
+ 
+     PresentQueue::PresentQueue() {
+@@ -92,11 +98,14 @@ namespace RT64 {
+         int nextWriteCursor = (writeCursor + 1) % presents.size();
+ 
+         // Stall the thread until the barrier is lifted if we're trying to write on a present being used by the GPU.
++        const char *phaseBefore = blitzPhaseNow(BlitzWatchGfx);
++        blitzPhase(BlitzWatchGfx, "present-full");
+         bool waitForBarrier;
+         do {
+             const std::scoped_lock lock(cursorMutex);
+             waitForBarrier = (nextWriteCursor == barrierCursor);
+         } while (waitForBarrier);
++        blitzPhase(BlitzWatchGfx, phaseBefore);
+ 
+         // Modify the cursor and notify anything waiting on the queue.
+         {
+@@ -244,7 +253,9 @@ namespace RT64 {
+                 }
+                 else {
+                     lockedWorkloadMutex = true;
++                    blitzPhase(BlitzWatchPresent, "workload-lock");
+                     ext.sharedResources->workloadMutex.lock();
++                    blitzPhase(BlitzWatchPresent, "frame");
+                 }
+ 
+                 RenderTargetKey colorTargetKey(presentFb->addressStart, presentFb->width, presentFb->siz, Framebuffer::Type::Color);
+@@ -280,7 +291,9 @@ namespace RT64 {
+                 scratchFb.siz = present.screenVI.fbSiz();
+ 
+                 lockedWorkloadMutex = true;
++                blitzPhase(BlitzWatchPresent, "workload-lock");
+                 ext.sharedResources->workloadMutex.lock();
++                blitzPhase(BlitzWatchPresent, "frame");
+ 
+                 RenderTargetKey colorTargetKey(fbAddress, scratchFb.width, scratchFb.siz, Framebuffer::Type::Color);
+                 colorTarget = &targetManager.get(colorTargetKey, true);
+@@ -317,8 +330,12 @@ namespace RT64 {
+                 const RenderTexture *swapChainTexture = ext.swapChain->getTexture(i);
+                 swapChainFramebuffers[i] = ext.device->createFramebuffer(RenderFramebufferDesc(&swapChainTexture, 1));
+             }
++
++            statChainWidth = ext.swapChain->getWidth();
++            statChainHeight = ext.swapChain->getHeight();
++            statChainImages = textureCount;
+         }
+-        
++
+         for (int32_t i = 0; i < framesToPresent; i++) {
+             uint32_t frameCountersNextPresented = 0;
+             if ((framesToPresent > 1) && (usingMSAA || (i > 0))) {
+@@ -355,11 +372,16 @@ namespace RT64 {
+             bool secondPresent = false;
+             const bool presentFrame = (i < framesToPresent) && swapChainValid;
+             if (presentFrame) {
++                blitzPhase(BlitzWatchPresent, "acquire");
++                const auto acquireStart = std::chrono::steady_clock::now();
+                 swapChainValid = ext.swapChain->acquireTexture(acquiredSemaphore.get(), &swapChainIndex);
++                statAcquireUs.fetch_add(blitzUsSince(acquireStart), std::memory_order_relaxed);
+             }
+ 
+             if (presentFrame && swapChainValid) {
+                 // Draw the framebuffer with the VI renderer.
++                blitzPhase(BlitzWatchPresent, "vi-record");
++                const auto viPassStart = std::chrono::steady_clock::now();
+                 RenderTexture *swapChainTexture = ext.swapChain->getTexture(swapChainIndex);
+                 RenderFramebuffer *swapChainFramebuffer = swapChainFramebuffers[swapChainIndex].get();
+                 RenderCommandList *commandList = ext.presentGraphicsWorker->commandList.get();
+@@ -399,8 +421,12 @@ namespace RT64 {
+                         renderParams.textureWidth = colorTarget->width;
+                         renderParams.textureHeight = colorTarget->height;
+                     }
++
++                    statTargetWidth = colorTarget->width;
++                    statTargetHeight = colorTarget->height;
++                    statScaleHundredths = uint32_t(float(colorTarget->resolutionScale.y) * 100.0f);
+                 }
+-                
++
+                 // Instant Replay: this frame into the ring, or a frame from it in place of the game's.
+                 blitzReplayFrame(ext.device, commandList, ext.swapChain, ext.shaderLibrary, present.screenVI, filtering, removeBlackBorders, (secondChain != nullptr) && secondValid, renderParams);
+ 
+@@ -430,13 +456,23 @@ namespace RT64 {
+                     RenderCommandSemaphore *waitSemaphore = acquiredSemaphore.get();
+                     RenderCommandSemaphore *signalSemaphore = drawSemaphores[swapChainIndex].get();
+                     ext.presentGraphicsWorker->commandQueue->executeCommandLists(&commandList, 1, &waitSemaphore, 1, &signalSemaphore, 1, ext.presentGraphicsWorker->commandFence.get());
++                    blitzPhase(BlitzWatchPresent, "vi-gpu");
+                     ext.presentGraphicsWorker->wait();
+                 }
+ 
++                // The first screen's pass, as second_ms is the second's: record, submit, the GPU, and the acquire semaphore it waits on.
++                const uint64_t viPassUs = blitzUsSince(viPassStart);
++                statViPasses.fetch_add(1, std::memory_order_relaxed);
++                statViPassUs.fetch_add(viPassUs, std::memory_order_relaxed);
++                blitzNotePeak(statViPassMaxUs, viPassUs);
++
++                blitzPhase(BlitzWatchPresent, "replay");
+                 blitzReplayRead(ext.presentGraphicsWorker);
+ 
+                 // Also reached with no game frame to show (renderParams without a VI): the hook still draws.
++                blitzPhase(BlitzWatchPresent, "second");
+                 secondPresent = secondDraw(renderParams, secondIndex);
++                blitzPhase(BlitzWatchPresent, "frame");
+             }
+ 
+             if (lockedWorkloadMutex) {
+@@ -465,17 +501,30 @@ namespace RT64 {
+                 }
+ 
+                 if (presentWaitEnabled) {
++                    blitzPhase(BlitzWatchPresent, "present-wait");
+                     ext.swapChain->wait();
+                 }
+ 
+                 RenderCommandSemaphore *waitSemaphore = drawSemaphores[swapChainIndex].get();
+                 presentTimestamp = Timer::current();
++                blitzPhase(BlitzWatchPresent, "present");
++                const auto presentStart = std::chrono::steady_clock::now();
+                 swapChainValid = ext.swapChain->present(swapChainIndex, &waitSemaphore, 1);
++                if (swapChainValid) {
++                    statFirstPresents.fetch_add(1, std::memory_order_relaxed);
++                }
++
+                 if (secondPresent) {
++                    blitzPhase(BlitzWatchPresent, "second-present");
+                     RenderCommandSemaphore *secondWait = secondDrawSemaphores[secondIndex].get();
+                     secondValid = secondChain->present(secondIndex, &secondWait, 1);
++                    if (secondValid) {
++                        statSecondPresents.fetch_add(1, std::memory_order_relaxed);
++                    }
+                 }
+ 
++                statPresentUs.fetch_add(blitzUsSince(presentStart), std::memory_order_relaxed);
++                blitzPhase(BlitzWatchPresent, "frame");
+                 presentProfiler.logAndRestart();
+             }
+         }
+@@ -545,6 +594,10 @@ namespace RT64 {
+                     const RenderTexture *texture = secondChain->getTexture(i);
+                     secondFramebuffers[i] = ext.device->createFramebuffer(RenderFramebufferDesc(&texture, 1));
+                 }
++
++                statSecondWidth = secondChain->getWidth();
++                statSecondHeight = secondChain->getHeight();
++                statSecondImages = secondChain->getTextureCount();
+             }
+         }
+     }
+@@ -566,7 +619,9 @@ namespace RT64 {
+         secondLastMode = mode;
+         secondLastDraw = start;
+         blitz_ds_second_dirty = 0;
++        blitzPhase(BlitzWatchPresent, "second-acquire");
+         secondValid = secondChain->acquireTexture(secondAcquired.get(), &index);
++        blitzPhase(BlitzWatchPresent, "second");
+         if (!secondValid) {
+             blitz_ds_second_failures = blitz_ds_second_failures + 1;
+             return false;
+@@ -683,8 +738,11 @@ namespace RT64 {
+         RenderCommandSemaphore *waitSemaphore = secondAcquired.get();
+         RenderCommandSemaphore *signalSemaphore = secondDrawSemaphores[index].get();
+         ext.presentGraphicsWorker->commandQueue->executeCommandLists(&submitted, 1, &waitSemaphore, 1, &signalSemaphore, 1, ext.presentGraphicsWorker->commandFence.get());
++        blitzPhase(BlitzWatchPresent, "second-gpu");
+         ext.presentGraphicsWorker->wait();
+         blitz_ds_second_ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
++        statSecondPasses.fetch_add(1, std::memory_order_relaxed);
++        statSecondPassUs.fetch_add(blitzUsSince(start), std::memory_order_relaxed);
+         blitz_ds_second_frames = blitz_ds_second_frames + 1;
+         return true;
+     }
+@@ -715,6 +773,13 @@ namespace RT64 {
+ 
+     void PresentQueue::threadLoop() {
+         Thread::setCurrentThreadName("RT64 Present");
++        blitzWatchRegister(BlitzWatchPresent);
++#   if defined(__ANDROID__)
++        // No log has ever said "RT64 Present", and they all have a "Thread-3" at about its CPU: something on this thread looks to
++        // attach it to Java, which then renames it. Potato Mode's logs name it again now and then (a prctl, not a file write).
++        static const bool renameForLogs = getenv("BLITZ_LEAN") != nullptr;
++        uint32_t presentsUntilRename = 1;
++#   endif
+ 
+         // Create the semaphore the acquire method will use.
+         acquiredSemaphore = ext.device->createCommandSemaphore();
+@@ -733,6 +798,13 @@ namespace RT64 {
+         const bool displayTiming = ext.device->getCapabilities().displayTiming;
+         bool swapChainValid = !ext.swapChain->needsResize();
+         while (presentThreadRunning) {
++            blitzPhase(BlitzWatchPresent, "idle");
++#   if defined(__ANDROID__)
++            if (renameForLogs && (--presentsUntilRename == 0)) {
++                presentsUntilRename = 150;
++                Thread::setCurrentThreadName("RT64 Present");
++            }
++#   endif
+             {
+                 std::unique_lock<std::mutex> cursorLock(cursorMutex);
+                 cursorCondition.wait(cursorLock, [&]() {
+@@ -747,8 +819,11 @@ namespace RT64 {
+             }
+ 
+             if (processCursor >= 0) {
++                blitzPhase(BlitzWatchPresent, "lock");
+                 std::unique_lock<std::mutex> threadLock(threadMutex);
++                blitzPhase(BlitzWatchPresent, "second-setup");
+                 secondUpdate();
++                blitzPhase(BlitzWatchPresent, "frame");
+                 const bool needsResize = ext.swapChain->needsResize() || !swapChainValid;
+                 if (needsResize) {
+                     ext.presentGraphicsWorker->commandList->begin();
+@@ -788,7 +863,9 @@ namespace RT64 {
+                 skipPresent = skipPresent || ext.swapChain->isEmpty();
+ 
+                 Present &present = presents[processCursor];
++                blitzPhase(BlitzWatchPresent, "wait-workload");
+                 ext.workloadQueue->waitForWorkloadId(present.workloadId);
++                blitzPhase(BlitzWatchPresent, "frame");
+ 
+                 if (!presentThreadRunning) {
+                     continue;
+diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
+index fc46a15..b330f8b 100644
+--- a/src/hle/rt64_state.cpp
++++ b/src/hle/rt64_state.cpp
+@@ -16,6 +16,7 @@ namespace RT64 { extern std::atomic<uint64_t> statGpuWaitMs, statRamPasses, stat
+ #include "imgui/imgui.h"
+ #include "implot/implot.h"
+ 
++#include "common/rt64_blitz_watch.h"
+ #include "common/rt64_elapsed_timer.h"
+ #include "common/rt64_math.h"
+ #include "common/rt64_tmem_hasher.h"
+@@ -796,6 +797,7 @@ namespace RT64 {
+     }
+ 
+     void State::fullSync() {
++        blitzPhase(BlitzWatchGfx, "sync");
+         flush();
+         submitFramebufferPair(FramebufferPair::FlushReason::ProcessDisplayListsEnd);
+ 
+@@ -1502,7 +1504,9 @@ namespace RT64 {
+                 framebufferRenderer->waitForUploaders();
+                 ext.framebufferGraphicsWorker->execute();
+                 const auto gpuWaitStart = std::chrono::steady_clock::now();
++                blitzPhase(BlitzWatchGfx, "ram-gpu");
+                 ext.framebufferGraphicsWorker->wait();
++                blitzPhase(BlitzWatchGfx, "ram-copy");
+                 statGpuWaitMs += std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - gpuWaitStart).count();
+ 
+                 pairCursor = framebufferPairCursor;
+@@ -1519,6 +1523,7 @@ namespace RT64 {
+                 }
+ 
+                 framebufferPairCursor = maxFramebufferPair;
++                blitzPhase(BlitzWatchGfx, "sync");
+             };
+ 
+             // Before performing any rendering, render targets must be resized to their maximum possible size during the workload.
+@@ -1614,16 +1619,34 @@ namespace RT64 {
+             ext.transformsUploader->wait();
+             ext.framebufferGraphicsWorker->execute();
+             const auto gpuWaitStart = std::chrono::steady_clock::now();
++            blitzPhase(BlitzWatchGfx, "upload-gpu");
+             ext.framebufferGraphicsWorker->wait();
++            blitzPhase(BlitzWatchGfx, "sync");
+             statGpuWaitMs += std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - gpuWaitStart).count();
+             ext.textureCache->waitForGPUUploads();
++
++            // A driver with few texture slots: this workload's textures count as used now, not when its thread reaches them.
++            if (ext.framebufferGraphicsWorker->device->getCapabilities().smallTextureLimit) {
++                thread_local std::vector<uint64_t> usedTextureHashes;
++                usedTextureHashes.clear();
++                for (uint32_t t = 0; t < rdpTileCursor; t++) {
++                    const DrawCallTile &callTile = workload.drawData.callTiles[t];
++                    if (callTile.valid && !callTile.tileCopyUsed) {
++                        usedTextureHashes.emplace_back(callTile.tmemHashOrID);
++                    }
++                }
++
++                ext.textureCache->markTexturesUsed(usedTextureHashes, workload.submissionFrame);
++            }
+         }
+ 
+         // Evict from the texture cache that are too old and should no longer be maintained.
+         // The texture manager should also be notified of any hashes that were removed.
++        blitzPhase(BlitzWatchGfx, "evict");
+         if (ext.textureCache->evict(workloadCounter, evictedTextureHashes)) {
+             textureManager.removeHashes(evictedTextureHashes);
+         }
++        blitzPhase(BlitzWatchGfx, "sync");
+ 
+         if (renderToRDRAM) {
+             // Indicate to the texture cache it's safe to delete the textures if no locks are active.
+diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
+index 1b9209d..95c17d9 100644
+--- a/src/hle/rt64_workload_queue.cpp
++++ b/src/hle/rt64_workload_queue.cpp
+@@ -4,6 +4,7 @@
+ 
+ #include "rt64_workload_queue.h"
+ 
++#include "common/rt64_blitz_watch.h"
+ #include "common/rt64_thread.h"
+ 
+ #include "rt64_present_queue.h"
+@@ -61,11 +62,14 @@ namespace RT64 {
+         int nextWriteCursor = (writeCursor + 1) % workloads.size();
+ 
+         // Stall the thread until the barrier is lifted if we're trying to write on a workload being used by the GPU.
++        const char *phaseBefore = blitzPhaseNow(BlitzWatchGfx);
++        blitzPhase(BlitzWatchGfx, "workload-full");
+         bool waitForBarrier;
+         do {
+             const std::scoped_lock lock(cursorMutex);
+             waitForBarrier = (nextWriteCursor == barrierCursor);
+         } while (waitForBarrier);
++        blitzPhase(BlitzWatchGfx, phaseBefore);
+ 
+         // Modify the cursor and notify anything waiting on the queue.
+         {
+@@ -221,9 +225,16 @@ namespace RT64 {
+             }
+ 
+             break;
+-        case UserConfiguration::Resolution::Manual:
++        case UserConfiguration::Resolution::Manual: {
+             resolutionMultiplier = float(ext.sharedResources->userConfig.resolutionMultiplier);
++            // A run recipe's flat1x (BlitzRecipe.java): with two screens, a flat picture at the original resolution and only the tall one sharper.
++            static const bool flat1x = []() { const char *v = getenv("BLITZ_RECIPE_FLAT1X"); return (v != nullptr) && (v[0] == '1'); }();
++            if (flat1x && (blitz_ds_mode != 0) && (blitz_tall_aspect_on == 0.0f)) {
++                resolutionMultiplier = 1.0f;
++            }
++
+             break;
++        }
+         case UserConfiguration::Resolution::Original:
+         default:
+             resolutionMultiplier = 1.0f;
+@@ -875,10 +886,13 @@ namespace RT64 {
+ 
+             ext.workloadGraphicsWorker->commandList->writeTimestamp(queryPool.get(), 1);
+             ext.workloadGraphicsWorker->commandList->end();
++            blitzPhase(BlitzWatchWorkload, "uploaders");
+             framebufferRenderer->waitForUploaders();
+             ext.workloadGraphicsWorker->execute();
+             const auto frameWaitStart = std::chrono::steady_clock::now();
++            blitzPhase(BlitzWatchWorkload, "gpu");
+             ext.workloadGraphicsWorker->wait();
++            blitzPhase(BlitzWatchWorkload, "draw");
+             statFrameWaitMs += std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - frameWaitStart).count();
+             workerMutex.unlock();
+ 
+@@ -919,6 +933,7 @@ namespace RT64 {
+ 
+     void WorkloadQueue::renderThreadLoop() {
+         Thread::setCurrentThreadName("RT64 Workload");
++        blitzWatchRegister(BlitzWatchWorkload);
+ 
+         WorkloadConfiguration workloadConfig;
+         int64_t logicalTicks = 0;
+@@ -928,6 +943,7 @@ namespace RT64 {
+         int processCursor = -1;
+         bool frameReduction = false;
+         while (threadsRunning) {
++            blitzPhase(BlitzWatchWorkload, "idle");
+             {
+                 std::unique_lock<std::mutex> cursorLock(cursorMutex);
+                 cursorCondition.wait(cursorLock, [&]() {
+@@ -941,9 +957,12 @@ namespace RT64 {
+             }
+ 
+             if (processCursor >= 0) {
++                blitzPhase(BlitzWatchWorkload, "lock");
+                 std::unique_lock<std::mutex> threadLock(threadMutex);
+                 Workload &workload = workloads[processCursor];
++                blitzPhase(BlitzWatchWorkload, "wait-present");
+                 ext.presentQueue->waitForPresentId(workload.presentId);
++                blitzPhase(BlitzWatchWorkload, "draw");
+ 
+                 if (!threadsRunning) {
+                     continue;
+diff --git a/src/render/rt64_descriptor_sets.h b/src/render/rt64_descriptor_sets.h
+index 69a82ac..c881531 100644
+--- a/src/render/rt64_descriptor_sets.h
++++ b/src/render/rt64_descriptor_sets.h
+@@ -309,6 +309,27 @@ namespace RT64 {
+                 create(device);
+             }
+         }
++
++        // For the pipeline layouts and for compact textures: one for set 1 (2D) and one for set 2 (TMEM). Without compact textures
++        // both are the layout above. With them it's a plain array with no descriptor indexing flags, each entry always written.
++        FramebufferRendererDescriptorTextureSet(const RenderDeviceCapabilities &capabilities, bool tmem, RenderDevice *device = nullptr) {
++            const uint32_t compactCount = tmem ? capabilities.compactTexturesTMEM : capabilities.compactTextures2D;
++            this->textureCacheSize = compactCount;
++
++            builder.begin();
++            gTextures = builder.addTexture(0, (compactCount > 0) ? compactCount : uint32_t(UpperRange));
++            gTMEM = gTextures;
++            if (compactCount > 0) {
++                builder.end();
++            }
++            else {
++                builder.end(true, 0);
++            }
++
++            if (device != nullptr) {
++                create(device);
++            }
++        }
+     };
+ 
+     struct FramebufferRendererDescriptorFramebufferSet : RenderDescriptorSetBase {
+diff --git a/src/render/rt64_framebuffer_renderer.cpp b/src/render/rt64_framebuffer_renderer.cpp
+index 82d1bad..d134ab7 100644
+--- a/src/render/rt64_framebuffer_renderer.cpp
++++ b/src/render/rt64_framebuffer_renderer.cpp
+@@ -4,11 +4,14 @@
+ 
+ #include "rt64_framebuffer_renderer.h"
+ 
++#include <cstdio>
++
+ #include <atomic>
+ namespace RT64 { extern std::atomic<uint64_t> statDrawsUber, statDrawsFast; }
+ 
+ #include "../include/rt64_extended_gbi.h"
+ 
++#include "common/rt64_blitz_watch.h"
+ #include "common/rt64_elapsed_timer.h"
+ #include "common/rt64_math.h"
+ #include "hle/rt64_color_converter.h"
+@@ -154,6 +157,8 @@ namespace RT64 {
+ 
+         shaderUploader = std::make_unique<BufferUploader>(worker->device);
+         descCommonSet = std::make_unique<FramebufferRendererDescriptorCommonSet>(shaderLibrary->samplerLibrary, worker->device->getCapabilities().raytracing, worker->device);
++        compact2D.capacity = worker->device->getCapabilities().compactTextures2D;
++        compactTMEM.capacity = worker->device->getCapabilities().compactTexturesTMEM;
+ 
+ #   if RT_ENABLED
+         if (rtSupport) {
+@@ -224,14 +229,29 @@ namespace RT64 {
+         textureCacheReplacementMapEnabled = textureCache->textureMap.replacementMapEnabled;
+         dynamicTextureViewVector.clear();
+         dynamicTextureBarrierVector.clear();
++
++        if (compact2D.capacity > 0) {
++            compactMiss2D = textureCache->missTexture2D->texture.get();
++            compactMissTMEM = textureCache->missTextureTMEM->tmem.get();
++            compact2D.reset(compactMiss2D);
++            compactTMEM.reset(compactMissTMEM);
++            compactMissed = 0;
++        }
+     }
+ 
+-    void FramebufferRenderer::createGPUTiles(const DrawCallTile *callTiles, uint32_t callTileCount, interop::GPUTile *dstGPUTiles, const FramebufferManager *fbManager, 
++    void FramebufferRenderer::createGPUTiles(const DrawCallTile *callTiles, uint32_t callTileCount, interop::GPUTile *dstGPUTiles, const FramebufferManager *fbManager,
+         TextureCache *textureCache, uint64_t submissionFrame)
+     {
++        const bool compactTextures = (compact2D.capacity > 0);
+         for (uint32_t i = 0; i < callTileCount; i++) {
+             const DrawCallTile &callTile = callTiles[i];
+             if (!callTile.valid) {
++                // Whatever an earlier frame left here would no longer mean a texture in this frame's table.
++                if (compactTextures) {
++                    dstGPUTiles[i].textureIndex = 0;
++                    dstGPUTiles[i].flags.rawTMEM = false;
++                }
++
+                 continue;
+             }
+             
+@@ -247,6 +267,7 @@ namespace RT64 {
+                     gpuTile.texelShift = tileCopy.texelShift;
+                     gpuTile.texelMask = tileCopy.texelMask;
+                     gpuTile.textureIndex = getTextureIndex(tileCopy);
++                    blitzNoteTexture(gpuTile.textureIndex);
+                     gpuTile.textureDimensions = interop::float3(float(tileCopy.textureWidth), float(tileCopy.textureHeight), 1.0f);
+                     gpuTile.flags.alphaIsCvg = !callTile.reinterpretTile;
+                     gpuTile.flags.highRes = true;
+@@ -254,6 +275,11 @@ namespace RT64 {
+                     gpuTile.flags.rawTMEM = false;
+                     gpuTile.flags.hasMipmaps = false;
+                 }
++                else if (compactTextures) {
++                    gpuTile.textureIndex = 0;
++                    gpuTile.flags.rawTMEM = false;
++                    compactMissed++;
++                }
+             }
+             else {
+                 // Retrieve the texture from the cache or use a blank texture if not found.
+@@ -261,7 +287,17 @@ namespace RT64 {
+                 bool textureReplaced = false;
+                 bool hasMipmaps = false;
+                 bool shiftedByHalf = false;
+-                textureCache->useTexture(callTile.tmemHashOrID, submissionFrame, textureIndex, gpuTile.tcScale, gpuTile.textureDimensions, textureReplaced, hasMipmaps, shiftedByHalf);
++                bool rawTMEM = false;
++                if (compactTextures) {
++                    Texture *texture = nullptr;
++                    textureCache->useTextureHeld(callTile.tmemHashOrID, submissionFrame, textureIndex, gpuTile.tcScale, gpuTile.textureDimensions, textureReplaced, hasMipmaps, shiftedByHalf, texture);
++                    rawTMEM = !textureReplaced && callTile.rawTMEM;
++                    textureIndex = compactTextureIndex(texture, rawTMEM, hasMipmaps, gpuTile.textureDimensions);
++                }
++                else {
++                    textureCache->useTexture(callTile.tmemHashOrID, submissionFrame, textureIndex, gpuTile.tcScale, gpuTile.textureDimensions, textureReplaced, hasMipmaps, shiftedByHalf);
++                    rawTMEM = !textureReplaced && callTile.rawTMEM;
++                }
+ 
+                 // Describe the GPU tile for a regular texture.
+                 gpuTile.ulScale.x = gpuTile.tcScale.x;
+@@ -269,10 +305,11 @@ namespace RT64 {
+                 gpuTile.texelShift = { 0, 0 };
+                 gpuTile.texelMask = { UINT_MAX, UINT_MAX };
+                 gpuTile.textureIndex = textureIndex;
++                blitzNoteTexture(textureIndex);
+                 gpuTile.flags.alphaIsCvg = false;
+                 gpuTile.flags.highRes = textureReplaced;
+                 gpuTile.flags.fromCopy = false;
+-                gpuTile.flags.rawTMEM = !textureReplaced && callTile.rawTMEM;
++                gpuTile.flags.rawTMEM = rawTMEM;
+                 gpuTile.flags.hasMipmaps = hasMipmaps;
+                 gpuTile.flags.shiftedByHalf = shiftedByHalf;
+             }
+@@ -303,22 +340,105 @@ namespace RT64 {
+     uint32_t FramebufferRenderer::getTextureIndex(const FramebufferManager::TileCopy &tileCopy) {
+         assert(tileCopy.texture != nullptr);
+ 
++        if (compact2D.capacity > 0) {
++            dynamicTextureBarrierVector.emplace_back(RenderTextureBarrier(tileCopy.texture.get(), RenderTextureLayout::SHADER_READ));
++            const uint32_t compactIndex = compact2D.indexOf(tileCopy.texture.get());
++            if (compactIndex == 0) {
++                compactMissed++;
++            }
++
++            return compactIndex;
++        }
++
+         uint32_t dstIndex = getDestinationIndex();
+         dynamicTextureViewVector.emplace_back(DynamicTextureView{ tileCopy.texture.get(), dstIndex, nullptr });
+         dynamicTextureBarrierVector.emplace_back(RenderTextureBarrier(tileCopy.texture.get(), RenderTextureLayout::SHADER_READ));
+         return dstIndex;
+     }
+-    
++
++    uint32_t FramebufferRenderer::compactTextureIndex(const Texture *texture, bool &rawTMEM, bool &hasMipmaps, interop::float3 &textureDimensions) {
++        const RenderTexture *tableTexture = nullptr;
++        if (texture != nullptr) {
++            tableTexture = rawTMEM ? texture->tmem.get() : texture->texture.get();
++        }
++
++        uint32_t compactIndex = 0;
++        if (tableTexture != nullptr) {
++            compactIndex = rawTMEM ? compactTMEM.indexOf(tableTexture) : compact2D.indexOf(tableTexture);
++        }
++
++        // A miss always reads the 2D one: decoding raw TMEM from the 1D one would read past its one byte.
++        if (compactIndex == 0) {
++            rawTMEM = false;
++            hasMipmaps = false;
++            textureDimensions = interop::float3(4.0f, 4.0f, 1.0f);
++            compactMissed++;
++        }
++
++        return compactIndex;
++    }
++
++    static void writeCompactTable(FramebufferRendererDescriptorTextureSet &set, const FramebufferRenderer::CompactTable &table, std::vector<uint8_t> &holdsTexture, const RenderTexture *miss) {
++        // Used entries are written every time: a new texture can have the address of a deleted one, so an equal pointer proves nothing.
++        for (uint32_t i = 0; i < table.capacity; i++) {
++            if ((i > 0) && (i < table.textures.size())) {
++                set.setTexture(i, table.textures[i], RenderTextureLayout::SHADER_READ);
++                holdsTexture[i] = 1;
++            }
++            else if (holdsTexture[i] != 0) {
++                set.setTexture(i, miss, RenderTextureLayout::SHADER_READ);
++                holdsTexture[i] = 0;
++            }
++        }
++    }
++
++    void FramebufferRenderer::updateCompactSets(RenderWorker *worker) {
++        compactSetCursor = (compactSetCursor + 1) % CompactSetCount;
++
++        CompactSets &sets = compactSets[compactSetCursor];
++        if (sets.set2D == nullptr) {
++            const RenderDeviceCapabilities &capabilities = worker->device->getCapabilities();
++            sets.set2D = std::make_unique<FramebufferRendererDescriptorTextureSet>(capabilities, false, worker->device);
++            sets.setTMEM = std::make_unique<FramebufferRendererDescriptorTextureSet>(capabilities, true, worker->device);
++
++            // No entry may stay unwritten on a driver without partially bound arrays, so a new set starts out all miss.
++            sets.holdsTexture2D.assign(compact2D.capacity, 1);
++            sets.holdsTextureTMEM.assign(compactTMEM.capacity, 1);
++        }
++
++        writeCompactTable(*sets.set2D, compact2D, sets.holdsTexture2D, compactMiss2D);
++        writeCompactTable(*sets.setTMEM, compactTMEM, sets.holdsTextureTMEM, compactMissTMEM);
++
++        // Log only what changes the verdict on the table's size: a new peak, or any tile left reading the miss.
++        compactUpdates++;
++        const uint32_t used2D = uint32_t(compact2D.textures.size()) - 1;
++        const uint32_t usedTMEM = uint32_t(compactTMEM.textures.size()) - 1;
++        const bool newPeak = (used2D >= compact2D.peak + 8) || (usedTMEM >= compactTMEM.peak + 8);
++        const bool anyMissed = (compactMissed > 0) && ((compactLoggedAt == 0) || (compactUpdates - compactLoggedAt >= 150));
++        if (newPeak || anyMissed) {
++            compact2D.peak = std::max(compact2D.peak, used2D);
++            compactTMEM.peak = std::max(compactTMEM.peak, usedTMEM);
++            compactLoggedAt = compactUpdates;
++            fprintf(stderr, "[textures] compact: %u of %u 2D (peak %u), %u of %u TMEM (peak %u), over the table %u, tiles on the miss %u\n",
++                used2D, compact2D.capacity - 1, compact2D.peak, usedTMEM, compactTMEM.capacity - 1, compactTMEM.peak, compact2D.over + compactTMEM.over, compactMissed);
++        }
++    }
++
+     void FramebufferRenderer::updateShaderDescriptorSet(RenderWorker *worker, const DrawBuffers *drawBuffers, const OutputBuffers *outputBuffers, const bool raytracingEnabled) {
+         assert(worker != nullptr);
+         assert(drawBuffers != nullptr);
+-        
+-        const bool createSet = (descTextureSet == nullptr) || (descTextureSet->textureCacheSize < (textureCacheSize + 1));
++
++        const bool compactTextures = (compact2D.capacity > 0);
++        if (compactTextures) {
++            updateCompactSets(worker);
++        }
++
++        const bool createSet = !compactTextures && ((descTextureSet == nullptr) || (descTextureSet->textureCacheSize < (textureCacheSize + 1)));
+         if (createSet) {
+             descTextureSet = std::make_unique<FramebufferRendererDescriptorTextureSet>(worker->device, ((textureCacheSize + 1) * 3) / 2);
+         }
+ 
+-        if (createSet || (descriptorTextureReplacementMapEnabled != textureCacheReplacementMapEnabled)) {
++        if (!compactTextures && (createSet || (descriptorTextureReplacementMapEnabled != textureCacheReplacementMapEnabled))) {
+             descriptorTextureVersions.clear();
+             descriptorTextureGlobalVersion = 0;
+             descriptorTextureReplacementMapEnabled = textureCacheReplacementMapEnabled;
+@@ -381,6 +501,11 @@ namespace RT64 {
+         descCommonSet->setBuffer(descCommonSet->GPUTiles, drawBuffers->gpuTilesBuffer.get(), RenderBufferStructuredView(sizeof(interop::GPUTile)));
+         descCommonSet->setBuffer(descCommonSet->DynamicRenderParams, drawBuffers->renderParamsBuffer.get(), RenderBufferStructuredView(sizeof(interop::RenderParams)));
+ 
++        // Compact textures were written above.
++        if (compactTextures) {
++            return;
++        }
++
+         // Make sure the versions vector matches the texture cache size.
+         descriptorTextureVersions.resize(textureCacheSize, 0);
+ 
+@@ -484,8 +609,9 @@ namespace RT64 {
+             previousScissor = RenderRect();
+             worker->commandList->setGraphicsPipelineLayout(rendererPipelineLayout);
+             worker->commandList->setGraphicsDescriptorSet(descCommonSet->get(), 0);
+-            worker->commandList->setGraphicsDescriptorSet(descTextureSet->get(), 1);
+-            worker->commandList->setGraphicsDescriptorSet(descTextureSet->get(), 2);
++            const CompactSets &compactSet = compactSets[compactSetCursor];
++            worker->commandList->setGraphicsDescriptorSet((compact2D.capacity > 0) ? compactSet.set2D->get() : descTextureSet->get(), 1);
++            worker->commandList->setGraphicsDescriptorSet((compact2D.capacity > 0) ? compactSet.setTMEM->get() : descTextureSet->get(), 2);
+             worker->commandList->setGraphicsDescriptorSet(depthState ? descRealFbSet : descDummyFbSet, 3);
+             worker->commandList->setViewports(framebuffer.viewport);
+         };
+diff --git a/src/render/rt64_framebuffer_renderer.h b/src/render/rt64_framebuffer_renderer.h
+index 3add9c3..abdb81d 100644
+--- a/src/render/rt64_framebuffer_renderer.h
++++ b/src/render/rt64_framebuffer_renderer.h
+@@ -5,6 +5,7 @@
+ #pragma once
+ 
+ #include <stdint.h>
++#include <unordered_map>
+ 
+ #include "common/rt64_emulator_configuration.h"
+ #include "common/rt64_user_configuration.h"
+@@ -98,6 +99,61 @@ namespace RT64 {
+         std::vector<uint32_t> descriptorTextureVersions;
+         uint32_t descriptorTextureGlobalVersion = 0;
+         bool descriptorTextureReplacementMapEnabled = false;
++
++        // Compact textures (see RenderDeviceCapabilities): each batch of draws numbers the textures it uses from 1 in two plain
++        // arrays. Entry 0 is the miss, read by a tile that found no texture or no room. Sets go round so that none is written
++        // while a submitted command list may be reading it, and an entry not in use holds the miss rather than a dead texture.
++        struct CompactTable {
++            uint32_t capacity = 0;
++            uint32_t over = 0;
++            uint32_t peak = 0;
++            std::vector<const RenderTexture *> textures;
++            std::unordered_map<const RenderTexture *, uint32_t> indices;
++
++            void reset(const RenderTexture *miss) {
++                textures.clear();
++                indices.clear();
++                over = 0;
++                textures.emplace_back(miss);
++                indices[miss] = 0;
++            }
++
++            uint32_t indexOf(const RenderTexture *texture) {
++                const auto it = indices.find(texture);
++                if (it != indices.end()) {
++                    return it->second;
++                }
++
++                if (textures.size() >= capacity) {
++                    over++;
++                    return 0;
++                }
++
++                const uint32_t index = uint32_t(textures.size());
++                textures.emplace_back(texture);
++                indices[texture] = index;
++                return index;
++            }
++        };
++
++        struct CompactSets {
++            std::unique_ptr<FramebufferRendererDescriptorTextureSet> set2D;
++            std::unique_ptr<FramebufferRendererDescriptorTextureSet> setTMEM;
++            std::vector<uint8_t> holdsTexture2D;
++            std::vector<uint8_t> holdsTextureTMEM;
++        };
++
++        static const uint32_t CompactSetCount = 3;
++        CompactTable compact2D;
++        CompactTable compactTMEM;
++        CompactSets compactSets[CompactSetCount];
++        uint32_t compactSetCursor = 0;
++        uint32_t compactMissed = 0;
++        uint64_t compactUpdates = 0;
++        uint64_t compactLoggedAt = 0;
++        const RenderTexture *compactMiss2D = nullptr;
++        const RenderTexture *compactMissTMEM = nullptr;
++
+         std::unique_ptr<RSPSmoothNormalDescriptorSet> smoothDescSet;
+         std::unique_ptr<RSPVertexTestZDescriptorSet> vertexTestZSet;
+         interop::FrameParams frameParams;
+@@ -157,6 +213,8 @@ namespace RT64 {
+         uint32_t getDestinationIndex();
+         uint32_t getTextureIndex(RenderTarget *renderTarget);
+         uint32_t getTextureIndex(const FramebufferManager::TileCopy &tileCopy);
++        uint32_t compactTextureIndex(const Texture *texture, bool &rawTMEM, bool &hasMipmaps, interop::float3 &textureDimensions);
++        void updateCompactSets(RenderWorker *worker);
+         void updateMultisampling();
+         void updateShaderDescriptorSet(RenderWorker *worker, const DrawBuffers *drawBuffers, const OutputBuffers *outputBuffers, bool raytracingEnabled);
+         void updateRSPSmoothNormalSet(RenderWorker *worker, const DrawBuffers *drawBuffers, const OutputBuffers *outputBuffers);
+diff --git a/src/render/rt64_raster_shader.cpp b/src/render/rt64_raster_shader.cpp
+index 721a01e..86bd1b9 100644
+--- a/src/render/rt64_raster_shader.cpp
++++ b/src/render/rt64_raster_shader.cpp
+@@ -445,14 +445,15 @@ namespace RT64 {
+         pixelShader = device->createShader(PSBlob, PSBlobSize, "PSMain", shaderFormat);
+ 
+         FramebufferRendererDescriptorCommonSet descriptorCommonSet(shaderLibrary->samplerLibrary, device->getCapabilities().raytracing);
+-        FramebufferRendererDescriptorTextureSet descriptorTextureSet;
++        FramebufferRendererDescriptorTextureSet descriptorTextureSet(device->getCapabilities(), false);
++        FramebufferRendererDescriptorTextureSet descriptorTMEMSet(device->getCapabilities(), true);
+         FramebufferRendererDescriptorFramebufferSet descriptorFramebufferSet;
+         RenderPipelineLayoutBuilder layoutBuilder;
+         layoutBuilder.begin(false, true);
+         layoutBuilder.addPushConstant(0, 0, sizeof(interop::RasterParams), RenderShaderStageFlag::VERTEX | RenderShaderStageFlag::PIXEL);
+         layoutBuilder.addDescriptorSet(descriptorCommonSet);
+         layoutBuilder.addDescriptorSet(descriptorTextureSet);
+-        layoutBuilder.addDescriptorSet(descriptorTextureSet);
++        layoutBuilder.addDescriptorSet(descriptorTMEMSet);
+         layoutBuilder.addDescriptorSet(descriptorFramebufferSet);
+         layoutBuilder.end();
+         pipelineLayout = layoutBuilder.create(device);
+diff --git a/src/render/rt64_raster_shader_cache.cpp b/src/render/rt64_raster_shader_cache.cpp
+index b2fd4cd..e7ce67d 100644
+--- a/src/render/rt64_raster_shader_cache.cpp
++++ b/src/render/rt64_raster_shader_cache.cpp
+@@ -4,6 +4,7 @@
+ 
+ #include "rt64_raster_shader_cache.h"
+ 
++#include "common/rt64_blitz_watch.h"
+ #include "common/rt64_thread.h"
+ 
+ #include <atomic>
+@@ -13,6 +14,61 @@ namespace RT64 {
+     // Where a weak device's time goes (Potato Mode's log, src/main/fps_counter.cpp).
+     std::atomic<uint64_t> statQueued{0}, statCompiled{0}, statCompileMs{0}, statDrawsUber{0}, statDrawsFast{0}, statGpuWaitMs{0}, statTextureSlots{0}, statFrameGpuMs{0}, statFrameWaitMs{0}, statRamPasses{0}, statRamSkips{0};
+     std::atomic<int> renderToRAMMode{1};
++
++    // The stall watchdog's (common/rt64_blitz_watch.h).
++    std::atomic<const char *> blitzWatchPhase[BlitzWatchThreads];
++    std::atomic<int> blitzWatchTid[BlitzWatchThreads];
++    std::atomic<uint64_t> statEvictions{0}, statUploads{0}, statUploadWaitUs{0}, statCompileMsTotal{0};
++    std::atomic<uint64_t> statFirstPresents{0}, statSecondPresents{0};
++    std::atomic<uint64_t> statViPasses{0}, statViPassUs{0}, statViPassMaxUs{0}, statAcquireUs{0}, statPresentUs{0}, statSecondPasses{0}, statSecondPassUs{0};
++    std::atomic<uint64_t> statTextureHighest{0}, statTexturesPast256{0}, statTextureDraws{0};
++    std::atomic<uint32_t> statTargetWidth{0}, statTargetHeight{0}, statScaleHundredths{0}, statChainWidth{0}, statChainHeight{0}, statChainImages{0}, statSecondWidth{0}, statSecondHeight{0}, statSecondImages{0};
++}
++
++// The stall watchdog's reading (src/main/fps_counter.cpp, which declares the same struct). All running totals.
++struct BlitzRt64Watch {
++    uint64_t evictions, uploads, uploadWaitUs, compileMs, firstPresents, secondPresents;
++    uint64_t viPasses, viPassUs, acquireUs, presentUs, secondPasses, secondPassUs, textureDraws, texturesPast256;
++};
++
++extern "C" void blitz_rt64_watch_read(BlitzRt64Watch *w) {
++    w->evictions = RT64::statEvictions.load(std::memory_order_relaxed);
++    w->uploads = RT64::statUploads.load(std::memory_order_relaxed);
++    w->uploadWaitUs = RT64::statUploadWaitUs.load(std::memory_order_relaxed);
++    w->compileMs = RT64::statCompileMsTotal.load(std::memory_order_relaxed);
++    w->firstPresents = RT64::statFirstPresents.load(std::memory_order_relaxed);
++    w->secondPresents = RT64::statSecondPresents.load(std::memory_order_relaxed);
++    w->viPasses = RT64::statViPasses.load(std::memory_order_relaxed);
++    w->viPassUs = RT64::statViPassUs.load(std::memory_order_relaxed);
++    w->acquireUs = RT64::statAcquireUs.load(std::memory_order_relaxed);
++    w->presentUs = RT64::statPresentUs.load(std::memory_order_relaxed);
++    w->secondPasses = RT64::statSecondPasses.load(std::memory_order_relaxed);
++    w->secondPassUs = RT64::statSecondPassUs.load(std::memory_order_relaxed);
++    w->textureDraws = RT64::statTextureDraws.load(std::memory_order_relaxed);
++    w->texturesPast256 = RT64::statTexturesPast256.load(std::memory_order_relaxed);
++}
++
++// The peaks since the last call: one reader, the watchdog's report.
++extern "C" void blitz_rt64_watch_peaks(uint64_t *viPassMaxUs, uint64_t *textureHighest) {
++    *viPassMaxUs = RT64::statViPassMaxUs.exchange(0);
++    *textureHighest = RT64::statTextureHighest.exchange(0);
++}
++
++extern "C" void blitz_rt64_watch_sizes(uint32_t *size) {  // 9 of them, in this order
++    size[0] = RT64::statTargetWidth.load(std::memory_order_relaxed);
++    size[1] = RT64::statTargetHeight.load(std::memory_order_relaxed);
++    size[2] = RT64::statScaleHundredths.load(std::memory_order_relaxed);
++    size[3] = RT64::statChainWidth.load(std::memory_order_relaxed);
++    size[4] = RT64::statChainHeight.load(std::memory_order_relaxed);
++    size[5] = RT64::statChainImages.load(std::memory_order_relaxed);
++    size[6] = RT64::statSecondWidth.load(std::memory_order_relaxed);
++    size[7] = RT64::statSecondHeight.load(std::memory_order_relaxed);
++    size[8] = RT64::statSecondImages.load(std::memory_order_relaxed);
++}
++
++extern "C" const char *blitz_rt64_watch_phase(int thread, int *tid) {
++    *tid = RT64::blitzWatchTid[thread].load(std::memory_order_relaxed);
++    return RT64::blitzWatchPhase[thread].load(std::memory_order_relaxed);
+ }
+ 
+ // Settings → Frame Copy in Potato Mode, and live with "RT64 ram 0|1|2" (dev_input.cpp): the second drawing of each frame, into
+@@ -95,7 +151,9 @@ namespace RT64 {
+                     shaderCache->GPUShaders[shaderDesc.hash()] = std::move(newShader);
+                 }
+                 statCompiled++;
+-                statCompileMs += std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - compileStart).count();
++                const uint64_t compileMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - compileStart).count();
++                statCompileMs += compileMs;
++                statCompileMsTotal += compileMs;
+             }
+         }
+     }
+diff --git a/src/render/rt64_shader_library.cpp b/src/render/rt64_shader_library.cpp
+index d1c5273..157c2d0 100644
+--- a/src/render/rt64_shader_library.cpp
++++ b/src/render/rt64_shader_library.cpp
+@@ -855,12 +855,13 @@ namespace RT64 {
+         // Raytracing debug.
+         {
+             FramebufferRendererDescriptorCommonSet descriptorCommonSet(samplerLibrary, deviceCapabilities.raytracing);
+-            FramebufferRendererDescriptorTextureSet descriptorTextureSet;
++            FramebufferRendererDescriptorTextureSet descriptorTextureSet(deviceCapabilities, false);
++            FramebufferRendererDescriptorTextureSet descriptorTMEMSet(deviceCapabilities, true);
+             FramebufferRendererDescriptorFramebufferSet descriptorFramebufferSet;
+             layoutBuilder.begin();
+             layoutBuilder.addDescriptorSet(descriptorCommonSet);
+             layoutBuilder.addDescriptorSet(descriptorTextureSet);
+-            layoutBuilder.addDescriptorSet(descriptorTextureSet);
++            layoutBuilder.addDescriptorSet(descriptorTMEMSet);
+             layoutBuilder.addDescriptorSet(descriptorFramebufferSet);
+             layoutBuilder.end();
+             debug.pipelineLayout = layoutBuilder.create(device);
+diff --git a/src/render/rt64_texture_cache.cpp b/src/render/rt64_texture_cache.cpp
+index 0efccad..f247c80 100644
+--- a/src/render/rt64_texture_cache.cpp
++++ b/src/render/rt64_texture_cache.cpp
+@@ -12,6 +12,7 @@
+ // Needs to be included before other headers.
+ #include "gbi/rt64_f3d.h"
+ 
++#include "common/rt64_blitz_watch.h"
+ #include "common/rt64_filesystem_directory.h"
+ #include "common/rt64_filesystem_zip.h"
+ #include "common/rt64_load_types.h"
+@@ -24,6 +25,7 @@
+ #define ONLY_USE_LOW_MIP_CACHE 0
+ 
+ #include <atomic>
++#include <chrono>
+ #include <cstdlib>
+ 
+ namespace RT64 { extern std::atomic<uint64_t> statTextureSlots; }
+@@ -329,16 +331,26 @@ namespace RT64 {
+             textureDimensions = cachedTextureDimensions[textureIndex];
+         }
+ 
++        markUsed(textureIndex, submissionFrame);
++        return true;
++    }
++
++    void TextureMap::markUsed(uint32_t textureIndex, uint64_t submissionFrame) {
+         // Remove the existing entry from the list if it exists.
++        uint64_t accessFrame = submissionFrame;
+         AccessList::iterator listIt = listIterators[textureIndex];
+         if (listIt != accessList.end()) {
++            // The state thread marks a frame ahead of the workload thread (see markTexturesUsed): the newer one stands.
++            if (keepNewestUse) {
++                accessFrame = std::max(accessFrame, listIt->second);
++            }
++
+             accessList.erase(listIt);
+         }
+ 
+         // Push a new access entry to the front of the list and store the new iterator.
+-        accessList.push_front({ textureIndex, submissionFrame });
++        accessList.push_front({ textureIndex, accessFrame });
+         listIterators[textureIndex] = accessList.begin();
+-        return true;
+     }
+ 
+     bool TextureMap::evict(uint64_t submissionFrame, std::vector<uint64_t> &evictedHashes) {
+@@ -356,8 +368,10 @@ namespace RT64 {
+             uint64_t maxAge = std::clamp(it->second - creationFrames[it->first], MinimumMaxAge, MaximumMaxAge);
+ 
+             // Mali-G52 can sample 256 textures per stage, and past that reads black, so a weak device keeps fewer around.
++            // A run recipe's evict (BlitzRecipe.java) moves the line, to show how much of a stall is eviction.
+             static const bool fewerTextures = getenv("BLITZ_LEAN") != nullptr;
+-            if (fewerTextures && (hashMap.size() > 120)) {
++            static const size_t fewerTexturesLine = []() { const char *v = getenv("BLITZ_RECIPE_EVICT"); return (v != nullptr) ? size_t(strtoul(v, nullptr, 10)) : size_t(120); }();
++            if (fewerTextures && (hashMap.size() > fewerTexturesLine)) {
+                 maxAge = MinimumMaxAge;
+             }
+ 
+@@ -394,6 +408,7 @@ namespace RT64 {
+             }
+         }
+ 
++        statEvictions.fetch_add(evictedHashes.size(), std::memory_order_relaxed);
+         return !evictedHashes.empty();
+     }
+ 
+@@ -989,6 +1004,7 @@ namespace RT64 {
+ 
+     void TextureCache::uploadThreadLoop() {
+         Thread::setCurrentThreadName("RT64 Texture");
++        blitzWatchRegister(BlitzWatchTexture);
+ 
+         uploadThreadRunning = true;
+ 
+@@ -1011,11 +1027,13 @@ namespace RT64 {
+             afterDecodeBarriers.clear();
+ 
+             // Check the top of the queue or wait if it's empty.
++            blitzPhase(BlitzWatchTexture, "idle");
+             {
+                 std::unique_lock queueLock(uploadQueueMutex);
+                 uploadQueueChanged.wait(queueLock, [this]() {
+                     return !uploadThreadRunning || !uploadQueue.empty() || !resolvedPathQueue.empty() || !streamResultQueue.empty();
+                 });
++                blitzPhase(BlitzWatchTexture, "upload");
+ 
+                 if (!uploadQueue.empty()) {
+                     queueCopy = uploadQueue;
+@@ -1248,7 +1266,9 @@ namespace RT64 {
+                 const RenderCommandList *directCommandList = directWorker->commandList.get();
+                 directWorker->commandList->end();
+                 directWorker->commandQueue->executeCommandLists(&directCommandList, 1, &syncSemaphore, 1, nullptr, 0, directWorker->commandFence.get());
++                blitzPhase(BlitzWatchTexture, "gpu");
+                 directWorker->wait();
++                blitzPhase(BlitzWatchTexture, "upload");
+ 
+                 // Delete all the resources used during the upload of replacements.
+                 replacementUploadResources.clear();
+@@ -1274,6 +1294,7 @@ namespace RT64 {
+                     uploadQueue = std::move(newQueue);
+                 }
+ 
++                statUploads.fetch_add(queueSize, std::memory_order_relaxed);
+                 queueCopy.clear();
+                 uploadQueueFinished.notify_all();
+             }
+@@ -1302,10 +1323,17 @@ namespace RT64 {
+     }
+ 
+     void TextureCache::waitForGPUUploads() {
+-        std::unique_lock queueLock(uploadQueueMutex);
+-        uploadQueueFinished.wait(queueLock, [this]() {
+-            return uploadQueue.empty();
+-        });
++        const char *phaseBefore = blitzPhaseNow(BlitzWatchGfx);
++        blitzPhase(BlitzWatchGfx, "uploads");
++        const auto waitStart = std::chrono::steady_clock::now();
++        {
++            std::unique_lock queueLock(uploadQueueMutex);
++            uploadQueueFinished.wait(queueLock, [this]() {
++                return uploadQueue.empty();
++            });
++        }
++        statUploadWaitUs.fetch_add(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - waitStart).count(), std::memory_order_relaxed);
++        blitzPhase(BlitzWatchGfx, phaseBefore);
+     }
+ 
+     void TextureCache::addResolvedPaths(uint64_t hash, uint32_t width, uint32_t height, uint32_t tlut, const LoadTile &loadTile, const std::vector<uint8_t> &bytesTMEM, bool decodeTMEM, std::vector<ReplacementResolvedPath> &resolvedPaths, uint64_t exclusiveDbHash) {
+@@ -1347,6 +1375,60 @@ namespace RT64 {
+         bool shiftedByHalf;
+         return useTexture(hash, submissionFrame, textureIndex, textureScale, textureDimensions, textureReplaced, hasMipmaps, shiftedByHalf);
+     }
++
++    // Under one lock, as eviction on another thread can give the slot away straight after.
++    bool TextureCache::useTextureHeld(uint64_t hash, uint64_t submissionFrame, uint32_t &textureIndex, interop::float2 &textureScale, interop::float3 &textureDimensions, bool &textureReplaced, bool &hasMipmaps, bool &shiftedByHalf, Texture *&texture) {
++        std::unique_lock lock(textureMapMutex);
++        texture = nullptr;
++        const bool found = textureMap.use(hash, submissionFrame, textureIndex, textureScale, textureDimensions, textureReplaced, hasMipmaps, shiftedByHalf);
++        if (found) {
++            texture = textureReplaced ? textureMap.textureReplacements[textureIndex] : textureMap.textures[textureIndex];
++        }
++
++        return found;
++    }
++
++    // Without a pass through RAM, a workload's tiles are only marked used when its thread gets to them, which can be after the
++    // state thread has evicted them for this very frame.
++    void TextureCache::markTexturesUsed(const std::vector<uint64_t> &hashes, uint64_t submissionFrame) {
++        std::unique_lock lock(textureMapMutex);
++        textureMap.keepNewestUse = true;
++        for (uint64_t hash : hashes) {
++            const auto it = textureMap.hashMap.find(hash);
++            if (it != textureMap.hashMap.end()) {
++                textureMap.markUsed(it->second, submissionFrame);
++            }
++        }
++    }
++
++    // Compact textures: what a tile reads when it found no texture or no room in the frame's table, and what fills the unused
++    // entries of the plain arrays, as this driver has no null descriptors and no partially bound arrays.
++    void TextureCache::createMissTextures(RenderWorker *worker) {
++        static const uint8_t ClearTexels[4 * 4 * 4] = {};
++        const uint32_t TMEMBufferSize = 16;
++        std::unique_ptr<RenderBuffer> upload2D;
++        std::unique_ptr<RenderBuffer> uploadTMEM;
++        missTexture2D = std::make_unique<Texture>();
++        missTextureTMEM = std::make_unique<Texture>();
++        {
++            RenderWorkerExecution execution(worker);
++            RenderCommandList *commandList = worker->commandList.get();
++            setRGBA32(missTexture2D.get(), worker->device, commandList, ClearTexels, sizeof(ClearTexels), 4, 4, 4 * 4, upload2D);
++
++            missTextureTMEM->format = RenderFormat::R8_UINT;
++            missTextureTMEM->width = 1;
++            missTextureTMEM->height = 1;
++            missTextureTMEM->tmem = worker->device->createTexture(RenderTextureDesc::Texture1D(1, 1, missTextureTMEM->format));
++            uploadTMEM = worker->device->createBuffer(RenderBufferDesc::UploadBuffer(TMEMBufferSize));
++            memset(uploadTMEM->map(), 0, TMEMBufferSize);
++            uploadTMEM->unmap();
++
++            commandList->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(missTextureTMEM->tmem.get(), RenderTextureLayout::COPY_DEST));
++            commandList->copyTextureRegion(RenderTextureCopyLocation::Subresource(missTextureTMEM->tmem.get()), RenderTextureCopyLocation::PlacedFootprint(uploadTMEM.get(), RenderFormat::R8_UINT, 1, 1, 1, 1));
++            commandList->barriers(RenderBarrierStage::GRAPHICS_AND_COMPUTE, RenderTextureBarrier(missTexture2D->texture.get(), RenderTextureLayout::SHADER_READ));
++            commandList->barriers(RenderBarrierStage::GRAPHICS_AND_COMPUTE, RenderTextureBarrier(missTextureTMEM->tmem.get(), RenderTextureLayout::SHADER_READ));
++        }
++    }
+     
+     bool TextureCache::addReplacement(uint64_t hash, const std::string &relativePath, ReplacementShift shift) {
+         waitForAllStreamThreads(false);
+diff --git a/src/render/rt64_texture_cache.h b/src/render/rt64_texture_cache.h
+index 9131697..b31192e 100644
+--- a/src/render/rt64_texture_cache.h
++++ b/src/render/rt64_texture_cache.h
+@@ -137,6 +137,7 @@ namespace RT64 {
+         std::vector<Texture *> evictedTextures;
+         ReplacementMap replacementMap;
+         bool replacementMapEnabled;
++        bool keepNewestUse = false;
+ 
+         TextureMap();
+         ~TextureMap();
+@@ -144,6 +145,7 @@ namespace RT64 {
+         void add(uint64_t hash, uint64_t creationFrame, Texture *texture);
+         void replace(uint64_t hash, Texture *texture, bool shiftedByHalf, bool referenceCounted);
+         bool use(uint64_t hash, uint64_t submissionFrame, uint32_t &textureIndex, interop::float2 &textureScale, interop::float3 &textureDimensions, bool &textureReplaced, bool &hasMipmaps, bool &shiftedByHalf);
++        void markUsed(uint32_t textureIndex, uint64_t submissionFrame);
+         bool evict(uint64_t submissionFrame, std::vector<uint64_t> &evictedHashes);
+         void incrementLock();
+         void decrementLock();
+@@ -229,6 +231,8 @@ namespace RT64 {
+         std::mutex uploadResourcePoolMutex;
+         uint32_t lockCounter;
+         bool developerMode;
++        std::unique_ptr<Texture> missTexture2D;
++        std::unique_ptr<Texture> missTextureTMEM;
+ 
+         TextureCache(RenderWorker *directWorker, RenderWorker *copyWorker, uint32_t threadCount, const ShaderLibrary *shaderLibrary);
+         ~TextureCache();
+@@ -238,6 +242,9 @@ namespace RT64 {
+         void addResolvedPaths(uint64_t hash, uint32_t width, uint32_t height, uint32_t tlut, const LoadTile &loadTile, const std::vector<uint8_t> &bytesTMEM, bool decodeTMEM, std::vector<ReplacementResolvedPath> &resolvedPaths, uint64_t exclusiveDbHash = 0);
+         bool useTexture(uint64_t hash, uint64_t submissionFrame, uint32_t &textureIndex, interop::float2 &textureScale, interop::float3 &textureDimensions, bool &textureReplaced, bool &hasMipmaps, bool &shiftedByHalf);
+         bool useTexture(uint64_t hash, uint64_t submissionFrame, uint32_t &textureIndex);
++        bool useTextureHeld(uint64_t hash, uint64_t submissionFrame, uint32_t &textureIndex, interop::float2 &textureScale, interop::float3 &textureDimensions, bool &textureReplaced, bool &hasMipmaps, bool &shiftedByHalf, Texture *&texture);
++        void markTexturesUsed(const std::vector<uint64_t> &hashes, uint64_t submissionFrame);
++        void createMissTextures(RenderWorker *worker);
+         bool addReplacement(uint64_t hash, const std::string &relativePath, ReplacementShift shift);
+         bool hasReplacement(uint64_t hash);
+         void clearReplacementDirectories();

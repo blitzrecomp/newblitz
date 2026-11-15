@@ -1,0 +1,32 @@
+diff --git a/recompui/src/core/ui_context.cpp b/recompui/src/core/ui_context.cpp
+index e99229a..9667a43 100644
+--- a/recompui/src/core/ui_context.cpp
++++ b/recompui/src/core/ui_context.cpp
+@@ -15,6 +15,8 @@
+ #include "data/base_rcss.h"
+ #include "util/file.h"
+ 
++extern std::recursive_mutex ui_state_mutex;  // ui_state.cpp: the draw holds it
++
+ // Hash implementations for ContextId and ResourceId.
+ template <>
+ struct std::hash<recompui::ContextId> {
+@@ -376,7 +378,9 @@ void recompui::ContextId::open() {
+         context_error(*this, ContextErrorType::OpenInvalidContext);
+     }
+ 
+-    // Take ownership of the target context.
++    // Take ownership of the target context. The UI lock first, as the draw holds it through layout, which reads every
++    // shown context's elements: an element added meanwhile crashed it (the crew panel, on a Retroid Pocket 5).
++    ui_state_mutex.lock();
+     ctx->context_lock.lock();
+     opened_context = ctx;
+     opened_context_id = *this;
+@@ -404,6 +408,7 @@ void recompui::ContextId::close() {
+ 
+     // Release ownership of the target context.
+     opened_context->context_lock.unlock();
++    ui_state_mutex.unlock();
+     opened_context = nullptr;
+     opened_context_id = ContextId::null();
+ 
