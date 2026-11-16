@@ -428,6 +428,7 @@ namespace blitz {
                 for (char& c : name) c = (char)std::tolower((unsigned char)c);
                 for (char& c : ext) c = (char)std::tolower((unsigned char)c);  // LOGO.WMS too
                 if (std::none_of(exts.begin(), exts.end(), [&](const char* x) { return ext == x; })) continue;
+                if (name.rfind("._", 0) == 0) continue;  // macOS's AppleDouble copies (a folder copied from a Mac), not game files
                 if (name.size() >= 0x14) {
                     post_notice("\"" + name + "\" has too long a name for the game's file system (19 characters at most); skipped.");
                     continue;

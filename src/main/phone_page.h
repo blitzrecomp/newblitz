@@ -7,7 +7,7 @@
 #pragma once
 
 // Bump with every change to the page: an open page from an older build reloads itself on connect.
-static const int phone_page_version = 8;  // 4: the Blitz '27 look (docs/design/redesign); 5: the wide logo in the menu; 7: buttons fit under a browser's bar; 8: the can't-connect box
+static const int phone_page_version = 9;  // 4: the Blitz '27 look (docs/design/redesign); 5: the wide logo in the menu; 7: buttons fit under a browser's bar; 8: the can't-connect box; 9: a page knows which game it belongs to (?g=)
 
 // BRANDING: phone page <title>Blitz Controller</title> and the Blitz '27 style below
 static const char* phone_page_html = R"HTML(<!doctype html>
@@ -141,7 +141,11 @@ body { background:
 /* Can't reach the game for 5 s: what to do (dismissable; it goes away by itself once connected). */
 #stuck { position:fixed; inset:0; background:rgba(2,7,18,.84); display:none; align-items:center; justify-content:center;
   padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
-#stuck.open { display:flex; }
+#stuck.open, #other.open { display:flex; }
+#other { position:fixed; inset:0; background:rgba(2,7,18,.84); display:none; align-items:center; justify-content:center; z-index:50; }
+#other .box { width:min(560px, 90vw); padding:18px 20px 16px; background:var(--glass); border:2px solid var(--rim); }
+#other h2 { margin:0 0 10px; font-size:28px; line-height:1; color:var(--yellow); }
+#other ol { margin:0; font:600 17px/1.35 var(--body); color:var(--text); }
 #stuck .box { width:min(560px, 90vw); padding:18px 20px 16px; background:var(--glass); border:2px solid var(--rim);
   clip-path:polygon(10px 0, calc(100% - 10px) 0, 100% 10px, 100% calc(100% - 10px), calc(100% - 10px) 100%, 10px 100%, 0 calc(100% - 10px), 0 10px); }
 #stuck h2 { margin:0 0 10px; font-size:28px; line-height:1; color:var(--yellow); }
@@ -185,6 +189,10 @@ body { background:
   <ol><li>Close this tab.</li><li>In the game, open <b>Settings → Players</b> and scan the QR code again.</li>
     <li><span>The phone must be on the same Wi-Fi as the game, and Phone Controllers on.</span></li></ol>
   <button id="stuckOk">OK</button>
+</div></div>
+<div id="other" class="stuckbox" role="alertdialog" aria-labelledby="otherTitle"><div class="box">
+  <h2 class="cap" id="otherTitle">Wrong game</h2>
+  <ol style="list-style:none;padding-left:0"><li>This page belongs to another New Blitz. Scan the QR code on the screen you're playing on.</li></ol>
 </div></div>
 <div id="rotate">
   <svg viewBox="0 0 120 120" fill="none" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -252,8 +260,11 @@ $("stuckOk").addEventListener("touchend", dismissStuck); $("stuckOk").addEventLi
 setInterval(() => {
   if (!heard && !stuckDismissed && Date.now() - quietSince > 5000) stuck.classList.add("open");
 }, 500);
+// Which game this page belongs to: from the QR address (?g=), or else what the game says first.
+let game = new URLSearchParams(location.search).get("g") || "", wrongGame = false;
 function connect() {
-  ws = new WebSocket("ws://" + location.host + "/ws?id=" + id);
+  if (wrongGame) return;
+  ws = new WebSocket("ws://" + location.host + "/ws?id=" + id + (game ? "&g=" + encodeURIComponent(game) : ""));
   ws.onopen = () => send(true);
   ws.onmessage = e => {
     if (!heard) { heard = true; stuckDismissed = false; stuck.classList.remove("open"); }
@@ -267,11 +278,17 @@ function connect() {
       setMode(v);
     } else if (k === "t") {
       toast(v);
+    } else if (k === "g") {
+      if (!game) game = v;
+    } else if (k === "x") {
+      wrongGame = true;  // no reconnecting: the screen to scan is elsewhere
+      $("other").classList.add("open"); stuck.classList.remove("open");
     } else if (k === "v" && v !== "__VERSION__") {
       location.reload();  // the app has a newer controller page
     }
   };
   ws.onclose = () => {
+    if (wrongGame) { who.textContent = "Wrong game"; return; }
     if (heard) { heard = false; quietSince = Date.now(); }
     who.textContent = "Reconnecting…"; setTimeout(connect, 800);
   };

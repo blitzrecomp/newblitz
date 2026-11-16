@@ -24,12 +24,62 @@
 //   GET  /paks/rosters/<path>             the weekly roster files for a pak install that opted in (manifest.json,
 //                                         players.json, lineups/*.json: the same files the pak carries, newer), only
 //                                         while the catalog's season2026 entry has "live_rosters" on
+//
+// Crash reports (2026-11-15; docs/design/FIRST_RUN_V2.md §6.2): the app sends one, opted in, at the start after a crash
+// (src/main/crash_report.cpp). Public like the paks; kept apart from the private blitz-logs Worker.
+//   POST /reports/crash                   the app: the report, plain text that starts "New Blitz crash report", at most
+//                                         256 KiB. Kept 30 days. Nothing about the sender is stored: not the address
+//                                         (CF-Connecting-IP is never read), not the headers; only the text and when.
+//                                         At most 300 a day (KV's free writes), then 429 and the app tries next start.
+//   GET  /<HUB_KEY>/reports               the newest 100: id, when, size, first crash line
+//   GET  /<HUB_KEY>/reports/<id>          one report's text
 
 const PATH = /^(manifest\.json|players\.json|lineups\/[A-Za-z0-9._-]+\.json|psp\/[A-Za-z0-9._-]+\.txt)$/;
 const TEXT = /^psp\//;  // plain text, not JSON
 const PAK = /^[a-z0-9_]+(-[A-Za-z0-9.]+)?\.nbpak$/;
 const PUBLIC_ROSTERS = /^(manifest\.json|players\.json|lineups\/[A-Za-z0-9._-]+\.json)$/;
 const MAX_PAK = 25 * 1024 * 1024;
+const MAX_REPORT = 256 * 1024;
+const REPORT_DAYS = 30;
+const REPORTS_PER_DAY = 300;
+const REPORT_ID = /^[0-9TZ:.-]+-[0-9a-f]{8}$/;
+
+// POST /reports/crash: checked, then kept with an expiry. The id is the arrival time and a random tag.
+async function report_crash(request, env) {
+  const length = Number(request.headers.get("content-length") || "0");
+  if (length > MAX_REPORT) return json({ error: "too big" }, 413);
+  const body = await request.text();
+  if (body.length > MAX_REPORT) return json({ error: "too big" }, 413);
+  if (!body.startsWith("New Blitz crash report\n")) return json({ error: "not a crash report" }, 400);
+  const day = new Date().toISOString().slice(0, 10);
+  const count_key = `reports:count:${day}`;
+  const count = Number((await env.ROSTERS.get(count_key)) || "0");
+  if (count >= REPORTS_PER_DAY) return json({ error: "enough for today" }, 429);
+  await env.ROSTERS.put(count_key, String(count + 1), { expirationTtl: 2 * 86400 });
+  const tag = [...crypto.getRandomValues(new Uint8Array(4))].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const id = `${new Date().toISOString()}-${tag}`;
+  const crash = (body.split("\n").find((l) => l.startsWith("[crash]")) || "").slice(0, 200);
+  await env.ROSTERS.put(`report:${id}`, body, {
+    expirationTtl: REPORT_DAYS * 86400,
+    metadata: { bytes: body.length, crash },
+  });
+  return json({ ok: true, id }, 201);
+}
+
+// GET /<HUB_KEY>/reports[/<id>]
+async function read_reports(path, env) {
+  if (path === "reports") {
+    const list = await env.ROSTERS.list({ prefix: "report:", limit: 1000 });
+    const rows = list.keys.map((k) => ({ id: k.name.slice("report:".length), ...(k.metadata || {}) }));
+    rows.sort((a, b) => (a.id < b.id ? 1 : -1));
+    return json(rows.slice(0, 100));
+  }
+  const id = path.slice("reports/".length);
+  if (!REPORT_ID.test(id)) return new Response("Not found", { status: 404 });
+  const body = await env.ROSTERS.get(`report:${id}`);
+  if (body === null) return new Response("Not found", { status: 404 });
+  return new Response(body, { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
+}
 
 // The catalog's entry for the season pak, or null (withdrawn, or no catalog yet).
 async function season_entry(env) {
@@ -122,6 +172,11 @@ export default {
     const head = parts.shift();
     const path = parts.join("/");
 
+    if (head === "reports") {  // public: the app's crash reports, in only (above)
+      if (path !== "crash" || request.method !== "POST") return new Response("Not found", { status: 404 });
+      return report_crash(request, env);
+    }
+
     if (head === "paks") {  // public: no key (above)
       if (request.method !== "GET" && request.method !== "HEAD") return new Response("Not found", { status: 404 });
       return paks(path, env);
@@ -151,6 +206,7 @@ export default {
     }
 
     if (!env.HUB_KEY || head !== env.HUB_KEY || request.method !== "GET") return new Response("Not found", { status: 404 });
+    if (path === "reports" || path.startsWith("reports/")) return read_reports(path, env);
     if (path === "status") {  // the last upload, how long ago, and whether that's overdue (a day and a half)
       const st = JSON.parse((await env.ROSTERS.get("status")) || "{}");
       if (st.uploaded) {

@@ -1,0 +1,64 @@
+diff --git a/recompui/include/recompui/recompui.h b/recompui/include/recompui/recompui.h
+--- a/recompui/include/recompui/recompui.h
++++ b/recompui/include/recompui/recompui.h
+@@ -117,6 +117,12 @@
+ 
+     bool get_cont_active(void);
+     void set_cont_active(bool active);
++    // Blitz: the last UI input was a key on a keyboard (not a controller, a click or a tap).
++    bool get_keyboard_last(void);
++    // Blitz: true while the player has only the touch screen (a phone with no controller and no keyboard in use). Hint
++    // rows (build_hint_row: prompts, Settings, setup) then show no buttons, as the screen's own are tapped, and
++    // hint_input_info answers {COUNT, -1}. Unset: never.
++    void set_touch_only_check(std::function<bool()> check);
+     void activate_mouse();
+ 
+     void message_box(const char* msg);
+diff --git a/recompui/src/base/ui_state.cpp b/recompui/src/base/ui_state.cpp
+--- a/recompui/src/base/ui_state.cpp
++++ b/recompui/src/base/ui_state.cpp
+@@ -668,6 +668,13 @@
+         initialized = true;
+     }
+     last_input_mode = cur_input_mode;
++}
++
++// Blitz: the last UI input was a key (get_keyboard_last): a phone or iPad with a keyboard shows key glyphs only then.
++static bool blitz_keyboard_last = false;
++
++bool recompui::get_keyboard_last() {
++    return blitz_keyboard_last;
+ }
+ 
+ bool recompui::get_cont_active() {
+@@ -1023,6 +1030,7 @@
+ 
+     if (cont_interacted || kb_interacted || mouse_clicked) {
+         recompui::set_cont_active(cont_interacted);
++        blitz_keyboard_last = kb_interacted && !cont_interacted && !mouse_clicked;
+     }
+ 
+     ui_state->update_primary_input(mouse_moved, non_mouse_interacted);
+diff --git a/recompui/src/elements/ui_modal.cpp b/recompui/src/elements/ui_modal.cpp
+--- a/recompui/src/elements/ui_modal.cpp
++++ b/recompui/src/elements/ui_modal.cpp
+@@ -165,9 +165,19 @@
+     }
+ 
+     return Modal::close();
++}
++
++static std::function<bool()> touch_only_check;
++
++void set_touch_only_check(std::function<bool()> check) {
++    touch_only_check = std::move(check);
+ }
+ 
+ static std::pair<recompinput::InputDevice, int> get_last_input_info() {
++    // Blitz: touch alone (a phone with no controller or keyboard in use): no buttons to show; the screen's own are tapped.
++    if (touch_only_check && touch_only_check()) {
++        return { recompinput::InputDevice::COUNT, -1 };
++    }
+     if (recompinput::players::is_single_player_mode()) {
+ #ifdef __ANDROID__
+         // Handhelds and phones: nobody has a keyboard, and until the first press (or after a tap) nothing says "controller".

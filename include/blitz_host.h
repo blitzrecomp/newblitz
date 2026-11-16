@@ -9,6 +9,10 @@
 
 struct SDL_Window;
 
+#ifdef __ANDROID__
+struct ANativeWindow;  // <android/native_window.h>
+#endif
+
 namespace blitz {
     // First thing in main(), before anything reads a file: Linux points BLITZ_RESOURCES at the executable's folder
     // (the frontend would otherwise look in the working folder). Elsewhere nothing.
@@ -22,6 +26,9 @@ namespace blitz {
     // A blocking HTTP GET over the system's own TLS (call it off the main thread): true with the body when the server
     // answers 200. Rosters at launch (rosters_live.cpp), headshots (crew.cpp).
     bool http_get(const std::string& url, const std::string& bearer, const std::string& accept, std::string& body, int& status);
+    // A blocking HTTP POST of a body (call it off the main thread): true when the server answers 2xx. Crash reports
+    // (crash_report.cpp). The PS5 has none (false).
+    bool http_post(const std::string& url, const std::string& content_type, const std::string& body, int& status);
     // Where a ROM, pack or add-on put on the device by hand is picked up (BLITZ_HAS_ROM_DROP_FOLDER): iOS's Documents
     // (Files app, Finder), Android's app files folder (adb, file managers), the PS5's /data/blitzrecomp (FTP).
     // Empty on a computer, which has file dialogs.
@@ -29,6 +36,11 @@ namespace blitz {
     // Once the game's window exists (main.cpp): Android follows the app's window to and from the background.
     // Elsewhere nothing.
     void window_created(SDL_Window* window);
+#ifdef __ANDROID__
+    // The window the renderer is made on: the game's surface as it is now (held), waiting while there's none
+    // (platform_android.cpp). The one create_window returned may have gone with a trip to the background.
+    ANativeWindow* render_window(ANativeWindow* from_create_window);
+#endif
 }
 
 #endif

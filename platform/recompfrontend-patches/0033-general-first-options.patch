@@ -1,0 +1,28 @@
+diff --git a/recompui/include/recompui/config.h b/recompui/include/recompui/config.h
+index 7ff7a94..7ee1a29 100644
+--- a/recompui/include/recompui/config.h
++++ b/recompui/include/recompui/config.h
+@@ -119,6 +119,8 @@ namespace recompui {
+             bool has_rumble_strength = true;
+             bool has_gyro_sensitivity = false;
+             bool has_mouse_sensitivity = false;
++            // Blitz: the app's own rows first on the tab (Main Menu, Blitz Builder), before the stock ones.
++            std::function<void(recomp::config::Config&)> first_options;
+         };
+ 
+         // Prefab config tabs.
+diff --git a/recompui/src/config/ui_config_tab_general.cpp b/recompui/src/config/ui_config_tab_general.cpp
+index 296ce0e..3344004 100644
+--- a/recompui/src/config/ui_config_tab_general.cpp
++++ b/recompui/src/config/ui_config_tab_general.cpp
+@@ -87,6 +87,10 @@ namespace config {
+             true // hidden by default
+         );
+ 
++        if (options.first_options) {
++            options.first_options(config);
++        }
++
+         if (options.has_rumble_strength) {
+             config.add_percent_number_option(
+                 general::options::rumble_strength,

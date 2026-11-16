@@ -47,12 +47,22 @@
 
 #include "blitz_savestate.h"
 
+// The PS5's breadcrumbs (platform_ps5.cpp): straight to /data/blitzrecomp/boot.log, past the log pipe, so a hang during a
+// Save & Quit or a resume still says how far it got.
+#ifdef __PROSPERO__
+extern "C" void blitz_ps5_crumb(const char* step);
+#define ps5_crumb(step) blitz_ps5_crumb(step)
+#else
+#define ps5_crumb(step) ((void)0)
+#endif
+
 namespace blitz {
     void checkpoint_discard_on_quit();  // checkpoint.cpp
     void post_status(const std::string& msg);  // notices.cpp: shown as a toast (toast.cpp)
     void post_status_held(const std::string& msg);  // notices.cpp: a toast that stays up until release_status
     void release_status();
     float fps_last_second();                   // fps_counter.cpp
+    uint64_t game_frames();                    // fps_counter.cpp: the game's swaps this launch
     void replay_close();  // replay_screen.cpp
 
     struct StateModule {
@@ -143,6 +153,7 @@ namespace {
         recomp_context* ctx;
         ss_stack* stack;
         UltraThreadContext* host;  // the OSThread's context while this thread lives
+        uint64_t serial = 0;       // which registration this is (Registration, drop_exited)
     };
     // A process thread that stopped itself: where, and its registers (valid until started again).
     struct Sleeper {
@@ -177,6 +188,27 @@ namespace {
     std::unordered_map<int32_t, LiveThread> live;
     std::unordered_map<int32_t, Sleeper> sleepers;
     std::unordered_map<int32_t, ThreadImage> pending_resume;  // recreated threads, applied as they start
+    uint64_t next_serial = 0;  // threads_mutex
+
+    // Game threads whose host thread has exited (thread, registration serial), kept apart from `live` under their own lock.
+    // A host thread's exit can't take threads_mutex: on Windows thread_local destructors run under the loader lock, and the
+    // dispatcher holds threads_mutex while restore_snapshot creates threads (osCreateThread waits for the new thread, which
+    // needs the loader lock to start). Taking it there froze Back in the menus on Windows (build/winpc_dumps/nb_freeze2.dmp).
+    std::mutex exited_mutex;  // held only for the push or the swap, never while waiting on anything
+    std::vector<std::pair<int32_t, uint64_t>> exited;
+
+    // The exited threads leave `live` (call with threads_mutex held).
+    void drop_exited() {
+        std::vector<std::pair<int32_t, uint64_t>> gone;
+        {
+            std::lock_guard lock{exited_mutex};
+            gone.swap(exited);
+        }
+        for (auto [t, serial] : gone) {
+            auto it = live.find(t);
+            if (it != live.end() && it->second.serial == serial) live.erase(it);
+        }
+    }
     Snapshot snap;
 
     // Redo Play: a snapshot at the top of every play of a real game (the checkpoint hook at the top of
@@ -295,6 +327,7 @@ namespace {
 
     // Live threads that aren't processes or the dispatcher (call with threads_mutex held).
     std::vector<int32_t> fixed_threads(uint8_t* rdram, const std::vector<int32_t>& procs, int32_t self) {
+        drop_exited();
         std::vector<int32_t> out;
         for (auto& [t, info] : live) {
             if (t == self || TO_PTR(OSThread, t)->context != info.host) continue;  // ended (or not yet registered)
@@ -525,6 +558,117 @@ namespace {
         return path;
     }
 
+    // ---- The resume guard: a saved game that hangs or crashes the app is offered once, not at every start ----
+    // (the team's PS5, 2026-11-15: after a Save & Quit that froze, every start hung right after the game came up, with
+    // quit.state there, until it was moved aside by hand over FTP.) savestates/quit.resuming is written before the
+    // "Pick up your game?" prompt opens and again before a Resume, and removed once this start has shown the game's
+    // frames afterwards with the UI thread still answering (resume_guard_tick). Found at a start, the last start never
+    // got that far: quit.state goes aside as quit.state.failed (with quit.txt.failed) and isn't offered again.
+    // A resumed quit.state waits as quit.state.resuming until the frames come, so a resume that hangs leaves it for a look.
+    enum class Guard { off, offer, resume, restored };
+    std::atomic<Guard> guard{Guard::off};       // UI thread; the dispatcher only sets restored/failed below
+    std::atomic<bool> guard_restored{false};     // the dispatcher restored quit.state (slot 0)
+    std::atomic<bool> guard_failed{false};       // ... or gave up on it: nothing was restored
+    // Set where the stage is armed (the prompt's button may run on the UI's draw), read on the UI thread.
+    std::atomic<uint64_t> guard_frames{0};       // game_frames() when the current stage began
+    std::atomic<uint64_t> guard_ms{0};           // ... and the time
+    std::atomic<bool> guard_said_late{false};
+
+    uint64_t guard_now_ms() {
+        return (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+    std::filesystem::path guard_marker() { return state_file(0).parent_path() / "quit.resuming"; }
+    std::filesystem::path with_suffix(std::filesystem::path p, const char* suffix) { return p += suffix; }
+
+    void guard_arm(Guard stage) {
+        std::error_code ec;
+        std::filesystem::create_directories(guard_marker().parent_path(), ec);
+        {
+            std::ofstream f(guard_marker(), std::ios::trunc);
+            f << (stage == Guard::offer ? "offer" : "resume") << " " << (long long)std::time(nullptr) << "\n";
+        }
+        blitz::sync_file(guard_marker());  // on the disk before anything that might hang
+        guard_frames = blitz::game_frames();
+        guard_ms = guard_now_ms();
+        guard_said_late = false;
+        guard_restored = false;
+        guard_failed = false;
+        guard = stage;
+    }
+
+    void guard_disarm(const char* why) {
+        std::error_code ec;
+        std::filesystem::remove(guard_marker(), ec);
+        if (guard.exchange(Guard::off) != Guard::off) fprintf(stderr, "[savestate] resume guard off: %s\n", why);
+    }
+
+    // Once, at the first UI tick of a start: the last start's guard still there means it hung or crashed while the saved
+    // game was being offered or resumed. "" or the notice for the player.
+    std::string guard_startup() {
+        std::error_code ec;
+        const std::filesystem::path resuming = with_suffix(state_file(0), ".resuming");
+        if (!std::filesystem::exists(guard_marker(), ec)) {
+            std::filesystem::remove(resuming, ec);  // a resume that went fine, whose removal didn't get done
+            return "";
+        }
+        std::string stage;
+        std::getline(std::ifstream(guard_marker()), stage);
+        const std::filesystem::path txt = std::filesystem::path(state_file(0)).replace_extension(".txt");
+        const std::filesystem::path failed = with_suffix(state_file(0), ".failed");
+        bool moved = false;
+        for (const std::filesystem::path& from : {resuming, state_file(0)}) {
+            if (moved || !std::filesystem::exists(from, ec)) continue;
+            std::filesystem::remove(failed, ec);
+            std::filesystem::rename(from, failed, ec);
+            if (ec) std::filesystem::remove(from, ec);  // can't be kept aside: it mustn't be offered again either
+            moved = true;
+        }
+        if (std::filesystem::exists(txt, ec)) {
+            std::filesystem::path txt_failed = with_suffix(txt, ".failed");
+            std::filesystem::remove(txt_failed, ec);
+            std::filesystem::rename(txt, txt_failed, ec);
+            if (ec) std::filesystem::remove(txt, ec);
+        }
+        std::filesystem::remove(resuming, ec);
+        std::filesystem::remove(guard_marker(), ec);
+        fprintf(stderr, "[savestate] the last start stopped while its saved game was being %s (%s): %s\n",
+                stage.rfind("resume", 0) == 0 ? "resumed" : "offered", stage.c_str(),
+                moved ? "quit.state set aside as quit.state.failed, not offered again" : "no quit.state left");
+        return moved ? "Your saved game couldn't be picked up last time, so it was set aside" : "";
+    }
+
+    // UI thread, every tick: the guard comes off once the game's frames show after the stage began (the UI thread is
+    // answering, as it runs this). A Resume that failed or gave up restored nothing: off too.
+    void guard_tick() {
+        Guard g = guard.load();
+        if (g == Guard::off) return;
+        const uint64_t now = guard_now_ms();
+        if (g == Guard::resume && guard_failed.exchange(false)) {
+            guard_disarm("the resume didn't happen");
+            return;
+        }
+        if (g == Guard::resume && guard_restored.exchange(false)) {
+            guard = g = Guard::restored;
+            guard_frames = blitz::game_frames();
+            guard_ms = now;
+            guard_said_late = false;
+        }
+        const uint64_t frames = blitz::game_frames() - guard_frames;
+        if (g == Guard::offer && now - guard_ms >= 2000 && (frames >= 10 || now - guard_ms >= 15000)) {
+            guard_disarm("the game runs with the prompt up");
+        }
+        else if (g == Guard::restored && now - guard_ms >= 1000 && frames >= 30) {
+            std::error_code ec;
+            std::filesystem::remove(with_suffix(state_file(0), ".resuming"), ec);  // used up
+            guard_disarm("the resumed game runs");
+        }
+        else if ((g == Guard::restored || g == Guard::resume) && !guard_said_late && now - guard_ms >= 30000) {
+            guard_said_late = true;  // the guard stays: the next start sets quit.state aside
+            fprintf(stderr, "[savestate] resume guard: %s and no frames for 30 s (%llu since)\n",
+                    g == Guard::restored ? "restored" : "not restored yet", (unsigned long long)frames);
+        }
+    }
+
     template <typename T> void put(std::ofstream& f, const T& v) { f.write((const char*)&v, sizeof v); }
     template <typename T> void put_vec(std::ofstream& f, const std::vector<T>& v) {
         put(f, (uint32_t)v.size());
@@ -721,14 +865,14 @@ extern "C" void blitz_ss_note_destroy(int32_t t) {
 }
 
 namespace {
-    // Unregisters a game thread as its host thread exits.
+    // Unregisters a game thread as its host thread exits: queued for drop_exited, never threads_mutex here (see exited).
     struct Registration {
         int32_t thread = 0;
+        uint64_t serial = 0;
         ~Registration() {
             if (thread == 0) return;
-            std::lock_guard lock{threads_mutex};
-            auto it = live.find(thread);
-            if (it != live.end() && it->second.stack == ss_current_stack()) live.erase(it);
+            std::lock_guard lock{exited_mutex};
+            exited.emplace_back(thread, serial);
         }
     };
     thread_local Registration registration;
@@ -741,8 +885,11 @@ extern "C" void blitz_thread_created(uint8_t* rdram, recomp_context* ctx) {
     int32_t self = ultramodern::this_thread();
     ss_stack* st = ss_current_stack();
     std::unique_lock lock{threads_mutex};
-    live[self] = {ctx, st, TO_PTR(OSThread, self)->context};
+    drop_exited();
+    uint64_t serial = ++next_serial;
+    live[self] = {ctx, st, TO_PTR(OSThread, self)->context, serial};
     registration.thread = self;
+    registration.serial = serial;
     sleepers[self] = Sleeper{};  // running
     auto it = pending_resume.find(self);
     if (it == pending_resume.end()) return;
@@ -835,6 +982,20 @@ extern "C" void blitz_menu_step_input(int port, uint16_t* buttons) {
 namespace blitz {
     // The quit prompt (RecompFrontend's override): during a game, offer to save it first. True when
     // this prompt was shown instead of the usual one.
+    // Settings → Main Menu's Save and Leave (firstrun.cpp): a save to the quit slot, as Save & Quit makes, then done(ok)
+    // (on the game's thread). False when there's no game being played to save (the menus): nothing to keep.
+    bool savestate_save_then(std::function<void(bool)> done) {
+        if (!in_game.load() || !ultramodern::is_game_started()) return false;
+        replay_close();
+        {
+            std::lock_guard lock{done_mutex};
+            on_done_slot = 0;
+            on_done = std::move(done);
+        }
+        request = 1;  // slot 0: the next start offers to pick it up
+        return true;
+    }
+
     bool savestate_quit_prompt() {
         if (!in_game.load() || !ultramodern::is_game_started()) return false;
         replay_close();  // Save & Quit needs the game running: it saves at the dispatcher's next turn
@@ -851,6 +1012,7 @@ namespace blitz {
                 {
                     std::lock_guard lock{done_mutex};
                     on_done_slot = 0;
+                    ps5_crumb("save & quit: chosen");
                     on_done = [](bool ok) {
                         if (ok) quit_now = true;  // quit from the UI thread (savestate_startup_prompt)
                         else blitz::post_status("Couldn't save the game here; quit again to leave without saving");
@@ -868,6 +1030,7 @@ namespace blitz {
     // asks to be picked up again.
     void savestate_startup_prompt() {
         if (quit_now.exchange(false)) {
+            ps5_crumb("save & quit: saved, quitting");
             blitz::checkpoint_discard_on_quit();
             ultramodern::quit();
             return;
@@ -877,10 +1040,30 @@ namespace blitz {
                 "Quit without saving?", "This game will be lost.", "Quit", "Keep Playing",
                 [] { blitz::checkpoint_discard_on_quit(); ultramodern::quit(); }, [] {}, recompui::ButtonStyle::Danger, recompui::ButtonStyle::Tertiary, true);
         }
+        // The last start's resume guard, before anything else touches quit.state (its notice once the game shows).
+        static bool guard_checked = false;
+        static std::string guard_notice;
+        if (!guard_checked) {
+            guard_checked = true;
+            guard_notice = guard_startup();
+        }
+        guard_tick();
         static bool asked = false;
         if (ask_resume_again.exchange(false)) asked = false;
         if (asked || !ultramodern::is_game_started()) return;
+        // Not at the very moment the game starts but once its frames show (about a second in; 10 s at most): a PS5
+        // start straight into the game hung right there with quit.state to offer (2026-11-15), its renderer starting up.
+        static uint64_t frames_at_start = UINT64_MAX, started_ms = 0;
+        if (frames_at_start == UINT64_MAX) {
+            frames_at_start = blitz::game_frames();
+            started_ms = guard_now_ms();
+        }
+        if (blitz::game_frames() - frames_at_start < 30 && guard_now_ms() - started_ms < 10000) return;
         asked = true;
+        if (!guard_notice.empty()) {
+            blitz::post_status(guard_notice);
+            guard_notice.clear();
+        }
         std::error_code ec;
         if (!std::filesystem::exists(state_file(0), ec)) return;
         if (!file_compatible(0)) {
@@ -894,18 +1077,28 @@ namespace blitz {
         }
         std::string what;
         std::getline(std::ifstream(state_file(0).replace_extension(".txt")), what);
+        guard_arm(Guard::offer);
+        ps5_crumb("resume: offering quit.state");
+        fprintf(stderr, "[savestate] offering the game saved on quitting: %s\n", what.c_str());
         recompui::open_choice_prompt(
             "Pick up your game?",
             what.empty() ? "You saved a game when you last quit." : "You saved this game when you last quit.",
             "Resume", "Discard",
-            [] { request = 2; blitz::post_status_held("Resuming your game: a few seconds..."); },  // slot 0
+            [] {
+                guard_arm(Guard::resume);
+                ps5_crumb("resume: Resume chosen");
+                request = 2;  // slot 0
+                blitz::post_status_held("Resuming your game: a few seconds...");
+            },
             [] {
                 std::error_code e;
                 std::filesystem::remove(state_file(0), e);
                 std::filesystem::remove(state_file(0).replace_extension(".txt"), e);
+                guard_disarm("discarded");
             },
             recompui::ButtonStyle::Success, recompui::ButtonStyle::Danger, false);
         recompui::set_prompt_scoreline(what);  // ○ is "later": the save stays and this asks again next start
+        ps5_crumb("resume: prompt open");
     }
 }
 
@@ -1057,6 +1250,7 @@ extern "C" void blitz_savestate_tick(uint8_t* rdram, recomp_context* ctx) {
                 blitz::release_status();
                 blitz::post_status(err);
                 clear_request();
+                if (slot == 0) guard_failed = true;  // nothing restored: the resume guard comes off (guard_tick)
                 finish(false, slot);
                 return;
             }
@@ -1073,6 +1267,7 @@ extern "C" void blitz_savestate_tick(uint8_t* rdram, recomp_context* ctx) {
                         clear_request();
                         waited = 0;
                         wait_tally.clear();
+                        if (slot == 0) guard_failed = true;
                         finish(false, slot);
                         return;
                     }
@@ -1089,18 +1284,25 @@ extern "C" void blitz_savestate_tick(uint8_t* rdram, recomp_context* ctx) {
                     bool written = write_file(copy, slot);
                     if (slot == 0 && written) {
                         std::ofstream(state_file(0).replace_extension(".txt")) << describe_game(copy) << "\n";
+                        ps5_crumb("save & quit: quit.state written");
                     }
                     else blitz::post_status(written ? n + ": state saved" : n + ": state saved, but not to a file");
                     finish(written, slot);
                 }).detach();
             }
             else {
+                if (slot == 0) ps5_crumb("resume: restoring");
                 restore_snapshot(rdram, ctx, self, snap);
                 redo_ring.clear();  // another moment, maybe another game
-                if (slot == 0) {  // the game saved on quitting: used up
+                if (slot == 0) {  // the game saved on quitting: used up, once its frames show (guard_tick)
+                    ps5_crumb("resume: restored");
                     std::error_code ec;
-                    std::filesystem::remove(state_file(0), ec);
+                    const std::filesystem::path resuming = with_suffix(state_file(0), ".resuming");
+                    std::filesystem::remove(resuming, ec);
+                    std::filesystem::rename(state_file(0), resuming, ec);
+                    if (ec) std::filesystem::remove(state_file(0), ec);
                     std::filesystem::remove(state_file(0).replace_extension(".txt"), ec);
+                    guard_restored = true;
                     snap.valid = false;
                     snap = Snapshot{};  // its 8 MB RDRAM copy too: nothing loads it again
                     blitz::post_status_held("Game resumed: warming up, controls may lag for a moment");
@@ -1128,6 +1330,7 @@ extern "C" void blitz_savestate_tick(uint8_t* rdram, recomp_context* ctx) {
             else if (!waiting) blitz::post_status(std::string(op == 1 ? "Can't save a state here" : "Can't load the state here") + " (" + why + ")");
             clear_request();
             waited = 0;
+            if (op == 2 && slot == 0) guard_failed = true;
             finish(false, slot);
         }
     }
@@ -1258,6 +1461,7 @@ extern "C" int blitz_touch_port(void) { return 0; }
 namespace blitz {
     bool savestate_quit_prompt() { return false; }
     void savestate_startup_prompt() {}
+    bool savestate_save_then(std::function<void(bool)>) { return false; }
 }
 extern "C" void blitz_savestate_tick(uint8_t*, recomp_context*) {}
 

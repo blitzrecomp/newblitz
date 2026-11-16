@@ -3,20 +3,23 @@
 import worker from "../src/index.js";
 
 class KV {
-  constructor() { this.m = new Map(); }
+  constructor() { this.m = new Map(); this.opts = new Map(); }
   async get(k, type) {
     if (!this.m.has(k)) return null;
     const v = this.m.get(k);
     if (type === "arrayBuffer") return typeof v === "string" ? new TextEncoder().encode(v).buffer : v;
     return typeof v === "string" ? v : new TextDecoder().decode(v);
   }
-  async put(k, v) { this.m.set(k, v); }
+  async put(k, v, o) { this.m.set(k, v); this.opts.set(k, o || {}); }
+  async list({ prefix }) {
+    return { keys: [...this.m.keys()].filter((k) => k.startsWith(prefix)).map((name) => ({ name, metadata: (this.opts.get(name) || {}).metadata })) };
+  }
 }
 
 const env = { ROSTERS: new KV(), HUB_KEY: "secretkey123", UPLOAD_SECRET: "up" };
 let n = 0;
-async function call(method, path, body, auth) {
-  const headers = auth ? { authorization: `Bearer ${auth}` } : {};
+async function call(method, path, body, auth, extra = {}) {
+  const headers = { ...(auth ? { authorization: `Bearer ${auth}` } : {}), ...extra };
   return worker.fetch(new Request(`https://hub.example${path}`, { method, body, headers }), env);
 }
 function check(what, ok) {
@@ -63,5 +66,29 @@ check("withdrawn (the kill switch)", (await call("PUT", "/upload/paks/catalog.js
 check("withdrawn: no public rosters", (await call("GET", "/paks/rosters/manifest.json")).status === 404);
 r = await call("GET", "/paks/catalog.json");
 check("no response names the hub key", !(await r.text()).includes("secretkey123"));
+
+
+// Crash reports: in through the public route, out only with the key; nothing about the sender kept.
+const report = "New Blitz crash report\napp: 0.9.5\n--- crash ---\n[crash] signal 11 (Segmentation fault: 11). Call stack:\n";
+check("a report needs POST", (await call("GET", "/reports/crash")).status === 404);
+check("only /reports/crash", (await call("POST", "/reports/other", report)).status === 404);
+check("not a report is refused", (await call("POST", "/reports/crash", "hello")).status === 400);
+check("a big report is refused", (await call("POST", "/reports/crash", report + "x".repeat(256 * 1024))).status === 413);
+r = await call("POST", "/reports/crash", report, null, { "cf-connecting-ip": "203.0.113.9" });
+const sent = JSON.parse(await r.text());
+check("a report is kept", r.status === 201 && /^[0-9TZ:.-]+-[0-9a-f]{8}$/.test(sent.id));
+const stored = [...env.ROSTERS.m.entries()].filter(([k]) => k.startsWith("report:"));
+check("kept 30 days", (env.ROSTERS.opts.get(stored[0][0]) || {}).expirationTtl === 30 * 86400);
+check("no address kept", !JSON.stringify([...env.ROSTERS.m.values(), ...env.ROSTERS.opts.values()].map(String)).includes("203.0.113.9") &&
+      !JSON.stringify([...env.ROSTERS.opts.values()]).includes("203.0.113.9"));
+check("the list needs the key", (await call("GET", "/reports")).status === 404);
+r = await call("GET", "/secretkey123/reports");
+const rows = JSON.parse(await r.text());
+check("the list with the key", r.status === 200 && rows.length === 1 && rows[0].crash.startsWith("[crash] signal 11"));
+r = await call("GET", `/secretkey123/reports/${sent.id}`);
+check("one report with the key", r.status === 200 && (await r.text()) === report);
+check("a bad id is 404", (await call("GET", "/secretkey123/reports/not-an-id")).status === 404);
+env.ROSTERS.m.set(`reports:count:${new Date().toISOString().slice(0, 10)}`, "300");
+check("at most 300 a day", (await call("POST", "/reports/crash", report)).status === 429);
 
 console.log(`ok ${n}`);

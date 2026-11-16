@@ -3,6 +3,10 @@
 // The rows refresh while the tab is open.
 #include <array>
 #include <string>
+#include <string_view>
+
+#include "SDL2/SDL.h"
+#include "blitz_platform.h"
 
 #include "recompui/config.h"
 #include "elements/ui_button.h"
@@ -33,6 +37,12 @@ namespace recompui {
             Element* qr = nullptr;
             std::string shown_url = "-";
             int shown_phones = -1;
+            // Windows: the phone server's port brings up Windows Defender Firewall's "Allow access" the first time.
+            // Said before it comes up, and again if no phone has connected 20 s after the code shows (the team's Windows test,
+            // 2026-11-15).
+            Uint32 code_shown_at = 0;
+            bool firewall_hint = false;
+            static bool on_windows() { return blitz::platform::name == std::string_view("Windows"); }
 
             static bool phones_on() {
                 return std::get<bool>(recompui::config::get_general_config().get_option_value("phone_controllers"));
@@ -48,7 +58,7 @@ namespace recompui {
                 qr->set_display(Display::Block);
                 ContextId context = get_current_context();
                 auto code = qrcodegen::QrCode::encodeText(url.c_str(), qrcodegen::QrCode::Ecc::MEDIUM);
-                const float cell = 6.0f, quiet = 4 * cell;
+                const float cell = 8.0f, quiet = 3 * cell;  // big enough to scan from the couch
                 int n = code.getSize();
                 qr->set_width(n * cell + 2 * quiet);
                 qr->set_height(n * cell + 2 * quiet);
@@ -85,7 +95,10 @@ namespace recompui {
                 }
                 std::string url = blitz::phone_pads_url();
                 int count = blitz::phone_count();
-                if (url != shown_url || count != shown_phones) {
+                bool hint_now = on_windows() && code_shown_at != 0 && count == 0 && SDL_GetTicks() - code_shown_at >= 20000;
+                if (url != shown_url || count != shown_phones || hint_now != firewall_hint) {
+                    if (url != shown_url) code_shown_at = url.empty() ? 0 : SDL_GetTicks();
+                    firewall_hint = hint_now;
                     shown_url = url;
                     shown_phones = count;
                     bool on = phones_on();
@@ -95,13 +108,20 @@ namespace recompui {
                     phone_status->set_color(on ? theme::color::Success : theme::color::TextDim);
                     phone_status_box->set_border_color(on ? theme::color::Success : theme::color::BorderSoft);
                     if (!on) {
-                        phone_text->set_text("Turn on, then scan the code with a phone on the same Wi-Fi.");
+                        phone_text->set_text(std::string("Turn on, then scan the code with a phone on the same Wi-Fi.") +
+                                             (on_windows() ? " Windows will ask to let New Blitz use your network: "
+                                                             "choose Allow access so phones can connect." : ""));
                     }
                     else if (url.empty()) {
-                        phone_text->set_text("On, but this Mac isn't on a network.");
+                        phone_text->set_text(std::string("On, but this ") + (blitz::platform::desktop ? "computer" : "device") +
+                                             " isn't on a network.");
+                    }
+                    else if (firewall_hint) {
+                        phone_text->set_text("Phone can't connect? Check it's on the same Wi-Fi as this computer.\nThe address: " + url);
                     }
                     else {
-                        phone_text->set_text("Scan the code with a phone's camera, or open " + url + ". Turn the phone sideways to play.");
+                        // One short line each (white-space: pre-line), so the address sits on its own.
+                        phone_text->set_text("Scan the code with a phone,\nor open " + url + "\nTurn the phone sideways to play.");
                     }
                     draw_qr(url);
                 }
@@ -113,9 +133,10 @@ namespace recompui {
                 ContextId context = get_current_context();
                 set_display(Display::Flex);
                 set_flex_direction(FlexDirection::Column);
-                set_padding(28.0f);
-                set_gap(12.0f);
-                // At 4:3 the phone panel runs past the bottom, so the tab scrolls.
+                set_padding(24.0f);
+                set_gap(10.0f);
+                // When the rows and the phone panel are taller than the tab (4:3, a window with the taskbar showing),
+                // the tab scrolls: every child keeps its height (flex-shrink 0) rather than being squashed.
                 set_height(100.0f, Unit::Percent);
                 set_overflow_y(Overflow::Auto);
                 set_width(100.0f, Unit::Percent);
@@ -131,11 +152,12 @@ namespace recompui {
                     po.grid = false;
                     auto card = blitz::ui::panel(context, box, po);
                     cards[i] = box;
+                    box->set_flex_shrink(0.0f);
                     card->set_display(Display::Flex);
                     card->set_flex_direction(FlexDirection::Row);
                     card->set_align_items(AlignItems::Center);
                     card->set_gap(18.0f);
-                    card->set_height(90.0f);  // 60 px
+                    card->set_height(81.0f);  // 54 px
                     card->set_padding_left(18.0f);
                     card->set_padding_right(18.0f);
                     box->set_as_navigation_container(NavigationType::GridRow);
@@ -193,6 +215,7 @@ namespace recompui {
                 // players join on the right.
                 auto phones_box = context.create_element<Element>(this, 0, "div", false);
                 phones_box->set_margin_top(6.0f);
+                phones_box->set_flex_shrink(0.0f);
                 auto phones = blitz::ui::panel(context, phones_box, blitz::ui::PanelOptions{});
                 phones->set_display(Display::Flex);
                 phones->set_flex_direction(FlexDirection::Row);
@@ -214,14 +237,18 @@ namespace recompui {
                 auto phone_col = context.create_element<Element>(left, 0, "div", false);
                 phone_col->set_display(Display::Flex);
                 phone_col->set_flex_direction(FlexDirection::Column);
-                phone_col->set_align_items(AlignItems::FlexStart);
+                phone_col->set_align_items(AlignItems::Stretch);
                 phone_col->set_gap(15.0f);
                 phone_col->set_flex_grow(1.0f);
                 phone_col->set_flex_shrink(1.0f);
+                phone_col->set_min_width(420.0f);  // its longest line
+                // The heading and its count badge: side by side, the badge on its own line below when they don't fit.
                 auto title_row = context.create_element<Element>(phone_col, 0, "div", false);
                 title_row->set_display(Display::Flex);
+                title_row->set_flex_wrap(FlexWrap::Wrap);
                 title_row->set_align_items(AlignItems::Center);
-                title_row->set_gap(18.0f);
+                title_row->set_column_gap(18.0f);
+                title_row->set_row_gap(9.0f);
                 auto title = context.create_element<Label>(title_row, "PHONE CONTROLLERS", theme::Typography::Header3);
                 title->set_color(theme::color::Secondary);
                 title->set_white_space(WhiteSpace::Nowrap);
@@ -240,7 +267,13 @@ namespace recompui {
                 phone_status->set_white_space(WhiteSpace::Nowrap);
                 phone_text = context.create_element<Label>(phone_col, "", theme::Typography::Body);
                 phone_text->set_color(theme::color::TextDim);
-                phone_button = context.create_element<Button>(phone_col, "Turn on", ButtonStyle::Primary, ButtonSize::Large);
+                phone_text->set_white_space(WhiteSpace::Preline);  // a line each (and room for one more below)
+                phone_text->set_font_size(27.0f);
+                phone_text->set_line_height(39.0f);
+                auto button_row = context.create_element<Element>(phone_col, 0, "div", false);  // the button at its own width
+                button_row->set_display(Display::Flex);
+                button_row->set_flex_direction(FlexDirection::Row);
+                phone_button = context.create_element<Button>(button_row, "Turn on", ButtonStyle::Primary, ButtonSize::Large);
                 phone_button->set_white_space(WhiteSpace::Nowrap);
                 phone_button->add_pressed_callback([]() {
                     recomp::config::Config& g = recompui::config::get_general_config();
@@ -252,8 +285,11 @@ namespace recompui {
                 right->set_display(Display::Flex);
                 right->set_flex_direction(FlexDirection::Column);
                 right->set_gap(9.0f);
-                right->set_width(540.0f);  // 360 px
-                right->set_flex_shrink(0.0f);
+                right->set_width(540.0f);  // 360 px; narrow windows down to 300 px (bullets wrap)
+                right->set_min_width(450.0f);
+                right->set_max_width(720.0f);  // wide windows: a bullet a line
+                right->set_flex_grow(1.0f);
+                right->set_flex_shrink(1.0f);
                 auto join = context.create_element<Label>(right, "HOW PLAYERS JOIN", theme::Typography::LabelXS);
                 join->set_color(Color{143, 239, 245, 255});
                 join->set_margin_bottom(6.0f);
@@ -265,7 +301,7 @@ namespace recompui {
                         "DualSense: hold Create + PS, then pair in Bluetooth."}) {
                     auto bullet = context.create_element<Label>(right, std::string("\xE2\x80\xA2  ") + line, theme::Typography::Body);
                     bullet->set_font_size(27.0f);
-                    bullet->set_line_height(36.0f);
+                    bullet->set_line_height(33.0f);
                     bullet->set_color(theme::color::TextDim);
                 }
                 queue_update();

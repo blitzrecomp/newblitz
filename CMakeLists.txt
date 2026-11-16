@@ -380,7 +380,10 @@ target_sources(BlitzRecompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/src/main/app_log.cpp
     ${CMAKE_SOURCE_DIR}/src/main/phone_pads.cpp
     ${CMAKE_SOURCE_DIR}/src/main/game_moment.cpp
-    ${CMAKE_SOURCE_DIR}/src/main/builder.cpp
+    ${CMAKE_SOURCE_DIR}/src/main/firstrun.cpp
+    ${CMAKE_SOURCE_DIR}/src/main/firstrun_screen.cpp
+    ${CMAKE_SOURCE_DIR}/src/main/crash_report.cpp
+    ${CMAKE_SOURCE_DIR}/src/main/reset_data.cpp
     ${CMAKE_SOURCE_DIR}/src/main/device_send.cpp
     ${CMAKE_SOURCE_DIR}/src/main/capture.cpp
     ${CMAKE_SOURCE_DIR}/src/main/toast.cpp
@@ -389,6 +392,7 @@ target_sources(BlitzRecompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/src/main/touch_controls.cpp
     ${CMAKE_SOURCE_DIR}/src/main/fps_counter.cpp
     ${CMAKE_SOURCE_DIR}/src/main/hints.cpp
+    ${CMAKE_SOURCE_DIR}/src/main/install_expiry.cpp
     ${CMAKE_SOURCE_DIR}/src/main/experience.cpp
     ${CMAKE_SOURCE_DIR}/src/main/ui_kit.cpp
     ${CMAKE_SOURCE_DIR}/third_party/qrcodegen/qrcodegen.cpp
@@ -455,7 +459,7 @@ target_sources(BlitzRecompiled PRIVATE
 )
 # The host services each platform provides (window menu, HTTP, ...): the same functions, one file per platform.
 if (IOS)
-    target_sources(BlitzRecompiled PRIVATE ${CMAKE_SOURCE_DIR}/src/main/platform_ios.mm)
+    target_sources(BlitzRecompiled PRIVATE ${CMAKE_SOURCE_DIR}/src/main/platform_ios.mm ${CMAKE_SOURCE_DIR}/src/main/provision_profile.mm)
 elseif (APPLE)
     target_sources(BlitzRecompiled PRIVATE ${CMAKE_SOURCE_DIR}/src/main/macos_support.mm)
 elseif (WIN32)

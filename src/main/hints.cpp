@@ -96,6 +96,28 @@ namespace {
         return list;
     }
 
+    // Played by touch alone (ui_kit's touch_only: a phone with no controller): the same hints in the on-screen buttons'
+    // words (touch_controls.cpp, labelled from game_moment.cpp's table), as there are no keys or pads to draw.
+    const char* touch_body(const std::string& id, bool season) {
+        if (id == "settings")
+            return "Tap the menu button at the top left for Settings: rules, players, controllers and more. Its X closes it. "
+                   "Hints like this one can be turned off there (General).";
+        if (id == "side")
+            return "Arcade, then Play. At Controller Select, drag the stick (the left of the screen) left or right to pick a "
+                   "team's side, then tap OK.";
+        if (id == "team")
+            return season ? "Drag the stick up or down to choose, tap OK to pick. UNIFORM changes the uniform. PRO BOWL makes a "
+                            "Pro Bowl crew of the league's best."
+                          : "Drag the stick up or down to choose, tap OK to pick.";
+        if (id == "play") return "Drag the stick to a play and tap PICK. FLIP flips it to the other side; PAGE turns the page.";
+        if (id == "offense") return "Hold TURBO to run faster. PASS passes. JUMP jumps, or spins with turbo. TURBO + PASS stiff-arms.";
+        if (id == "defense") return "SWITCH switches to the player nearest the ball. TACKLE tackles, or dives with turbo. Hold TURBO to run faster.";
+        if (id == "redo")
+            return "At the top right: S saves the game right here, L loads it back, + picks the next slot. REDO replays the last play.";
+        if (id == "settings_tour") return "Tap a tab along the top to change tabs. Rules turns on the Blitz codes. Players shows who's who and lets phones join.";
+        return nullptr;
+    }
+
     bool enabled() {
         return std::get<bool>(recompui::config::get_general_config().get_option_value("hints"));
     }
@@ -355,11 +377,16 @@ namespace {
         body->clear_children();
         bool after_glyph = false;
         std::string text = h.body;
+        bool season = true;
 #if BLITZ_MODERN
         // Team select's extras (uniform sets, Pro Bowl) come with the 2026 Season (season_pak.h): without it, only how
         // to pick (2026-11-13).
-        if (std::string(h.id) == "team" && !blitz::season_content()) text = "Push {MOVE} up or down to choose, {A} to pick.";
+        season = blitz::season_content();
+        if (std::string(h.id) == "team" && !season) text = "Push {MOVE} up or down to choose, {A} to pick.";
 #endif
+        if (blitz::ui::touch_only()) {
+            if (const char* t = touch_body(h.id, season)) text = t;
+        }
         for (const Piece& p : pieces(text)) {
             Label* l = context.create_element<Label>(body, p.text, theme::Typography::Body);
             if (after_glyph && !p.glyph && p.text.size() == 1 && std::string(".,;:)").find(p.text[0]) != std::string::npos) {

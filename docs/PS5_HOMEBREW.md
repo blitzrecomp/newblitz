@@ -90,6 +90,14 @@ Next, in order:
    what happened, including `[ps5] ROM …`, `[ps5] rdram in direct memory` and any crash; the same lines go to the
    kernel log (klogsrv, TCP 3232, if one is running). A title can't dup2, so the log takes over the stdout and stderr
    streams instead (app_log.cpp). Export ROM saves to `/data/blitzrecomp/exports/`.
+5. **A hang or a freeze:** `/data/blitzrecomp/boot.log` (the run before's: `boot.prev.log`) has crumbs written straight to
+   the file, past the log pipe: the start-up steps, Save & Quit's and a resume's steps, `stall:` when the UI thread or
+   the game's frames stop for 10 s mid-run, and `quit: ...` lines. A quit that hasn't closed the title 8 s after the
+   game was told to stop is closed through the system shell anyway (platform_ps5.cpp `ps5_watch`).
+6. **Save & Quit's resume guard** (savestate.cpp, every platform): `savestates/quit.resuming` is on the disk while
+   "Pick up your game?" is first up and while a Resume runs, until the game's frames show. A start that finds it moves
+   quit.state aside as `quit.state.failed` (and `quit.txt.failed`) and doesn't offer it. 2026-11-15: a Save & Quit on
+   the console froze, and every start after it hung until quit.state was moved aside by hand.
 
 ## The precedent: a static recomp already runs on PS5 through Plume
 

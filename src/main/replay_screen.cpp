@@ -40,7 +40,7 @@
 #include "replay_gif.h"
 #include "ui_kit.h"
 
-extern "C" int blitz_hotkey_held(void);  // controllers.cpp: L3 or R3 held
+extern "C" int blitz_hotkey_held(void);  // controllers.cpp: the hotkey (R3, or L3 on a one-stick handheld) held
 extern "C" {
     extern volatile int blitz_ds_mode;
     extern volatile int blitz_ds_second_on_top;

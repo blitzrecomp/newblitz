@@ -87,7 +87,6 @@ h4 { font-size: 22px; letter-spacing: .04em; color: #fff; }
 
 /* ---- Buttons ----------------------------------------------------------------------------------------------------- */
 .btn {
-  --cap: 0px;
   position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 10px;
   min-height: 52px; padding: 0 26px; border-radius: 4px; text-decoration: none; cursor: pointer;
   font: italic 800 23px/1 var(--display); letter-spacing: .04em; text-transform: uppercase;
@@ -97,19 +96,11 @@ h4 { font-size: 22px; letter-spacing: .04em; color: #fff; }
 .btn:hover, .btn:focus-visible { background: var(--red); border-color: var(--yellow-hi); color: var(--yellow-hi); outline: none; }
 .btn:active { transform: translateY(1px); }
 .btn svg { width: 22px; height: 22px; flex: none; }
-.btn-hot { background: var(--red); border: 3px solid var(--yellow-hi); color: var(--yellow-hi); margin: 0 12px; box-shadow: 0 6px 24px rgba(179, 16, 30, .35); }
-.btn-hot::before, .btn-hot::after {
-  content: ""; position: absolute; top: -5px; bottom: -5px; width: 12px; background: url(/assets/img/ui/selector_cap_l@2x.png) center / 100% 100% no-repeat;
-}
-.btn-hot::before { left: -15px; }
-.btn-hot::after { right: -15px; background-image: url(/assets/img/ui/selector_cap_r@2x.png); }
+.btn-hot { background: var(--red); border: 3px solid var(--yellow-hi); color: var(--yellow-hi); box-shadow: 0 6px 24px rgba(179, 16, 30, .35); }
 .btn-hot:hover, .btn-hot:focus-visible { background: var(--red-hi); color: #fff; }
 .btn-ghost { color: #fff; border-color: var(--rim-soft); background: rgba(13, 26, 58, .7); }
 .btn-ghost:hover, .btn-ghost:focus-visible { color: var(--yellow-hi); }
 .btn-sm { min-height: 40px; padding: 0 18px; font-size: 20px; }
-.btn-hot.btn-sm::before, .btn-hot.btn-sm::after { width: 10px; }
-.btn-hot.btn-sm::before { left: -13px; }
-.btn-hot.btn-sm::after { right: -13px; }
 .btn-row { display: flex; flex-wrap: wrap; gap: 16px 20px; align-items: center; }
 
 /* ---- Panels: the grid panel (one 9-slice with the grid in its middle) and chrome corners ------------------------ */

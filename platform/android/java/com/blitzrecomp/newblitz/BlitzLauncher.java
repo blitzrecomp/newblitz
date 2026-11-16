@@ -22,7 +22,7 @@ import java.util.List;
  * chosen at launch. The game then finds the other screen itself, and which of the two is on top (firstIsUpper).
  */
 public class BlitzLauncher extends Activity {
-    static final String PREFS = "blitz_ds", SWAP = "swap_screens", POTATO = "potato_mode", POTATO_TWO = "potato_two_screens", NO_FRAME = "starts_without_a_frame";
+    static final String PREFS = "blitz_ds", SWAP = "swap_screens", POTATO = "potato_mode", POTATO_TWO = "potato_two_screens_on", NO_FRAME = "starts_without_a_frame";
 
     /** About 1 GB of RAM (an RG DS Plus), or Settings → Potato Mode: original quality limits, no extras, straight in. */
     static boolean lean(Context context) {
@@ -102,11 +102,11 @@ public class BlitzLauncher extends Activity {
         return ActivityOptions.makeBasic().setLaunchDisplayId(display).toBundle();
     }
 
-    /** Potato Mode is one screen, where it was opened, unless Settings → Two Screens (Potato) says otherwise. */
+    /** Potato Mode on two screens uses both unless Settings → Two Screens (Potato) is off (on by default since 2026-11-15). */
     static boolean twoScreens(Context context) {
         if (!lean(context)) return true;
         Boolean recipe = BlitzRecipe.two();  // this run's, ahead of the setting and not saved over it
-        return recipe != null ? recipe : context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(POTATO_TWO, false);
+        return recipe != null ? recipe : context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(POTATO_TWO, true);
     }
 
     /** Potato Mode, the last two launches never drew: this one is a safe start (BlitzActivity.safeStartCheck). */
@@ -123,12 +123,48 @@ public class BlitzLauncher extends Activity {
         return -1;
     }
 
+    /**
+     * With two screens, the lower one: the touch screen on an RG DS (display 0 there), and on a device with two, where setup's
+     * buttons belong. By firstIsUpper, so Swap Screens fixes a device it gets wrong. -1 with one screen.
+     */
+    static int touchDisplay(Context context) {
+        Display first = null, other = null;
+        for (Display d : allDisplays(context)) {
+            if (d.getState() == Display.STATE_OFF) continue;
+            if (d.getDisplayId() == Display.DEFAULT_DISPLAY) first = d;
+            else if (other == null) other = d;
+        }
+        if (first == null || other == null) return -1;
+        return (firstIsUpper(context, first, other) ? other : first).getDisplayId();
+    }
+
+    /** Setup's ROM screen (BlitzRomFirst), on the touch screen when there are two; the game later goes where this was opened. */
+    private void startRomFirst() {
+        Intent rom = new Intent(this, BlitzRomFirst.class);
+        int here = getWindowManager().getDefaultDisplay().getDisplayId();
+        rom.putExtra(BlitzRomFirst.GAME_DISPLAY, here);
+        int touch = touchDisplay(this);
+        if (touch < 0 || touch == here) {
+            startActivity(rom);
+            return;
+        }
+        // A task of its own (BlitzRomFirst's own affinity, in the manifest): a display other than the launcher's.
+        rom.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            Log.i("BlitzRecomp", "[ds] setup's ROM screen on display " + touch + ", the lower one");
+            startActivity(rom, ActivityOptions.makeBasic().setLaunchDisplayId(touch).toBundle());
+        } catch (Exception e) {
+            Log.w("BlitzRecomp", "[ds] couldn't put setup's ROM screen on display " + touch + ": " + e);
+            startActivity(rom);
+        }
+    }
+
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         // The picker in front of a running game gets the game killed there: pick first, with none of it loaded.
         if (lean(this) && !BlitzActivity.isRunning() && !hasRom(this)) {
-            startActivity(new Intent(this, BlitzRomFirst.class));
+            startRomFirst();
             finish();
             return;
         }

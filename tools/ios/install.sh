@@ -1,7 +1,9 @@
 #!/bin/bash
 # Signs an iOS build (build/ios/app_<flavour>/BlitzRecompiled.app) for your Apple team and installs it on the connected
 # iPhone, then launches it (docs/IOS_FEASIBILITY.md).
-#   [BLITZ_IOS_TEAM=<team>] [BLITZ_IOS_BUNDLE_ID=<id>] tools/ios/install.sh classic|modern [--no-launch]
+#   [BLITZ_IOS_TEAM=<team>] [BLITZ_IOS_BUNDLE_ID=<id>] [BLITZ_IOS_ENTITLEMENTS=<plist>] tools/ios/install.sh classic|modern [--no-launch]
+# BLITZ_IOS_ENTITLEMENTS signs with other entitlements: platform/ios/FreeAccount.entitlements has only what a free
+# Personal Team gets (no extended-virtual-addressing), so a paid team can try how a free account's install starts.
 # The provisioning profile comes from a stub app with the same bundle ID and entitlements, built by Xcode with
 # automatic signing (tools/ios/stub). The phone must be unlocked to launch.
 set -euo pipefail
@@ -24,8 +26,9 @@ DEVICE=${BLITZ_IOS_DEVICE:-$(xcrun devicectl list devices 2>/dev/null | grep -v 
 [ -n "$DEVICE" ] || { echo "no paired iPhone connected" >&2; exit 2; }
 
 # 1. The profile, from the stub (Xcode creates it the first time; later runs reuse it).
-STUB=$ROOT/build/ios/stub-$FLAVOUR
-cmake -S "$ROOT/tools/ios/stub" -B "$STUB" -G Xcode -DCMAKE_SYSTEM_NAME=iOS -DBLITZ_IOS_TEAM=$TEAM -DBLITZ_IOS_BUNDLE_ID=$BUNDLE_ID >/dev/null
+STUB=$ROOT/build/ios/stub-$FLAVOUR${BLITZ_IOS_BUNDLE_ID:+-$BLITZ_IOS_BUNDLE_ID}
+cmake -S "$ROOT/tools/ios/stub" -B "$STUB" -G Xcode -DCMAKE_SYSTEM_NAME=iOS -DBLITZ_IOS_TEAM=$TEAM -DBLITZ_IOS_BUNDLE_ID=$BUNDLE_ID \
+    -DBLITZ_IOS_ENTITLEMENTS="${BLITZ_IOS_ENTITLEMENTS:-}" >/dev/null
 xcodebuild -project "$STUB/BlitzStub.xcodeproj" -scheme BlitzStub -sdk iphoneos -configuration Debug \
     -destination "id=$DEVICE" -allowProvisioningUpdates build >"$STUB/xcodebuild.log" 2>&1 || { tail -20 "$STUB/xcodebuild.log"; exit 1; }
 PROFILE=$STUB/Debug-iphoneos/BlitzStub.app/embedded.mobileprovision

@@ -6,7 +6,13 @@
 #                           NewBlitz-v<version>-Linux-x64.tar.gz    the New Blitz folder: the executable and its resources
 # Each archive also holds recomplauncher.json beside the app (platform/recomplauncher: RecompLauncher's manifest), and
 # the names are the ones RecompLauncher picks a download by (system and processor in the name).
-#                           SHA256SUMS, RELEASE_NOTES.md
+# Then one obvious file per device (tools/release/make_downloads.sh, from the same staged folders):
+#                           NewBlitz-v<version>-Windows-Setup.exe   installer: per user, Start menu, uninstaller
+#                           NewBlitz-v<version>-macOS.dmg           New Blitz.app and an Applications alias
+#                           NewBlitz-v<version>-x86_64.AppImage     SDL2 and FreeType inside (needs the AppImage runtime)
+#                           NewBlitz-v<version>-Android.apk         the Android kit (RELEASE_NO_ANDROID=1: none)
+#                           NewBlitz-v<version>-iPhone.ipa          the iPhone kit, unsigned
+#                           SHA256SUMS (every NewBlitz-* file), RELEASE_NOTES.md
 #
 # Every app is the public one (BLITZ_CONTENT=public: no licensed content; the 2026 Season pak brings it) and built with
 # RELEASE=1 (no build-machine paths inside) at VERSION. Each computer's app carries the same device kits for Blitz
@@ -38,7 +44,11 @@ fi
 
 # The kits every computer's app carries: all three, built public.
 [ "$(cat build/devices/content.txt 2>/dev/null)" = public ] || { echo "build/devices isn't the public kits (make device-kits BLITZ_CONTENT=public)"; exit 1; }
-for k in ps5/PPSA99961/eboot.bin ps5/launch.elf android/NewBlitz.apk ios/NewBlitz.ipa; do
+# RELEASE_NO_ANDROID=1 leaves the Android kit out of every download (2026-11-15: a release key to remake; the Builder
+# then says "This build has no Android kit").
+KITS="ps5/PPSA99961/eboot.bin ps5/launch.elf android/NewBlitz.apk ios/NewBlitz.ipa"
+[ -n "${RELEASE_NO_ANDROID:-}" ] && KITS="ps5/PPSA99961/eboot.bin ps5/launch.elf ios/NewBlitz.ipa"
+for k in $KITS; do
     [ -f "build/devices/$k" ] || { echo "missing device kit: build/devices/$k"; exit 1; }
 done
 [ ! -e build/devices/ios/NewBlitz.app.zip ] || { echo "build/devices has a team-signed iPhone app: never in a release"; exit 1; }
@@ -56,7 +66,9 @@ ditto --norsrc --noextattr --noqtn "$MAC" "$STAGE/mac/New Blitz.app"
 R="$STAGE/mac/New Blitz.app/Contents/Resources"
 chmod -R u+rwX,go+rX "$STAGE/mac/New Blitz.app"
 rm -f "$R/devices/content.txt"
-for k in ps5/PPSA99961/eboot.bin android/NewBlitz.apk ios/NewBlitz.ipa; do
+[ -n "${RELEASE_NO_ANDROID:-}" ] && rm -rf "$R/devices/android"
+for k in $KITS; do
+    [ "$k" = ps5/launch.elf ] && continue
     [ -f "$R/devices/$k" ] || { echo "the Mac app lacks the device kit $k (make app-modern BLITZ_CONTENT=public after device-kits)"; exit 1; }
 done
 grep -q "<string>$V</string>" "$STAGE/mac/New Blitz.app/Contents/Info.plist" || { echo "the Mac app isn't version $V"; exit 1; }
@@ -77,6 +89,7 @@ stage_folder() {  # build dir, dest, exe name
     for f in recompcontrollerdb.txt icon.png; do [ -f "$b/$f" ] && cp "$b/$f" "$d/"; done
     for f in assets packs art paks; do [ -d "$b/$f" ] && cp -R "$b/$f" "$d/"; done
     ditto build/devices "$d/devices" && rm -f "$d/devices/content.txt"
+    [ -n "${RELEASE_NO_ANDROID:-}" ] && rm -rf "$d/devices/android"
     # The public build carries no licensed content, whatever an earlier private build left in the folder.
     rm -rf "$d/packs/blitz2026" "$d/packs/pac12" "$d/houston" "$d/uniforms" "$d/announcer" "$d/probowl" "$d/rosters" \
         "$d/art/vs_right"
@@ -101,43 +114,76 @@ chmod 755 "$STAGE/linux/New Blitz/New Blitz"
 cp platform/recomplauncher/recomplauncher.json "$STAGE/linux/"
 (cd "$STAGE/linux" && tar --uid 0 --gid 0 --uname root --gname root -czf "$ROOT/$OUT/NewBlitz-v$V-Linux-x64.tar.gz" "New Blitz" recomplauncher.json)
 
+# --- One file per device: installer, disk image, AppImage, phone apps -----------------------------------------------
+tools/release/make_downloads.sh "$V" "$STAGE" "$OUT"
+
 # --- Notes and checksums -----------------------------------------------------------------------------------------
 say "notes"
-python3 -I - "$V" CHANGELOG.md "$OUT/RELEASE_NOTES.md" <<'EOF'
-import re, sys
+python3 -I - "$V" CHANGELOG.md "$OUT" <<'EOF'
+import os, re, sys
 v, changelog, out = sys.argv[1:]
 text = open(changelog, encoding="utf-8").read()
 m = re.search(r"^## .*?$\n(.*?)(?=^## |\Z)", text, re.S | re.M)
 body = m.group(1).strip() if m else ""
-# BRANDING: release notes
+have = set(os.listdir(out))
+# BRANDING: release notes. One line per download that was made: what it's for, and how to open it. The hub model (team,
+# 2026-11-15): the computer app comes first and sets up every other device; the phone files are for installing by hand.
+per_device = [
+    (f"NewBlitz-v{v}-Windows-Setup.exe", "**Windows** (x64, Windows 10 or 11)",
+     "run it; on the SmartScreen prompt, **More info → Run anyway**. It installs for you alone (no administrator), adds "
+     "New Blitz to Start, and Settings → Apps removes it again (your saves stay)."),
+    (f"NewBlitz-v{v}-macOS.dmg", "**Mac** (Apple Silicon, macOS 13 or later)",
+     "open it and drag New Blitz to Applications. Open the app once (it's blocked), then **System Settings → Privacy & "
+     "Security → Open Anyway**."),
+    (f"NewBlitz-v{v}-x86_64.AppImage", "**Linux** (x86_64, untested)",
+     "`chmod +x` it (or tick \"Allow executing\" in its properties) and run it. SDL2 and FreeType are inside; Vulkan "
+     "comes from your graphics drivers."),
+]
+by_hand = [
+    (f"NewBlitz-v{v}-Android.apk", "**Android** (phones and handhelds)",
+     "open it on the device and allow installs from that app when asked, then open New Blitz and pick your ROM with "
+     "**Pick a File Instead**."),
+    (f"NewBlitz-v{v}-iPhone.ipa", "**iPhone / iPad**",
+     "install it with Sideloadly (sideloadly.io, on a Mac or Windows; your own Apple ID, a free one works) and turn on "
+     "its AutoRefresh (the circular-arrows button), so it renews itself over Wi-Fi. Then open New Blitz and pick your ROM "
+     "with **Pick a File Instead**, or share it to New Blitz from the Files app. Steps: newblitz.com/start."),
+]
+lines = [f"- {who}: `{f}`. {how[0].upper() + how[1:]}" for f, who, how in per_device if f in have]
+hand_lines = [f"- {who}: `{f}`. {how[0].upper() + how[1:]}" for f, who, how in by_hand if f in have]
+android = f"NewBlitz-v{v}-Android.apk" in have
+# What the computer app sets up from Blitz Builder → Phone or Handheld, PS5, N64 or Emulator.
+targets = ["an Android phone or handheld (over USB)"] if android else []
+targets += ["an iPhone (it makes the .ipa with your ROM inside)", "a PS5 with etaHEN", "an N64 or an emulator (a `.z64`)"]
+archives = [f for f in (f"NewBlitz-v{v}-macOS-arm64.zip", f"NewBlitz-v{v}-Windows-x64.zip",
+                        f"NewBlitz-v{v}-Linux-x64.tar.gz") if f in have]
 notes = f"""# New Blitz {v}
 
 {body}
 
 ## Downloads
 
-- **Mac** (Apple Silicon, macOS 13 or later): `NewBlitz-v{v}-macOS-arm64.zip`
-- **Windows** (x64): `NewBlitz-v{v}-Windows-x64.zip`
-- **Linux** (x86_64): `NewBlitz-v{v}-Linux-x64.tar.gz`
+**Get New Blitz for your computer.** It sets up your phone, handheld, PS5 or an N64/emulator export too: open
+**Blitz Builder** and pick the device; your ROM and setup go with it, so the device starts ready to play. You need your
+own NFL Blitz 2000 (USA) v1.1 cartridge dump: the app asks for it. No game files are included.
 
-Each is the computer app and the **Builder**: it sets the game up with your own NFL Blitz 2000 (USA) v1.1 ROM and sends
-it to a PS5 (etaHEN) or an Android device, saves the iPhone app (.ipa) for you to install with your own Apple ID, or
-exports a `.z64`. No game files are included. `SHA256SUMS` lists every download's SHA-256.
+""" + "\n".join(lines) + f"""
 
-## Opening it the first time
+From the computer app's Blitz Builder: {", ".join(targets[:-1])}, or {targets[-1]}.
 
-The downloads aren't signed with a developer certificate, so your computer asks first:
+The downloads aren't signed with a developer certificate, so your computer asks before opening one the first time: the
+steps above.
 
-- **Mac:** open the app once (it's blocked), then **System Settings → Privacy & Security → Open Anyway**.
-- **Windows:** unzip the whole folder first; on the SmartScreen prompt, **More info → Run anyway**.
-- **Linux:** `tar xzf` it, `chmod +x "New Blitz/New Blitz"` if needed, then run it. It uses the system's SDL2, FreeType
-  and Vulkan.
-- **iPhone / iPad:** Blitz Builder → Somewhere else → A console or phone → Phone → **Save the iPhone app (.ipa)**. Install
-  `NewBlitz.ipa` with AltStore, SideStore or Sideloadly, signed with your own Apple ID (a free one lasts 7 days at a
-  time), then copy the saved ROM and setup into New Blitz's folder (Files → On My iPhone → New Blitz). The README saved
-  beside it has the steps.
+### Advanced: install on a device by hand
+
+No computer to set it up from? Install the device's file yourself, then pick your ROM on the device.
+
+""" + "\n".join(hand_lines) + f"""
+
+**To unpack instead of install** (and for RecompLauncher): {", ".join(f"`{a}`" for a in archives)}. Unpack the whole
+folder and run the app inside; the Linux one uses the system's SDL2, FreeType and Vulkan. `SHA256SUMS` lists every
+download's SHA-256.
 """
-open(out, "w", encoding="utf-8").write(notes)
+open(os.path.join(out, "RELEASE_NOTES.md"), "w", encoding="utf-8").write(notes)
 EOF
 (cd "$OUT" && shasum -a 256 NewBlitz-* > SHA256SUMS)
 

@@ -77,6 +77,7 @@ namespace blitz { void ios_keep_landscape(); }  // platform_ios.mm
 
 #include "recompui/recompui.h"
 #include "ui_kit.h"
+#include "install_expiry.h"
 #include "recompui/program_config.h"
 #include "recompui/renderer.h"
 #include "recompui/config.h"
@@ -248,7 +249,11 @@ ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callbacks_t::
     blitz::window_created(window);
     blitz::ds_window_created(window);
     // BRANDING: app menu name, from program_name
-    blitz::install_app_menu(blitz::program_name.substr(blitz::program_name.find(": ") + 2));  // "Modern Blitz": Cmd+Q, Cmd+H, Cmd+M (macos_support.mm)
+    {   // Cmd+Q, Cmd+H, Cmd+M (macos_support.mm): the name after "BlitzRecomp: " if there's one ("Modern Blitz"), else the
+        // whole name (New Blitz has none: find gave npos, and npos + 2 cut the first letter, "Quit ew Blitz").
+        const size_t colon = blitz::program_name.find(": ");
+        blitz::install_app_menu(colon == std::string::npos ? std::string("New Blitz") : blitz::program_name.substr(colon + 2));
+    }
 
     SDL_SysWMinfo wmInfo;
     SDL_VERSION(&wmInfo.version);
@@ -285,8 +290,9 @@ namespace blitz {
     void capture_shutdown();  // capture.cpp
     void party_update();               // below
     void hints_update();               // hints.cpp
-    void builder_update();             // builder.cpp: the first start's setup
+    void builder_update();             // firstrun.cpp: the first start's setup
     void builder_autostarted();
+    void firstrun_launcher_frame(int frame);
     void export_update();              // export_rom.cpp
     void rosters_check_start();        // rosters_live.cpp (Modern)
     void paks_at_launch();             // season_pak.cpp
@@ -294,10 +300,12 @@ namespace blitz {
     void crew_update();                // crew.cpp (Modern)
     void party_tab_refresh();  // tournament.cpp
     bool checkpoint_quit_prompt();
+    void ui_tick();                    // fps_counter.cpp
 }
 
 // Main thread, about every millisecond (recomp.cpp's loop).
 void update_gfx(void*) {
+    blitz::ui_tick();
     recompinput::handle_events();
     blitz::controllers_update();
     // Problems found on the game thread (Controller Pak, content packs) are queued and shown here.
@@ -311,6 +319,7 @@ void update_gfx(void*) {
         if (now - last >= 50) {
             last = now;
             blitz::hints_update();
+            blitz::install_expiry_update();
             blitz::builder_update();
             blitz::export_update();
 #if BLITZ_MODERN
@@ -425,6 +434,8 @@ static bool autostart_game = false;
 // Settings → Restart: quit normally, then main replaces the process with a fresh copy that starts the
 // game straight away (same PID, so tools watching it keep working).
 static std::atomic<bool> restart_requested{false};
+// Settings → Main Menu during a game: the same relaunch, into the launcher instead of the game.
+static std::atomic<bool> restart_to_launcher{false};
 
 namespace blitz {
     void log_shutdown();  // app_log.cpp
@@ -432,6 +443,32 @@ namespace blitz {
     void request_restart() {
         if (!ultramodern::is_game_started()) return;  // quitting while the game starts up isn't safe
         restart_requested = true;
+        ultramodern::quit();
+    }
+
+    // Settings → Main Menu from a game (firstrun.cpp, after its "Leave this game?"): a game can't be stopped and left
+    // running underneath, so the app ends and starts again on the launcher. The mark (config.cpp skip_launcher) makes
+    // that next start open on the launcher; a phone, which can't start itself again, opens there when it's next opened.
+    void leave_to_main_menu() {
+        std::error_code ec;
+        std::filesystem::create_directories(recompui::file::get_app_folder_path(), ec);
+        std::ofstream(recompui::file::get_app_folder_path() / "open_launcher") << "1\n";
+        if (blitz::restart_available) {
+            restart_requested = true;
+            restart_to_launcher = true;
+        }
+        ultramodern::quit();
+    }
+
+    // Reset Data and Restore a Backup (reset_data.cpp): the app ends, its folder is cleared (or restored) on the way
+    // out, and on a computer it starts again, on the launcher, where the first run comes up. A phone or console, which
+    // can't start itself again, starts over when it's next opened.
+    void restart_fresh() {
+        fprintf(stderr, "[reset] the app %s\n", blitz::restart_available ? "restarts" : "closes");
+        if (blitz::restart_available) {
+            restart_requested = true;
+            restart_to_launcher = true;
+        }
         ultramodern::quit();
     }
 
@@ -479,7 +516,7 @@ static void restart_app(char** argv) {
         if (strcmp(argv[i], "--game") == 0 && argv[i + 1] != nullptr) { i++; continue; }
         cmd += L" \"" + std::filesystem::path(argv[i]).wstring() + L"\"";
     }
-    cmd += L" --game " + std::filesystem::path(blitz::mod_game_id).wstring();
+    if (!restart_to_launcher) cmd += L" --game " + std::filesystem::path(blitz::mod_game_id).wstring();
     blitz::log_shutdown();
     _wputenv_s(L"BLITZ_INPUT_LIVE_FROM_END", L"1");
     _wputenv_s(L"BLITZ_WAIT_PID", std::to_wstring(GetCurrentProcessId()).c_str());  // it starts once this one has ended
@@ -510,8 +547,10 @@ static void restart_app(char** argv) {
         if (strcmp(argv[i], "--game") == 0 && argv[i + 1] != nullptr) { i++; continue; }
         args.emplace_back(argv[i]);
     }
-    args.emplace_back("--game");
-    args.emplace_back(blitz::mod_game_id);
+    if (!restart_to_launcher) {
+        args.emplace_back("--game");
+        args.emplace_back(blitz::mod_game_id);
+    }
     std::vector<char*> cargs;
     for (std::string& a : args) cargs.push_back(a.data());
     cargs.push_back(nullptr);
@@ -659,7 +698,46 @@ static recomp::RomValidationError launcher_import_rom(const std::filesystem::pat
 #endif
 
 namespace blitz {
+    // First run's Load ROM and Settings → Change ROM (firstrun.cpp): the launcher's own import (zips, the other game's
+    // hand-over, Modern's roster question), and what to tell the player when it's refused. kind: 1 not the game (or
+    // not a ROM), 2 the game but not the v1.1 copy (another version, region, or a bad dump), 3 couldn't read or keep it.
+    bool store_rom(const std::filesystem::path& path, int& kind, std::string& message) {
+        std::u8string gid = blitz::game_id;
+#if BLITZ_TEAMPLUS
+        recomp::RomValidationError r = launcher_import_rom(path, gid);
+#else
+        recomp::RomValidationError r = import_rom(path, gid);
+#endif
+        kind = 0;
+        if (r == recomp::RomValidationError::Good) {
+            recomp::check_all_stored_roms();  // so recomp::is_rom_valid agrees for the rest of this session
+            fprintf(stderr, "[rom] stored from %s\n", path.filename().string().c_str());
+            return true;
+        }
+        if ((r == recomp::RomValidationError::IncorrectVersion || r == recomp::RomValidationError::IncorrectRom) &&
+            blitz::experience_hand_over(path)) {
+            rom_handed_over = true;
+        }
+        kind = r == recomp::RomValidationError::IncorrectVersion ? 2
+             : r == recomp::RomValidationError::FailedToOpen || r == recomp::RomValidationError::OtherError ? 3 : 1;
+        // BRANDING: first run's wrong-ROM text names the app
+        message = kind == 1 ? "That's not the right game. New Blitz needs NFL Blitz 2000 for the N64, USA, v1.1."
+                : kind == 2 ? "That's NFL Blitz 2000, but not the USA v1.1 copy New Blitz needs. A different region or "
+                              "version won't work, and a damaged file looks the same: try dumping it again."
+                            : rom_error_text(r);
+        rom_handed_over = false;
+        fprintf(stderr, "[rom] %s: not stored (%d)\n", path.filename().string().c_str(), (int)r);
+        return false;
+    }
+}
+
+namespace blitz {
+    void crash_report_at_start();  // crash_report.cpp
+    void dev_input_early();        // dev_input.cpp
     void log_init(const std::filesystem::path& app_folder, const std::string& version);  // app_log.cpp
+    void firstrun_app_up(const std::filesystem::path& app_folder, const std::string& version);  // firstrun.cpp
+    void reset_data_pending(const std::filesystem::path& app_folder, const char* when);  // reset_data.cpp
+    void firstrun_settings_loaded();
     void style_launcher(recompui::LauncherMenu* menu, recompui::GameOptionsMenu* options);
     bool skip_launcher();  // config.cpp: Settings → General → Launcher at Start off (phones' default)
 }
@@ -669,7 +747,25 @@ namespace blitz {
 // decision taken later started the game from under the launcher the player had just gone back to.
 static bool launcher_autostart = false;
 
+static recompui::LauncherMenu* launcher_menu = nullptr;
+
+namespace blitz {
+    // The launcher, back in view (setup's Exit and Done, Settings → Main Menu outside a game): it may have been kept
+    // out of sight for a start straight into the game (on_launcher_init).
+    void show_launcher() {
+        recompui::ContextId launcher = recompui::get_launcher_context_id();
+        if (launcher == recompui::ContextId::null()) return;
+        if (launcher_menu != nullptr) {
+            bool opened = launcher.open_if_not_already();
+            launcher_menu->set_display(recompui::Display::Block);
+            if (opened) launcher.close();
+        }
+        if (!recompui::is_context_shown(launcher)) recompui::show_context(launcher, "");
+    }
+}
+
 void on_launcher_init(recompui::LauncherMenu* menu) {
+    launcher_menu = menu;
     auto game_options_menu = menu->init_game_options_menu(
         supported_games[0].game_id,
         supported_games[0].mod_game_id,
@@ -742,6 +838,9 @@ void on_launcher_update(recompui::LauncherMenu* menu) {
         blitz::start_blitz_party();
         return;
     }
+    // First run's start: the launcher's own frames, not a timer (firstrun.cpp).
+    static int launcher_frames = 0;
+    if (launcher_frames < 1000) blitz::firstrun_launcher_frame(++launcher_frames);
     static int frames = 0;
     if (++frames != 30) {
         return;
@@ -889,6 +988,9 @@ int main(int argc, char** argv) {
     BOOT_CRUMB("before log_init");
     blitz::log_init(recompui::file::get_app_folder_path(), version_string);
     BOOT_CRUMB("after log_init");
+    // A Reset Data or Restore that didn't finish on the way out last time (reset_data.cpp): before anything reads the folder.
+    blitz::reset_data_pending(recompui::file::get_app_folder_path(), "start");
+    blitz::firstrun_app_up(recompui::file::get_app_folder_path(), version_string);  // [firstrun] line 1
 
     BOOT_CRUMB("SDL audio");
     if (SDL_InitSubSystem(SDL_INIT_AUDIO) < 0) {
@@ -926,10 +1028,63 @@ int main(int argc, char** argv) {
 
     recomp::register_config_path(recompui::file::get_app_folder_path());
 
+    // supported_games is filled during static initialization, and it copies blitz_config.h's inline strings. Their
+    // order across translation units isn't guaranteed: on Windows (MSVC's 15-character small-string limit) a
+    // 20-character game_id needs a heap copy at run time and was still empty when copied, so 0.9.2 stored the ROM as
+    // "<app folder>/.z64" under the id "" (the setup questions never opened: they ask for the real id). Set them
+    // again here, after every static initializer, and move a ROM stored by 0.9.2 to its proper name.
+    supported_games[0].game_id = blitz::game_id;
+    supported_games[0].mod_game_id = blitz::mod_game_id;
+    supported_games[0].display_name = blitz::display_name;
+    {
+        std::error_code ec;
+        const std::filesystem::path app = recompui::file::get_app_folder_path();
+        const std::filesystem::path nameless = app / ".z64", proper = app / (blitz::game_id + u8".z64");
+        if (std::filesystem::is_regular_file(nameless, ec) && !std::filesystem::exists(proper, ec)) {
+            std::filesystem::rename(nameless, proper, ec);
+            fprintf(stderr, "[rom] the ROM stored without a name (0.9.2 on Windows) moved to %s: %s\n",
+                    reinterpret_cast<const char*>(proper.filename().u8string().c_str()), ec ? ec.message().c_str() : "ok");
+        }
+    }
+
     for (const auto& game : supported_games) {
         recomp::register_game(game);
     }
 
+#if defined(BLITZ_IOS)
+    // An iPhone app made on a computer (Blitz Builder → Phone → iPhone, device_send.cpp save_ipa) carries the ROM and
+    // that computer's setup inside the app, in setup/ (team, 2026-11-15). Taken in once per .ipa made (its builder_done
+    // says when it was made; re-signing the same one every 7 days doesn't take it in again): the setup files go to the
+    // drop folder, which the step below moves into the app folder as it does a computer's send; the ROM is stored
+    // straight from the app, when none is stored yet. An .ipa without setup/ (the one a phone downloads itself) asks
+    // for the ROM with the Files picker, as before.
+    {
+        const std::filesystem::path setup = recompui::file::get_program_path() / "setup", drop = blitz::rom_drop_folder();
+        const std::filesystem::path seen = recompui::file::get_app_folder_path() / "setup_imported";
+        std::error_code ec;
+        std::string mark, last;
+        std::getline(std::ifstream(setup / "builder_done"), mark);
+        std::getline(std::ifstream(seen), last);
+        if (!mark.empty() && mark != last && !drop.empty()) {
+            std::filesystem::create_directories(drop, ec);
+            for (const auto& e : std::filesystem::directory_iterator(setup, ec)) {
+                if (e.path().extension() == ".z64") continue;
+                std::error_code cec;
+                std::filesystem::copy_file(e.path(), drop / e.path().filename(), std::filesystem::copy_options::overwrite_existing, cec);
+                fprintf(stderr, "[setup] %s from the app: %s\n", e.path().filename().string().c_str(), cec ? cec.message().c_str() : "ok");
+            }
+            std::error_code sec;
+            if (!std::filesystem::exists(recomp::get_config_path() / (std::u8string(blitz::game_id) + u8".z64"), sec) &&
+                std::filesystem::is_regular_file(setup / "blitz.z64", sec)) {
+                std::u8string candidate = blitz::game_id;
+                recomp::RomValidationError result = import_rom(setup / "blitz.z64", candidate);
+                fprintf(stderr, "[rom] the ROM inside the app: %s\n", rom_error_text(result).c_str());
+            }
+            std::filesystem::create_directories(seen.parent_path(), ec);
+            std::ofstream(seen) << mark << "\n";
+        }
+    }
+#endif
 #if BLITZ_HAS_ROM_DROP_FOLDER
     // A computer's Blitz Builder sends its setup (Season, Rules) and the mark that its questions were answered
     // (builder_done, read by config.cpp) here too: a fresh install has no app folder until it first runs, so they're
@@ -939,11 +1094,31 @@ int main(int argc, char** argv) {
         std::error_code ec;
         for (const char* f : {"season.json", "rules.json", "builder_done"}) {
             if (drop.empty() || drop == app || !std::filesystem::is_regular_file(drop / f, ec)) continue;
+            // One the game couldn't remove last time (another owner: the PS5's FTP server writes as root) is taken in
+            // once, not at every start over the player's own changes: its size and time are noted beside the setup.
+            const std::filesystem::path taken = app / (std::string(".taken-") + f);
+            std::string stamp = std::to_string((unsigned long long)std::filesystem::file_size(drop / f, ec)) + " " +
+                                std::to_string((long long)std::filesystem::last_write_time(drop / f, ec).time_since_epoch().count());
+            std::string seen;
+            std::getline(std::ifstream(taken), seen);
+            if (seen == stamp) continue;
             std::filesystem::create_directories(app, ec);
             ec.clear();
             std::filesystem::copy_file(drop / f, app / f, std::filesystem::copy_options::overwrite_existing, ec);
+            if (ec) {  // a copy there that can't be written over (another owner): this app's own copy in its place
+                std::error_code ec2;
+                std::filesystem::remove(app / f, ec2);
+                ec.clear();
+                std::filesystem::copy_file(drop / f, app / f, std::filesystem::copy_options::overwrite_existing, ec);
+            }
             fprintf(stderr, "[setup] %s from %s: %s\n", f, drop.string().c_str(), ec ? ec.message().c_str() : "moved in");
-            if (!ec) std::filesystem::remove(drop / f, ec);
+            if (ec) continue;
+            std::filesystem::remove(drop / f, ec);
+            if (ec) {
+                fprintf(stderr, "[setup] couldn't remove %s from %s (%s): noted, so it isn't taken in again\n", f,
+                        drop.string().c_str(), ec.message().c_str());
+                std::ofstream(taken) << stamp << "\n";
+            }
         }
     }
     // A ROM (or a zip holding one) put in the device's drop folder (blitz::rom_drop_folder: the PS5's
@@ -1018,7 +1193,11 @@ int main(int argc, char** argv) {
     blitz::register_overlays();
 
     recompinput::players::set_single_player_mode(true);
+    blitz::install_expires();  // [install] signed until <date> (a sideloaded iPhone or iPad)
     blitz::init_config();
+    blitz::firstrun_settings_loaded();  // [firstrun] lines 2 and 3
+    blitz::dev_input_early();           // dev: live commands reach the launcher and setup (tools/live.sh)
+    blitz::crash_report_at_start();     // the last run crashed and reports are on: one goes, in the background
     if (blitz::restart_available) recompui::config::set_restart_callback(blitz::request_restart);  // the header's Restart
     // A game in progress: offer to save it (save states), else Resume Interrupted Games (experimental).
     recompui::set_quit_prompt_override([] { return blitz::savestate_quit_prompt() || blitz::checkpoint_quit_prompt(); });
@@ -1031,6 +1210,11 @@ int main(int argc, char** argv) {
 
     ultramodern::renderer::callbacks_t renderer_callbacks{
         .create_render_context = [](uint8_t* rdram, ultramodern::renderer::WindowHandle window_handle, bool developer_mode) {
+#ifdef __ANDROID__
+            // The surface as it is now, waited for if the app's in the background: create_window's may be gone by this time
+            // (platform_android.cpp).
+            window_handle.window = blitz::render_window(window_handle.window);
+#endif
             auto presentation_mode = ultramodern::renderer::PresentationMode::PresentEarly;
             return recompui::renderer::create_render_context(rdram, window_handle, presentation_mode, developer_mode);
         },
@@ -1099,6 +1283,8 @@ int main(int argc, char** argv) {
     NFD_Quit();
 #endif
     blitz::capture_shutdown();  // finish a clip being recorded
+    // Reset Data or Restore a Backup asked for this quit: the folder is cleared (or restored) now, with the game stopped.
+    blitz::reset_data_pending(recompui::file::get_app_folder_path(), "quit");
     blitz::experience_exec(argv);  // Switch to Classic / Modern (one app, docs/design/ONE_APP.md)
     if (restart_requested) {
         restart_app(argv);

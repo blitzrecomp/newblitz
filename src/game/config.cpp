@@ -63,11 +63,26 @@ namespace blitz {
         return (int)std::get<uint32_t>(recompui::config::get_general_config().get_option_value("fullscreen_button"));
     }
 
+    bool firstrun_unfinished();  // firstrun.cpp
+
     bool skip_launcher() {
-        if (getenv("BLITZ_LEAN") != nullptr) return true;  // about 1 GB of RAM: straight into the game (BlitzActivity)
-        // Launcher at Start off, once Blitz Builder's first setup is done (it runs in the launcher).
-        recomp::config::Config& g = recompui::config::get_general_config();
-        return !std::get<bool>(g.get_option_value("launcher_at_start")) && std::get<bool>(g.get_option_value("welcomed"));
+        // About 1 GB of RAM: straight into the game (BlitzActivity), once setup is done. Its first run waits on the launcher
+        // for setup (firstrun.cpp) like everywhere else; only the ROM came first, from BlitzRomFirst.java.
+        if (getenv("BLITZ_LEAN") != nullptr) return !firstrun_unfinished();
+        // Settings → Main Menu from a game leaves this mark on its way out (main.cpp leave_to_main_menu): this start
+        // opens on the launcher, once.
+        std::error_code ec;
+        const std::filesystem::path mark = recompui::file::get_app_folder_path() / "open_launcher";
+        if (std::filesystem::exists(mark, ec)) {
+            std::filesystem::remove(mark, ec);
+            fprintf(stderr, "[launcher] opened from Settings → Main Menu: the launcher this time\n");
+            return false;
+        }
+        // No launcher at every start (team, 2026-11-15): once setup is done the app starts straight into the game. The
+        // launcher's items are in Settings (General: Main Menu, Blitz Builder, Change ROM; the Add-Ons tab; Teams → Game);
+        // the setup screens only come up by themselves on the first run, and while setup isn't done (Finish Setup).
+        // Launcher at Start is gone with it (its saved value is ignored).
+        return !firstrun_unfinished();
     }
 }
 
@@ -108,6 +123,9 @@ namespace {
 namespace blitz {
     void post_status(const std::string& msg);  // notices.cpp: a toast
     void show_development(bool on);            // below
+    // Two-Screen Sharpness's option, renamed when its default went up (2026-11-15) so installs that saved 1x get the new one.
+    constexpr const char* potato_sharpness_id = "potato_two_screen_sharpness";
+    std::string install_signed_until();        // install_expiry.cpp: "Signed until 21 Nov 2026.", or empty
     // A second screen has been seen this run (ds_view.cpp, from the host's surface, whatever Two Screens says).
     std::atomic<bool> second_screen_seen{false};
     void ds_set_swapped(bool on);  // ds_view.cpp
@@ -155,7 +173,7 @@ namespace blitz {
 #if defined(__ANDROID__)
         // A run recipe (BlitzRecipe.java) says first in all of these: for this run, and nothing of it is saved.
         if (const char* recipe = getenv("BLITZ_RECIPE_TWO")) return recipe[0] == '1';
-        return std::get<bool>(recompui::config::get_general_config().get_option_value("potato_two_screens"));
+        return std::get<bool>(recompui::config::get_general_config().get_option_value("potato_two_screens_on"));
 #else
         return true;
 #endif
@@ -180,7 +198,7 @@ namespace blitz {
         return recipe != nullptr ? strcmp(recipe, "narrow") == 0 : choice == 0;
     }
     double potato_scale() {
-        return sharpness_scale_for(std::get<uint32_t>(recompui::config::get_general_config().get_option_value("potato_two_sharpness")));
+        return sharpness_scale_for(std::get<uint32_t>(recompui::config::get_general_config().get_option_value(potato_sharpness_id)));
     }
     bool potato_narrow_waits() {
         return narrow_waits_for(std::get<uint32_t>(recompui::config::get_general_config().get_option_value("potato_waits")));
@@ -231,7 +249,9 @@ namespace blitz {
         const bool android = false;
 #endif
         for (const char* id : {"fps_counter", "copy_debug_info", "experimental_resume"}) g.update_option_hidden(id, !on);
-        for (const char* id : {"potato_two_sharpness", "potato_waits", "potato_frame_copy"}) g.update_option_hidden(id, !(on && lean));
+        for (const char* id : {"potato_waits", "potato_frame_copy"}) g.update_option_hidden(id, !(on && lean));
+        // Two-Screen Sharpness: in sight whenever Potato Mode has two screens (the team looked for it on the RG DS, 2026-11-15).
+        g.update_option_hidden(potato_sharpness_id, !(lean && (on || potato_two_screens())));
         // Two Screens and Swap Screens: an Android device's with a second screen (a phone with one has no use for them;
         // Potato Mode has its own Two Screens row); the Mac's test windows.
         g.update_option_hidden("two_screens", !((android && !lean && second) || on));
@@ -342,6 +362,12 @@ namespace blitz {
     }
 
     void phone_pads_enable(bool on);  // phone_pads.cpp
+    void firstrun_settings_row(int which);  // firstrun.cpp: 1 Blitz Builder, 2 Main Menu, 3 What Crash Reports Send,
+                                            // 4 Change ROM, 5 Switch Game, 8 Reset Data, 9 Restore a Backup
+    void firstrun_builder_done_seen();      // firstrun.cpp
+    bool reset_backups_exist();             // reset_data.cpp
+    bool other_engine_available();          // experience.cpp
+    const char* other_engine_title();
     void create_party_tab();          // tournament.cpp
     void create_addons_tab();  // addons.cpp
     void create_export_tab();  // export_rom.cpp
@@ -368,16 +394,70 @@ void blitz::init_config() {
     blitz::apply_ui_theme();
 
     recompui::config::GeneralTabOptions general_options{};
+    // The launcher's items, first on General (team, 2026-11-15): the app starts straight into the game now, so this is
+    // where they're found. Main Menu leads (the way back to the launcher), then Blitz Builder and Change ROM.
+    general_options.first_options = [](recomp::config::Config& general) {
+        general.add_bool_option(
+            "main_menu",
+            "Main Menu",
+            std::string(blitz::platform::desktop ? "The app's main menu: Play, Load ROM, Blitz Builder, Add-Ons and the rest. "
+                                                 : "The app's main menu: Play, Load ROM, Add-Ons and the rest. ") +
+                "From a game it asks first: going there ends the game (Save and Leave keeps it, to pick up next time).",
+            false);
+        // BRANDING: the setup tool's name, "Blitz Builder"
+        // The computer's only (the hub model, the team 2026-11-15): the computer sets up a phone, handheld or PS5, so they
+        // have no Blitz Builder of their own.
+        general.add_bool_option(
+            "blitz_builder",
+            "Blitz Builder",
+            "Setup again: play on this computer or a phone, a PS5, an N64 or an emulator; the 2026 Season; the recommended "
+            "rules or your own.",
+            false, !blitz::platform::desktop);
+        general.add_bool_option(
+            "change_rom",
+            "Change ROM",
+            "Pick another NFL Blitz 2000 ROM (.z64, .n64, .v64 or a .zip). New Blitz keeps its own copy; a new one plays "
+            "from the next start.",
+            false);
+        // One app with both games: the other one, once it has a ROM (experience.cpp; the launcher's Switch to …).
+        const bool other = blitz::other_engine_available();
+        general.add_bool_option("switch_engine", other ? std::string("Switch to ") + blitz::other_engine_title() : std::string("Switch Game"),
+                                "Closes this game and opens the other one in this app.", false, !other);
+    };
     general_options.has_rumble_strength = true;
     general_options.has_gyro_sensitivity = false;
     general_options.has_mouse_sensitivity = false;
     recomp::config::Config& general = recompui::config::create_general_tab(general_options);
+    // The rows first on the tab (general_options.first_options above): what each button does.
+    {
+        const std::pair<const char*, const char*> rows[] = {
+            {"main_menu", "Open"}, {"blitz_builder", "Open"}, {"change_rom", "Change"}, {"switch_engine", "Switch"}};
+        for (const auto& [id, label] : rows) recompui::config::set_option_action("general", id, label);
+        const std::pair<const char*, int> requests[] = {{"blitz_builder", 1}, {"main_menu", 2}, {"change_rom", 4}, {"switch_engine", 5}};
+        for (const auto& [id, which] : requests) {
+            std::string option = id;
+            int w = which;
+            general.add_option_change_callback(id, [option, w](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant,
+                                                               recomp::config::OptionChangeContext ctx) {
+                if (ctx != recomp::config::OptionChangeContext::Permanent || !std::get<bool>(cur)) return;
+                recompui::config::get_config("general").update_option_value(option, false);
+                blitz::firstrun_settings_row(w);  // done on the UI tick (firstrun.cpp)
+            });
+        }
+    }
     general.add_bool_option(
         "p1_rumble",
         "Player 1 Rumble",
         "Player 1's controller rumbles on hits, like players 2-4. Saving to the Controller Pak is unaffected.",
         true);
     general.add_bool_option("welcomed", "Welcomed", "The first-start welcome was shown.", false, true);
+    // First run's answers so far (firstrun.cpp): a setup that's resumed never asks the same thing twice.
+    general.add_bool_option("setup_season_asked", "Season Asked", "First run's 2026 question was answered.", false, true);
+    general.add_bool_option("setup_updates_asked", "Updates Asked", "First run's updates and reports were answered.", false, true);
+    // Set up from a computer (builder_done): this device still asks updates and reports once (§2.2).
+    general.add_bool_option("setup_ask_updates", "Ask Updates", "First run asks updates and reports only.", false, true);
+    // When this install's setup began (seconds): a stored ROM older than that is "a ROM saved earlier".
+    general.add_string_option("setup_started", "Setup Started", "When first run began.", "", true);
     // Sound folded in here (team): the Sound tab held this one slider. It stays the real setting (sound.json, what the
     // audio reads); this row writes it, and is set from it at start.
     general.add_percent_number_option("volume", "Volume", "The game's music, crowd and effects.", 100.0);
@@ -392,7 +472,12 @@ void blitz::init_config() {
     // About: the build, and seven presses of it show (or hide) the Development rows, as holding L2 + R2 for 3 s in Settings
     // does (controllers.cpp). For touch, with no triggers.
     // BRANDING: About text (app name + version)
-    general.add_bool_option("about", "About", std::string("New Blitz ") + BLITZ_VERSION + ", build " + BLITZ_BUILD + " (" + BLITZ_COMMIT + ").", false);
+    // A sideloaded iPhone or iPad also says when its signature runs out (install_expiry.cpp): "Signed until 21 Nov 2026."
+    {
+        std::string signed_until = blitz::install_signed_until();
+        general.add_bool_option("about", "About", std::string("New Blitz ") + BLITZ_VERSION + ", build " + BLITZ_BUILD + " (" + BLITZ_COMMIT +
+                                ")." + (signed_until.empty() ? "" : " " + signed_until), false);
+    }
     recompui::config::set_option_action("general", "about", "Build " BLITZ_BUILD);
     general.add_option_change_callback("about", [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant,
                                                    recomp::config::OptionChangeContext ctx) {
@@ -417,6 +502,8 @@ void blitz::init_config() {
         "Brings back the hints you've already seen.",
         false);
     general.add_string_option("hints_seen", "Hints Seen", "The hints already shown.", "", true);
+    // The last day the "This install expires" toast showed (install_expiry.cpp): once a day.
+    general.add_string_option("install_notice_day", "Install Notice Day", "The last day the install expiry toast showed.", "", true);
     // The frame counter (src/main/fps_counter.cpp): for chasing stutter, on any device.
     general.add_bool_option(
         "fps_counter",
@@ -480,7 +567,7 @@ void blitz::init_config() {
     general.add_bool_option(
         "savestate_buttons",
         "Save State Buttons",
-        std::string("Save and load a state from any controller: hold <b>L3 or R3</b> (press a stick in), then press ") +
+        std::string("Save and load a state from any controller: hold <b>R3</b> (press the right stick in; L3 too on a one-stick handheld), then press ") +
             (getenv("BLITZ_SHOULDERS_ARE_TRIGGERS") ? "<b>R2</b> to save, or <b>L2</b> to load" : "<b>R1</b> to save, or <b>L1</b> to load") +
             " (only a press after the stick is in counts, so holding turbo can't load a state by accident); <b>□ / ○</b> (or <b>D-pad left / right</b>) pick one of three slots, or Auto, which saves itself when the app goes to the background mid-game." +
             (blitz::platform::desktop ? " On the keyboard, F5 saves, F7 loads and F6 picks the slot."
@@ -490,7 +577,7 @@ void blitz::init_config() {
     general.add_bool_option(
         "redo_play",
         "Redo Play",
-        std::string("Run the last play again: hold <b>L3 or R3</b> and press <b>△</b> (or <b>D-pad up</b>)") +
+        std::string("Run the last play again: hold <b>R3</b> and press <b>△</b> (or <b>D-pad up</b>)") +
             (blitz::platform::desktop ? " (or <b>F8</b>)" : blitz::platform::touch_controls ? " (or REDO when playing by touch)" : "") +
             ". In the middle of a play, "
         "or while its result shows, it goes back to that play's play select; at play select it goes back one play "
@@ -505,13 +592,13 @@ void blitz::init_config() {
             "handheld, up to about 600 MB on a computer) and a little time each frame, and turns itself off if play can't "
             "hold its frame rate.",
         true);
-    // Was Skip Launcher (off by default everywhere); a phone opened on the launcher every time (team, 2026-10-29).
+    // Was Skip Launcher, then Launcher at Start: kept so a saved value still loads, hidden and not read (no launcher
+    // at every start, skip_launcher above). Holding Shift as a computer's app opens still shows the launcher.
     general.add_bool_option(
         "launcher_at_start",
         "Launcher at Start",
-        std::string("Open on the launcher (Change ROM, Add-Ons, Blitz Builder) instead of starting the game.") +
-            (blitz::platform::desktop ? " Hold <b>Shift</b> while the app opens to see the launcher anyway." : ""),
-        blitz::platform::desktop);
+        "Open on the launcher instead of starting the game.",
+        false, true);
     general.add_bool_option(
         "skip_intros",
         "Skip Intro Screens",
@@ -567,22 +654,31 @@ void blitz::init_config() {
     });
 #endif
 #if defined(__ANDROID__)
-    general.add_bool_option("potato_two_screens", "Two Screens (Potato)",
-        "Potato Mode: one screen by default, where it runs best, and where the system's own dual-screen setting can take over. "
-        "On: the field across both screens, slower. Restart the app after changing it.",
-        false, getenv("BLITZ_LEAN") == nullptr);
-    general.add_option_change_callback("potato_two_screens", [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant,
+    // On by default since 2026-11-15 (team: "the RG DS still has one screen"; his Nov 2 setup there was both screens at 1x), under
+    // a new name, as a saved value outlives a changed default: potato_two_screens was off. Nothing changes with one screen.
+    general.add_bool_option("potato_two_screens_on", "Two Screens (Potato)",
+        "Potato Mode on a device with two screens: the field across both (on by default). Off: one screen, which runs a little "
+        "faster. Restart the app after changing it.",
+        true, getenv("BLITZ_LEAN") == nullptr);
+    general.add_option_change_callback("potato_two_screens_on", [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant,
                                                                 recomp::config::OptionChangeContext) {
         blitz::host_set_potato_two_screens(std::get<bool>(cur));
+        // Two-Screen Sharpness shows with two screens (show_development); the Development rows show it either way.
+        recomp::config::Config& g = recompui::config::get_general_config();
+        const bool dev = std::get<bool>(g.get_option_value(recompui::config::general::options::debug_mode));
+        if (getenv("BLITZ_LEAN") != nullptr) g.update_option_hidden(blitz::potato_sharpness_id, !(std::get<bool>(cur) || dev));
     });
-    // Both under new names, as a saved value outlives a changed default: 1x (the setup the team called almost there; 1.5x has never
-    // run) and Full (a crash at launch can't be switched off from Settings) start out true on a device that's already run these.
-    general.add_enum_option("potato_two_sharpness", "Two-Screen Sharpness",
+    // Under new names, as a saved value outlives a changed default. Two-Screen Sharpness: 1.75x since 2026-11-15 (the team found 1x
+    // too pixelated; his own pick on Nov 2). On the RG DS, both screens, fresh restarts, field play: 1.75x 29.6 fps (min 28.5),
+    // GPU 45%, 173 MB free, Settings and pad presses in it fine; 1x 29.8 (min 28.8), GPU 35%, 181 MB free. The old option
+    // (potato_two_sharpness) saved 1x on every install that ran it, so this one starts afresh. GPU Waits: Full (a crash at
+    // launch can't be switched off from Settings).
+    general.add_enum_option(blitz::potato_sharpness_id, "Two-Screen Sharpness",
         "Potato Mode with two screens: how much detail each screen gets. 1x is the game's original resolution. More is sharper and slower. "
         "Restart the app after changing it.",
         std::vector<recomp::config::ConfigOptionEnumOption>{{0, "S100", "1x"}, {1, "S125", "1.25x"}, {2, "S150", "1.5x"}, {3, "S175", "1.75x"}, {4, "S200", "2x"}},
-        0u, getenv("BLITZ_LEAN") == nullptr);
-    general.add_option_change_callback("potato_two_sharpness", [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant,
+        3u, getenv("BLITZ_LEAN") == nullptr);
+    general.add_option_change_callback(blitz::potato_sharpness_id, [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant,
                                                                   recomp::config::OptionChangeContext) {
         if (getenv("BLITZ_LEAN") != nullptr) blitz_2x_scale = blitz::two_x_scale(blitz::sharpness_scale_for(std::get<uint32_t>(cur)));
     });
@@ -671,6 +767,47 @@ void blitz::init_config() {
             " Send that file along with the report.",
         false);
     recompui::config::set_option_action("general", "save_logs", "Save");
+    // Crash reports (crash_report.cpp; first run's updates screen asks): off unless ticked, sent silently at the
+    // start after a crash. Beside it, exactly what one holds.
+    general.add_bool_option(
+        "crash_reports",
+        "Send Crash Reports",
+        "If the app crashes, a small report goes to the team the next time you open it, in the background: the app's "
+        "version, your device's system, the crash and the log's last lines, with your folders' names taken out. No ROM, "
+        "no saves, no name. <b>What Crash Reports Send</b> shows one.",
+        false);
+    general.add_bool_option("crash_report_view", "What Crash Reports Send",
+                            "The last report sent from here, word for word, or what one would hold.", false);
+    recompui::config::set_option_action("general", "crash_report_view", "Show");
+    general.add_option_change_callback("crash_report_view", [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant,
+                                                               recomp::config::OptionChangeContext ctx) {
+        if (ctx != recomp::config::OptionChangeContext::Permanent || !std::get<bool>(cur)) return;
+        recompui::config::get_config("general").update_option_value("crash_report_view", false);
+        blitz::firstrun_settings_row(3);
+    });
+    // Reset Data and Restore a Backup (reset_data.cpp), near the bottom: both ask first, on their own screens.
+    general.add_bool_option(
+        "reset_data",
+        "Reset Data",
+        std::string("Clears New Blitz's settings, saves and setup and starts over from the first run. It asks first, can keep "
+                    "your ROM, and can back everything up before it does: ") +
+            (blitz::platform::desktop ? "a zip in Documents \xE2\x86\x92 New Blitz Backups." : "in New Blitz's folder, in backups.") ,
+        false);
+    recompui::config::set_option_action("general", "reset_data", "Reset");
+    general.add_bool_option("restore_backup", "Restore a Backup",
+                            "Puts back a backup Reset Data made: your settings, saves and setup as they were then. Your ROM stays.",
+                            false, !blitz::reset_backups_exist());
+    recompui::config::set_option_action("general", "restore_backup", "Restore");
+    for (const auto& [id, which] : {std::pair<const char*, int>{"reset_data", 8}, std::pair<const char*, int>{"restore_backup", 9}}) {
+        std::string option = id;
+        int w = which;
+        general.add_option_change_callback(id, [option, w](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant,
+                                                           recomp::config::OptionChangeContext ctx) {
+            if (ctx != recomp::config::OptionChangeContext::Permanent || !std::get<bool>(cur)) return;
+            recompui::config::get_config("general").update_option_value(option, false);
+            blitz::firstrun_settings_row(w);  // done on the UI tick (firstrun.cpp → reset_data.cpp)
+        });
+    }
     general.add_option_change_callback("save_logs", [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant,
                                                        recomp::config::OptionChangeContext ctx) {
         if (ctx != recomp::config::OptionChangeContext::Permanent || !std::get<bool>(cur)) return;
@@ -755,8 +892,13 @@ void blitz::init_config() {
         std::error_code ec;
         const std::filesystem::path sent = recompui::file::get_app_folder_path() / "builder_done";
         if (std::filesystem::is_regular_file(sent, ec)) {
-            recompui::config::get_general_config().update_option_value("welcomed", true);
-            if (recompui::config::get_general_config().save_config()) std::filesystem::remove(sent, ec);
+            recomp::config::Config& g = recompui::config::get_general_config();
+            g.update_option_value("welcomed", true);
+            g.update_option_value("setup_season_asked", true);
+            blitz::firstrun_builder_done_seen();
+            // Updates and reports are never answered on the computer for a device: a phone asks them once (firstrun.cpp).
+            if (blitz::platform::phone) g.update_option_value("setup_ask_updates", true);
+            if (g.save_config()) std::filesystem::remove(sent, ec);
         }
     }
     // Skip Launcher, from before Launcher at Start: a computer that skipped it keeps skipping it.

@@ -35,6 +35,53 @@ namespace blitz {
     std::filesystem::path rom_drop_folder() { return {}; }  // a computer has file dialogs
     void window_created(SDL_Window*) {}
 
+    // curl -s -X POST --data-binary @<file> <url>: the body in a temporary file (stdin carries nothing here), the
+    // status as curl's whole output (-o /dev/null -w).
+    bool http_post(const std::string& url, const std::string& content_type, const std::string& body, int& status) {
+        status = 0;
+        char tmpl[] = "/tmp/blitz-post-XXXXXX";
+        int fd = mkstemp(tmpl);
+        if (fd < 0) return false;
+        (void)!write(fd, body.data(), body.size());
+        close(fd);
+        std::string data = std::string("@") + tmpl;
+        std::vector<std::string> args{"curl", "-s", "--max-time", "30", "-o", "/dev/null", "-w", "%{http_code}", "-X", "POST",
+                                      "-H", "Content-Type: " + content_type, "-A", "BlitzRecomp", "--data-binary", data, url};
+        std::vector<char*> argv;
+        for (std::string& a : args) argv.push_back(a.data());
+        argv.push_back(nullptr);
+        int out[2];
+        if (pipe(out) != 0) {
+            unlink(tmpl);
+            return false;
+        }
+        posix_spawn_file_actions_t actions;
+        posix_spawn_file_actions_init(&actions);
+        posix_spawn_file_actions_adddup2(&actions, out[1], 1);
+        posix_spawn_file_actions_addclose(&actions, out[0]);
+        pid_t pid = 0;
+        int spawned = posix_spawnp(&pid, "curl", &actions, nullptr, argv.data(), environ);
+        posix_spawn_file_actions_destroy(&actions);
+        close(out[1]);
+        std::string got;
+        if (spawned == 0) {
+            char buf[64];
+            for (ssize_t n; (n = read(out[0], buf, sizeof(buf))) != 0;) {
+                if (n < 0) {
+                    if (errno == EINTR) continue;
+                    break;
+                }
+                got.append(buf, (size_t)n);
+            }
+            int wstatus = 0;
+            waitpid(pid, &wstatus, 0);
+        }
+        close(out[0]);
+        unlink(tmpl);
+        status = std::atoi(got.c_str());
+        return status >= 200 && status < 300;
+    }
+
     // curl -s -L -H @- <url>, with -w appending the HTTP status on a last line of its own.
     bool http_get(const std::string& url, const std::string& bearer, const std::string& accept, std::string& body, int& status) {
         body.clear();

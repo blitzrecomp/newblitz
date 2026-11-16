@@ -12,11 +12,13 @@
 // Team select waits while the panel is up (blitz2000.toml: ovl_b 0x802F89CC, its own wait for every player's pick);
 // the panel captures input, so the game sees none of it. The CPU's team isn't picked until after that wait, so
 // opponent_select.cpp picks it early (blitz_opp_preview) and puts it in after the game's CPU block. Headshots are
-// ESPN's 96x70 JPEGs (about 2 KB), fetched the first time a team's panel opens and kept in rosters/faces.
+// ESPN's 96x70 JPEGs (about 2 KB), kept in rosters/faces: fetched ahead (every team's offense in the background, the
+// team a cursor rests on at team select) or, at the latest, when a card shows.
 #if BLITZ_MODERN
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -56,6 +58,7 @@ namespace live = blitz::teamdata::live;
 #include "../../lib/rt64/src/contrib/stb/stb_image.h"  // declarations only; RT64 builds the decoder (and its PNG path skips JPEG)
 
 extern "C" void blitz_redo_request();  // savestate.cpp: in the menus, back a step
+extern "C" int blitz_play_mode(void);    // savestate.cpp: 0 menus, 1 play select, 2 a play
 
 namespace blitz {
     bool blitz_portrait(int skin, const std::string& franchise, std::vector<char>& rgba, uint32_t& w, uint32_t& h);  // portraits.cpp
@@ -387,77 +390,239 @@ namespace {
     // app's bundled copy, else downloaded in the background. A player with none (no ESPN id, offline) gets his Blitz
     // portrait (portraits.cpp: the game's own face in his shade) instead, so no card stays blank.
 
-    std::mutex faces_mutex;
-    std::condition_variable faces_cv;
-    std::deque<std::string> faces_wanted;
-    std::vector<std::string> faces_ready, faces_missing;
+    // Fetched by a few workers at once (2026-11-15, the team: one at a time, they popped in slowly), in three tiers: the
+    // open panel's (and the Pro Bowl VS card's) first, then the team a cursor rests on at team select, then the
+    // background preload of every team's offense while the player is in the menus (a few a second, paused while a
+    // play runs; not on a lean device). A prefetched face only goes to disk; a card that asks for one jumps the
+    // queue, or waits for the fetch already under way.
+    enum FaceTier { Shown, Hovered, Preload, TierCount };
+    constexpr int kFaceWorkers = 4;                               // requests at once: gentle on ESPN's CDN
+    constexpr auto kPreloadGap = std::chrono::milliseconds(250);  // the background preload: four a second at most
+    constexpr int InFlight = 10, Fetched = 11;                    // Faces::state past the tiers
+
+    // What the workers share. Made once and never freed: the workers are detached, and the app's exit mustn't take
+    // their queues and lock from under one still waiting or fetching.
+    struct Faces {
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::deque<std::string> wanted[TierCount];
+        std::map<std::string, int> state;  // queued (its tier), InFlight or Fetched
+        std::set<std::string> shown;       // asked for by a card: handed to the main thread when it's here
+        std::set<std::string> none;        // no photo (no ESPN id, a 404, offline, switched off): the portrait
+        std::vector<std::string> ready, missing;
+        int threads = 0;
+        Clock::time_point preload_next{};
+        // The log's batches (Hovered, Preload): how long, how many fetched, already here, without a photo.
+        struct Batch {
+            std::string what;
+            Clock::time_point from{};
+            int queued = 0, done = 0, fetched = 0, cached = 0, none = 0;
+        } batch[TierCount];
+        std::map<std::string, int> batch_of;  // a prefetched id's batch, until it's done
+    };
+    Faces& faces() {
+        static Faces* f = new Faces;
+        return *f;
+    }
+    std::atomic<bool> preload_go{true};  // false while a play runs (main thread, each tick)
+
     std::map<std::string, int> faces_queued;  // handed to the renderer, on which UI tick (main thread only)
     int ui_tick = 0;
-    std::set<std::string> faces_asked;
-    bool faces_thread_started = false;
 
     fs::path face_file(const std::string& id) { return blitz::rosters_dir() / "faces" / (id + ".jpg"); }
+    fs::path bundled_face(const std::string& id) { return recompui::file::get_program_path() / "rosters" / "faces" / (id + ".jpg"); }
     std::string face_src(const std::string& id) { return "?/crew/" + id; }
+    // The id names a file and goes in a URL: ESPN ids are digits, and a crew locked in from the network could send
+    // anything (../). Anything else (an nfl: id) has no ESPN photo.
+    bool espn_id(const std::string& id) {
+        return !id.empty() && std::all_of(id.begin(), id.end(), [](char c) { return std::isalnum((unsigned char)c); });
+    }
+    bool face_on_disk(const std::string& id) {
+        std::error_code ec;
+        return fs::exists(face_file(id), ec) || fs::exists(bundled_face(id), ec);
+    }
+    bool lean_device() { return getenv("BLITZ_LEAN") != nullptr; }
+
+    // With the lock held: a prefetched face is done; its batch's log line once the whole batch is.
+    void batch_done(Faces& F, const std::string& id, bool got) {
+        auto it = F.batch_of.find(id);
+        if (it == F.batch_of.end()) return;
+        Faces::Batch& b = F.batch[it->second];
+        F.batch_of.erase(it);
+        b.done++;
+        (got ? b.fetched : b.none)++;
+        if (b.done < b.queued) return;
+        double secs = std::chrono::duration<double>(Clock::now() - b.from).count();
+        fprintf(stderr, "[crew] %s: prefetched %d headshots in %.1f s (%d from cache, %d without a photo)\n", b.what.c_str(),
+                b.fetched + b.cached, secs, b.cached, b.none);
+        b = Faces::Batch{};
+    }
+
+    // With the lock held: whether a tier has a live id at the front (an entry moved up a tier, or taken, is dropped).
+    bool tier_has(Faces& F, int tier) {
+        auto& q = F.wanted[tier];
+        while (!q.empty()) {
+            auto it = F.state.find(q.front());
+            if (it != F.state.end() && it->second == tier) return true;
+            q.pop_front();
+        }
+        return false;
+    }
 
     void faces_worker() {
+        Faces& F = faces();
         for (;;) {
             std::string id;
             {
-                std::unique_lock lock{faces_mutex};
-                faces_cv.wait(lock, [] { return !faces_wanted.empty(); });
-                id = faces_wanted.front();
-                faces_wanted.pop_front();
+                std::unique_lock lock{F.mutex};
+                for (;;) {
+                    int tier = -1;
+                    for (int t = Shown; t < Preload && tier < 0; t++) if (tier_has(F, t)) tier = t;
+                    if (tier < 0 && tier_has(F, Preload)) {
+                        Clock::time_point now = Clock::now();
+                        if (!preload_go) {  // a play is running: on again after it
+                            F.cv.wait_for(lock, std::chrono::milliseconds(500));
+                            continue;
+                        }
+                        if (now < F.preload_next) {
+                            F.cv.wait_until(lock, F.preload_next);
+                            continue;
+                        }
+                        F.preload_next = now + kPreloadGap;
+                        tier = Preload;
+                    }
+                    if (tier < 0) {
+                        F.cv.wait(lock);
+                        continue;
+                    }
+                    id = F.wanted[tier].front();
+                    F.wanted[tier].pop_front();
+                    F.state[id] = InFlight;
+                    break;
+                }
             }
-            std::string body;
-            int status = 0;
-            std::string url = "https://a.espncdn.com/combiner/i?img=/i/headshots/nfl/players/full/" + id + ".png&w=96&h=70&format=jpg";
-            bool got = blitz::http_get(url, "", "", body, status) && body.size() > 100;
-            if (got) {
-                std::error_code ec;
-                fs::create_directories(face_file(id).parent_path(), ec);
-                std::ofstream out{face_file(id), std::ios::binary};
-                out << body;
+            // The season server's switch (season_pak.h headshots_allowed) can go off while the queue waits: nothing
+            // more is asked of ESPN then.
+            bool got = false;
+            if (face_on_disk(id)) got = true;  // saved while it waited (an older session, a bundled copy)
+            else if (blitz::headshots_allowed()) {
+                std::string body;
+                int status = 0;
+                std::string url = "https://a.espncdn.com/combiner/i?img=/i/headshots/nfl/players/full/" + id + ".png&w=96&h=70&format=jpg";
+                got = blitz::http_get(url, "", "", body, status) && body.size() > 100;
+                if (got) {
+                    // Written whole, then renamed: the panel may read it the moment it's there.
+                    std::error_code ec;
+                    fs::path file = face_file(id), part = file;
+                    part += ".part";
+                    fs::create_directories(file.parent_path(), ec);
+                    {
+                        std::ofstream out{part, std::ios::binary};
+                        out << body;
+                        got = (bool)out;
+                    }
+                    if (got) fs::rename(part, file, ec);
+                    if (!got || ec) {
+                        fs::remove(part, ec);
+                        got = false;
+                    }
+                }
+                else {
+                    fprintf(stderr, "[crew] no headshot for %s (HTTP %d): his Blitz portrait\n", id.c_str(), status);
+                }
             }
-            else {
-                fprintf(stderr, "[crew] no headshot for %s (HTTP %d): his Blitz portrait\n", id.c_str(), status);
-            }
-            std::lock_guard lock{faces_mutex};
-            (got ? faces_ready : faces_missing).push_back(id);
+            std::lock_guard lock{F.mutex};
+            F.state[id] = Fetched;
+            if (!got) F.none.insert(id);
+            if (F.shown.count(id)) (got ? F.ready : F.missing).push_back(id);
+            batch_done(F, id, got);
         }
     }
 
+    // With the lock held: the workers, the first time there's work (detached, as the single worker was).
+    void start_workers(Faces& F) {
+        while (F.threads < kFaceWorkers) {
+            F.threads++;
+            std::thread(faces_worker).detach();
+        }
+    }
+
+    // A card's face that isn't on disk: fetched ahead of any prefetch (or the fetch under way is waited for).
     void want_face(const std::string& id) {
-        // The id names a file and goes in a URL: ESPN ids are digits, and a crew locked in from the network could send
-        // anything (../). Anything else (an nfl: id) has no ESPN photo: straight to the portrait.
         // Photos only where they're allowed (season_pak.h headshots_allowed: a private build, or the 2026 Season pak
         // with headshots on that the server hasn't switched off); else every card gets the Blitz portrait and nothing
         // is asked of ESPN (2026-11-13).
-        bool espn = blitz::headshots_allowed() && !id.empty() &&
-                    std::all_of(id.begin(), id.end(), [](char c) { return std::isalnum((unsigned char)c); });
-        std::lock_guard lock{faces_mutex};
-        if (!faces_asked.insert(id).second) return;
-        if (!espn) {
-            faces_missing.push_back(id);
+        bool espn = blitz::headshots_allowed() && espn_id(id);
+        Faces& F = faces();
+        std::lock_guard lock{F.mutex};
+        if (!F.shown.insert(id).second) return;
+        auto it = F.state.find(id);
+        if (!espn && it == F.state.end()) {
+            it = F.state.emplace(id, Fetched).first;
+            F.none.insert(id);
+        }
+        if (it != F.state.end() && it->second == Fetched) {  // fetched already, or there's none: the result now
+            (F.none.count(id) ? F.missing : F.ready).push_back(id);
             return;
         }
-        if (!faces_thread_started) {
-            faces_thread_started = true;
-            std::thread(faces_worker).detach();
+        if (it != F.state.end() && it->second == InFlight) return;  // the worker hands it over
+        F.state[id] = Shown;
+        F.wanted[Shown].push_back(id);
+        start_workers(F);
+        F.cv.notify_all();
+    }
+
+    // Main thread: faces to have on disk before a card asks (a hovered team, the background preload), at `tier`.
+    // Ones already here count as from cache; the batch's line comes when its last fetch is done.
+    void prefetch(const std::vector<std::string>& ids, int tier, const std::string& what) {
+        std::vector<std::string> fetch;
+        int cached = 0;
+        std::set<std::string> seen;
+        for (const std::string& id : ids) {
+            if (!espn_id(id) || !seen.insert(id).second) continue;
+            if (face_on_disk(id)) cached++;
+            else fetch.push_back(id);
         }
-        faces_wanted.push_back(id);
-        faces_cv.notify_one();
+        Faces& F = faces();
+        std::lock_guard lock{F.mutex};
+        Faces::Batch& b = F.batch[tier];
+        if (b.queued == b.done) b = Faces::Batch{what, Clock::now()};
+        else if (b.what.find(what) == std::string::npos) b.what += ", " + what;
+        b.cached += cached;
+        bool added = false;
+        for (const std::string& id : fetch) {
+            auto it = F.state.find(id);
+            // Queued as soon or sooner, under way, or fetched this session (none to be had: no second try).
+            if (it != F.state.end() && (it->second <= tier || it->second >= InFlight)) continue;
+            F.state[id] = tier;
+            F.wanted[tier].push_back(id);
+            if (!F.batch_of.count(id)) {
+                F.batch_of[id] = tier;
+                b.queued++;
+            }
+            added = true;
+        }
+        if (b.queued == b.done) {  // nothing to fetch
+            fprintf(stderr, "[crew] %s: all %d headshots already here\n", b.what.c_str(), b.cached);
+            b = Faces::Batch{};
+            return;
+        }
+        if (added) {
+            start_workers(F);
+            F.cv.notify_all();
+        }
     }
 
     // Main thread: hands a saved headshot to the renderer; false if it isn't on disk yet. An image can be used
     // from the next tick (set as a source the same tick, it loads before the renderer has it, and stays blank).
     bool queue_face(const std::string& id) {
         if (faces_queued.count(id)) return true;
-        if (id.empty() || !std::all_of(id.begin(), id.end(), [](char c) { return std::isalnum((unsigned char)c); })) return false;
+        if (!espn_id(id)) return false;
         if (!blitz::headshots_allowed()) return false;  // switched off: not the saved photos either
         std::ifstream in{face_file(id), std::ios::binary};
         // Else the app's own copy (Resources/rosters/faces, tools/roster_headshots.py at build time): a console or an
         // offline phone has faces without downloading any.
-        if (!in) in = std::ifstream{recompui::file::get_program_path() / "rosters" / "faces" / (id + ".jpg"), std::ios::binary};
+        if (!in) in = std::ifstream{bundled_face(id), std::ios::binary};
         if (!in) return false;
         std::vector<char> bytes{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
         if (bytes.size() < 100) return false;
@@ -578,8 +743,61 @@ namespace {
         bool rebuild_page = false;
         std::set<int> rebuild_rows;
         std::string focus_after;  // a card id to focus after a rebuild
+        int focus_after_row = -1;  // and its row (a WR can be in WR and in FLEX)
         std::function<void()> start_action;
+        recompui::Element* scroll = nullptr;  // the rows' viewport: scrolls when they're taller than the screen allows
+        float layout_w = 0.0f;  // the screen width (design px) the page was laid out for
+        int fit = 7;            // cards per line on this page (its widest row, as far as the screen allows)
+        int fit_max = 7;        // cards per line the screen allows
+        float lines_w = 0.0f;   // the card lines' width (design px)
+        bool scroll_on = false; // the rows' viewport shows its scroll bar
+        bool scroll_refocus = false;
+        // How long a page's faces take to show (the log line): from the build to the last blank card filled.
+        Clock::time_point faces_from;
+        size_t faces_cards = 0, faces_blank = 0;
+        bool faces_timed = true;
     } pv;  // the panel
+
+    // The panel's width (design px, blitz::ui::px): cards 84 wide with 6 between, after a 96 label column and a 14 gap;
+    // 10 kept clear on the right for the rows' scroll bar, 18 padding each side, 28 between the panel and the screen's
+    // edges. Height is 1080 dp on every screen (recompui), so only the width changes with the window.
+    constexpr float kCardW = 84.0f, kCardGap = 6.0f, kLabelW = 96.0f, kLabelGap = 14.0f, kScrollRoom = 10.0f;
+    constexpr float kPad = 18.0f, kSideRoom = 28.0f, kPanelMin = 800.0f;
+    constexpr float row_chrome() { return 2 * kPad + kLabelW + kLabelGap + kScrollRoom; }
+    constexpr float line_width(int n) { return n * kCardW + (n - 1) * kCardGap; }
+
+    // The window's width in design px (0 before the first layout).
+    float screen_w() {
+        recompui::Element* root = pv.context.get_root_element();
+        float ratio = root ? root->get_dp_to_pixel_ratio() : 0.0f;
+        float w = root ? root->get_client_width() : 0.0f;
+        return ratio > 0.0f && w > 0.0f ? w / ratio / blitz::ui::k : 0.0f;
+    }
+
+    // Sizes the panel for a page whose widest row has `widest` cards: wide enough for that row on one line where the
+    // screen allows, never past the screen (narrower windows wrap rows over more lines). 0: a page without card rows.
+    void fit_panel(int widest) {
+        float sw = screen_w();
+        pv.layout_w = sw;
+        if (sw <= 0.0f) sw = 960.0f;  // not laid out yet: 4:3, the narrowest; the first update lays it out again
+        float avail = sw - 2 * kSideRoom;
+        pv.fit_max = std::max(1, (int)std::floor((avail - row_chrome() + kCardGap) / (kCardW + kCardGap)));
+        pv.fit = std::clamp(widest, 1, pv.fit_max);
+        float w = std::min(std::max(kPanelMin, widest > 0 ? row_chrome() + line_width(pv.fit) : 0.0f), avail);
+        pv.lines_w = w - row_chrome();
+        pv.card->set_width(blitz::ui::px(w));
+    }
+
+    // Remembers the focused card so a rebuild (a resize, a wider row) puts focus back on it.
+    void keep_focus() {
+        recompui::Element* f = pv.context.get_focused_element();
+        for (const auto& c : pv.cards) {
+            if (c.button == f) {
+                pv.focus_after = c.id;
+                pv.focus_after_row = c.row;
+            }
+        }
+    }
 
     void back();
     void finish();
@@ -684,7 +902,7 @@ namespace {
         t->set_color(p.status == "reserve" || p.status == "out" ? Color{255, 120, 110, 255} : Color{184, 196, 218, 255});
         std::string id = p.id;
         b->add_pressed_callback([side, row, id] { pick(side, row, id); });
-        b->set_focus_callback([b](bool focused) { if (focused) b->scroll_into_view(); });  // Pro Bowl strips scroll
+        b->set_focus_callback([b](bool focused) { if (focused) b->scroll_into_view(); });  // the rows and Pro Bowl strips scroll
         pv.cards.push_back({row, p.id, b, face});
         if (!face_usable(p.id)) pv.blank.insert(p.id);
         return b;
@@ -701,7 +919,7 @@ namespace {
             ScrollContainer* strip = pv.context.create_element<ScrollContainer>(holder, ScrollDirection::Horizontal);
             strip->set_flex(0.0f, 0.0f, blitz::ui::px(104), Unit::Dp);  // its own height (in a column the basis is height)
             strip->set_height(blitz::ui::px(104));
-            strip->set_width(blitz::ui::px(640));
+            strip->set_width(blitz::ui::px(pv.lines_w));
             Element* line = pv.context.create_element<Element>(strip);
             line->set_display(Display::Flex);
             line->set_flex_direction(FlexDirection::Row);
@@ -711,7 +929,10 @@ namespace {
             for (const auto& c : pv.cards) if (c.row == row) style_card(c, t);
             return;
         }
-        const size_t per_line = 7;
+        // As many as the panel holds on a line; a row that needs more lines shares them out evenly (9: 5 and 4).
+        const size_t fit = (size_t)std::max(1, pv.fit);
+        const size_t lines = std::max<size_t>(1, (pool.size() + fit - 1) / fit);
+        const size_t per_line = std::max<size_t>(1, (pool.size() + lines - 1) / lines);
         Element* line = nullptr;
         for (size_t i = 0; i < pool.size(); i++) {
             if (i % per_line == 0) {
@@ -773,20 +994,25 @@ namespace {
         pv.eyebrow->set_text(std::string(t.pro ? "PRO BOWL · " : "PICK YOUR CREW · ") + who + " · " + kinds[page.kind]);
         pv.title->set_text(t.pro ? load_meta(t.f).name : upper(team_name(t.f)));
         if (page.kind == TeamPage) {
+            fit_panel(0);
             build_team_page(page.side);
             return;
         }
 
         std::vector<int> page_rows = page.kind == Defense ? std::vector<int>{DLINE, BACK}
                                    : page.kind == Line ? std::vector<int>{LINE} : std::vector<int>{QB, RB, WR, FLEX};
+        int widest = 0;  // a Pro Bowl row is a scrolling strip, as wide as seven cards
+        for (int row : page_rows) widest = std::max(widest, t.pro ? 7 : (int)t.pool(row).size());
+        fit_panel(widest);
         for (int row : page_rows) {
             Element* r = pv.context.create_element<Element>(pv.body);
             r->set_display(Display::Flex);
             r->set_flex_direction(FlexDirection::Row);
             r->set_align_items(AlignItems::Center);
-            r->set_gap(blitz::ui::px(14));
+            r->set_gap(blitz::ui::px(kLabelGap));
             Element* label_box = pv.context.create_element<Element>(r);
-            label_box->set_width(blitz::ui::px(96));
+            label_box->set_width(blitz::ui::px(kLabelW));
+            label_box->set_flex_shrink(0);
             label_box->set_display(Display::Flex);
             label_box->set_flex_direction(FlexDirection::Column);
             Label* l = pv.context.create_element<Label>(label_box, rows[row].label, theme::Typography::LabelSM);
@@ -847,8 +1073,18 @@ namespace {
         if (next >= 0) bar_button("Next Team", [next] { flow.stack.push_back({next, flow.pro[next] ? TeamPage : Offense}); pv.rebuild_page = true; }, true);
         else bar_button("Go Play", [] { finish(); }, true);
 
-        // Focus: the first pick of the first row.
+        pv.faces_from = Clock::now();
+        pv.faces_cards = pv.cards.size();
+        pv.faces_blank = (size_t)std::count_if(pv.blank.begin(), pv.blank.end(), [](const std::string& id) { return !faces_queued.count(id); });
+        pv.faces_timed = pv.cards.empty();
+
+        // Focus: the card that had it before a rebuild (a resize), else the first pick of the first row.
         Element* focus = nullptr;
+        for (const auto& c : pv.cards) {
+            if (!focus && c.id == pv.focus_after && c.row == pv.focus_after_row) focus = c.button;
+        }
+        pv.focus_after.clear();
+        pv.focus_after_row = -1;
         for (const auto& c : pv.cards) {
             if (!focus && std::find(t.picks[c.row].begin(), t.picks[c.row].end(), c.id) != t.picks[c.row].end()) focus = c.button;
         }
@@ -973,26 +1209,44 @@ namespace {
         root->set_align_items(AlignItems::Center);
         root->set_justify_content(JustifyContent::Center);
         root->set_background_color(Color{4, 10, 26, 150});
+        // The panel stays between the screen's top and the Pick / Back hints (CrewHints, 64 dp at the bottom).
+        root->set_padding_top(blitz::ui::px(12));
+        root->set_padding_bottom(64.0f + blitz::ui::px(8));
         pv.card = pv.context.create_element<Element>(root);
         pv.card->set_position(Position::Relative);
-        pv.card->set_width(blitz::ui::px(800));
+        pv.card->set_width(blitz::ui::px(kPanelMin));  // fit_panel sizes it for each page
+        pv.card->set_max_height(100.0f, Unit::Percent);
+        pv.card->set_display(Display::Flex);
+        pv.card->set_flex_direction(FlexDirection::Column);
         blitz::ui::PanelOptions o;
         o.corners = true;
         Element* content = blitz::ui::panel(pv.context, pv.card, o);
         content->set_display(Display::Flex);
         content->set_flex_direction(FlexDirection::Column);
+        content->set_flex(0.0f, 1.0f);  // shrinks to the panel's height: the rows scroll, the bar stays
+        content->set_min_height(0.0f);
         content->set_gap(blitz::ui::px(10));
-        content->set_padding(blitz::ui::px(18));
+        content->set_padding(blitz::ui::px(kPad));
         content->set_as_navigation_container(NavigationType::Vertical);
         pv.eyebrow = pv.context.create_element<Label>(content, "", theme::Typography::LabelXS);
         pv.eyebrow->set_color(Color{143, 239, 245, 255});
+        pv.eyebrow->set_flex_shrink(0);
         pv.title = pv.context.create_element<Label>(content, "", theme::Typography::Header2);
         pv.title->set_color(theme::color::SecondaryL);
+        pv.title->set_flex_shrink(0);
         Element* rule = pv.context.create_element<Element>(content, 0, "div", false);
         rule->set_height(blitz::ui::px(4));
+        rule->set_flex_shrink(0);
         rule->set_position(Position::Relative);
         blitz::ui::stretch(pv.context, rule, "rule_flame");
-        pv.body = pv.context.create_element<Element>(content);
+        // The rows' viewport: as tall as they are, or what's left of the panel, scrolling (a focused card scrolls
+        // itself into view: add_card).
+        pv.scroll = pv.context.create_element<Element>(content);
+        pv.scroll->set_flex(0.0f, 1.0f);
+        pv.scroll->set_min_height(0.0f);
+        pv.scroll->set_overflow_x(Overflow::Hidden);
+        pv.scroll->set_overflow_y(Overflow::Hidden);  // Auto when the rows are taller than it (crew_update)
+        pv.body = pv.context.create_element<Element>(pv.scroll);
         pv.body->set_display(Display::Flex);
         pv.body->set_flex_direction(FlexDirection::Column);
         pv.body->set_gap(blitz::ui::px(10));
@@ -1004,6 +1258,7 @@ namespace {
         pv.bar->set_justify_content(JustifyContent::FlexEnd);
         pv.bar->set_gap(blitz::ui::px(8));
         pv.bar->set_margin_top(blitz::ui::px(6));
+        pv.bar->set_flex_shrink(0);
         pv.bar->set_as_navigation_container(NavigationType::Horizontal);
         pv.context.create_element<CrewHints>(root);
         pv.context.close();
@@ -1184,6 +1439,106 @@ namespace {
     }
 }
 
+namespace {
+    // --- Headshot prefetch ----------------------------------------------------------------------------------------
+
+    std::mutex hover_mutex;
+    std::vector<std::string> hover_teams;  // franchises a team select cursor rested on (game thread -> main thread)
+
+    // Main thread: the players a team's crew pages show as cards, the offense page's rows first; or only those.
+    std::vector<std::string> crew_card_ids(const std::string& f, bool offense_only) {
+        std::vector<std::string> ids;
+        TeamCrew t = make_team(f);
+        for (int r = 0; r < (offense_only ? (int)LINE : (int)RowCount); r++) {
+            for (const auto* p : t.pool(r)) ids.push_back(p->id);
+        }
+        return ids;
+    }
+
+    // Headshots are worth fetching ahead: Modern's 2026 Season, photos allowed (the season server's switch), and
+    // not a lean device (BLITZ_LEAN: on demand only, so a potato's memory and network go to the game).
+    bool prefetch_wanted() {
+        return !lean_device() && blitz::active_pack_id() == "blitz2026" && blitz::headshots_allowed();
+    }
+
+    // Every UI tick (crew_update): the hovered teams' cards, and the background preload of every team's offense,
+    // a team a tick, once the game has been up a few seconds in the menus (the rosters are in by then).
+    void faces_tick() {
+        preload_go = blitz_play_mode() != 2;
+        std::vector<std::string> hovered;
+        {
+            std::lock_guard lock{hover_mutex};
+            hovered.swap(hover_teams);
+        }
+        for (const std::string& f : hovered) {
+            if (enabled() && prefetch_wanted() && !blitz::roster_of(f).empty()) prefetch(crew_card_ids(f, false), Hovered, "team select (" + f + ")");
+        }
+
+        static int stage = 0;  // 0 waiting, 1 a team a tick, 2 done
+        static Clock::time_point started{}, looked{};
+        static std::vector<std::string> teams, ids;
+        static size_t next = 0;
+        if (stage == 2) return;
+        Clock::time_point now = Clock::now();
+        if (stage == 0) {
+            if (!ultramodern::is_game_started()) return;
+            if (started == Clock::time_point{}) started = now;
+            if (now - started < std::chrono::seconds(8) || now - looked < std::chrono::seconds(1)) return;
+            looked = now;
+            if (lean_device()) {
+                fprintf(stderr, "[crew] lean device: no headshot preload (fetched when a card shows)\n");
+                stage = 2;
+                return;
+            }
+            if (blitz_play_mode() != 0 || !prefetch_wanted()) return;  // looked at again in a second
+            for (const std::string& f : blitz::team_franchises()) {
+                if (!f.empty() && std::find(teams.begin(), teams.end(), f) == teams.end()) teams.push_back(f);
+            }
+            if (teams.empty() || blitz::roster_of(teams.front()).empty()) {  // no rosters yet
+                teams.clear();
+                return;
+            }
+            stage = 1;
+        }
+        if (next < teams.size()) {
+            auto team_ids = crew_card_ids(teams[next++], true);
+            ids.insert(ids.end(), team_ids.begin(), team_ids.end());
+        }
+        if (next >= teams.size()) {
+            fprintf(stderr, "[crew] background preload: the offense's headshots for %zu teams (%zu players)\n", teams.size(), ids.size());
+            prefetch(ids, Preload, "background preload");
+            ids.clear();
+            ids.shrink_to_fit();
+            stage = 2;
+        }
+    }
+}
+
+namespace blitz {
+    // Each frame of team select's loop (uniform_picker.cpp, game thread): a side's cursor (a game slot). A team it
+    // rests on for half a second has its crew cards' faces fetched, so Pick Your Crew opens with them.
+    void crew_hover(int side, int slot) {
+        static int last[2] = {-1, -1};
+        static Clock::time_point since[2];
+        static bool sent[2] = {false, false};
+        if (side < 0 || side > 1 || slot < 0) return;
+        Clock::time_point now = Clock::now();
+        if (slot != last[side]) {
+            last[side] = slot;
+            since[side] = now;
+            sent[side] = false;
+            return;
+        }
+        if (sent[side] || now - since[side] < std::chrono::milliseconds(500)) return;
+        sent[side] = true;
+        int t = team_of_slot(slot);
+        auto franchises = team_franchises();
+        if (t < 0 || (size_t)t >= franchises.size()) return;
+        std::lock_guard lock{hover_mutex};
+        hover_teams.push_back(franchises[(size_t)t]);
+    }
+}
+
 namespace blitz {
     // Roster Room (roster_room.cpp): every team's saved crew, and Lock In's replacement for the teams it sends
     // (a team with no slots left loses its crew). Pro Bowl crews (PRO_*) are left alone.
@@ -1306,6 +1661,7 @@ namespace blitz {
 
     // Every UI tick (main.cpp): opens the panel when team select asks, applies deferred rebuilds, shows portraits.
     void crew_update() {
+        faces_tick();
         static int asking = -1;  // the side whose keyboard is up
         if (int s = ask_side.exchange(-1); s >= 0) {
             asking = s;
@@ -1354,6 +1710,36 @@ namespace blitz {
             return;
         }
         if (wait_state != Open || pv.context == recompui::ContextId::null()) return;
+        if (!pv.rebuild_page && !flow.stack.empty()) {
+            const Page& page = flow.stack.back();
+            pv.context.open();
+            // The scroll bar only when the rows don't fit: fractions of a pixel over (dp to pixels) would draw one.
+            // Once it's on, the focused card scrolls into view (a resize can leave it below the fold).
+            if (pv.scroll_refocus) {
+                pv.scroll_refocus = false;
+                if (recompui::Element* f = pv.context.get_focused_element()) f->scroll_into_view();
+            }
+            bool overflowing = pv.body->get_client_height() > pv.scroll->get_client_height() + 1.0f;
+            if (overflowing != pv.scroll_on) {
+                pv.scroll_on = overflowing;
+                pv.scroll_refocus = overflowing;
+                pv.scroll->set_overflow_y(overflowing ? recompui::Overflow::Auto : recompui::Overflow::Hidden);
+            }
+            // A new window size lays the page out again (the panel's width and cards per line follow it); so does a
+            // rebuilt row (FLEX after a WR pick) that's grown wider than the panel when the screen has room for it.
+            float sw = screen_w();
+            bool relayout = sw > 0.0f && std::fabs(sw - pv.layout_w) > 1.0f;
+            if (!relayout && page.kind != TeamPage && flow.crews.count(page.side) && !flow.crews[page.side].pro) {
+                for (int row : pv.rebuild_rows) {
+                    if ((int)flow.crews[page.side].pool(row).size() > pv.fit && pv.fit < pv.fit_max) relayout = true;
+                }
+            }
+            if (relayout) {
+                keep_focus();
+                pv.rebuild_page = true;
+            }
+            pv.context.close();
+        }
         if (pv.rebuild_page || !pv.rebuild_rows.empty()) {
             pv.context.open();
             if (pv.rebuild_page) build_page();
@@ -1380,9 +1766,10 @@ namespace blitz {
         {
             std::vector<std::string> ready, missing;
             {
-                std::lock_guard lock{faces_mutex};
-                ready.swap(faces_ready);
-                missing.swap(faces_missing);
+                Faces& F = faces();
+                std::lock_guard lock{F.mutex};
+                ready.swap(F.ready);
+                missing.swap(F.missing);
             }
             for (const std::string& id : ready) queue_face(id);  // shown from the next tick
             for (const std::string& id : missing) queue_portrait(id);
@@ -1400,6 +1787,12 @@ namespace blitz {
                 pv.blank.erase(id);
             }
             pv.context.close();
+        }
+        if (!pv.faces_timed && pv.blank.empty()) {
+            pv.faces_timed = true;
+            long ms = (long)std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - pv.faces_from).count();
+            fprintf(stderr, "[crew] panel faces: %zu card(s), %zu not on hand when the page opened, all showing after %ld ms\n",
+                    pv.faces_cards, pv.faces_blank, ms);
         }
     }
 

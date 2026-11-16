@@ -77,5 +77,71 @@
     "file": "receiver_buttons.jpg",
     "caption": "Receiver Buttons: \u25b3, R1 and \u25cb over the three receivers before the snap",
     "what": "Pre-snap, with a button icon floating over each of the three receivers"
+  },
+  {
+    "slot": "tournament-bracket",
+    "file": "tournament-bracket.png",
+    "caption": "A four-player tournament bracket",
+    "what": "The tournament bracket with four entrants and the advancing result"
+  },
+  {
+    "slot": "redo-play",
+    "file": "redo-play.png",
+    "caption": "Redo Play: back to play select",
+    "what": "Play select with the Redo confirmation at second and eleven"
+  },
+  {
+    "slot": "instant-replay",
+    "file": "instant-replay.png",
+    "caption": "Instant Replay: review the last play",
+    "what": "The replay view with the timeline scrubber, playback and half-speed controls"
+  },
+  {
+    "slot": "season-2026",
+    "file": "season-2026.png",
+    "caption": "The 2026 Season: today\u2019s teams at team select",
+    "what": "Choose Opponent with the current team wheel"
+  },
+  {
+    "slot": "pick-your-crew",
+    "file": "pick-your-crew.png",
+    "caption": "Pick Your Crew: choose your starters",
+    "what": "The starter selection panel with quarterback, running back, receiver and flex slots"
+  },
+  {
+    "slot": "blitz-ds",
+    "file": "blitz-ds.png",
+    "caption": "BLITZ DS: top and bottom screens shown side by side",
+    "what": "A real RG DS capture with the top screen on the left and bottom screen on the right"
+  },
+  {
+    "slot": "export-rom",
+    "file": "export-rom.png",
+    "caption": "Export ROM: choose your cartridge build",
+    "what": "The Export ROM panel with Lite Arcade, Lite Season, Full and Custom options"
+  },
+  {
+    "slot": "export-rom-kinds",
+    "file": "export-rom-kinds.png",
+    "caption": "Export ROM: four cartridge options",
+    "what": "The four cartridge build options and their configuration controls"
+  },
+  {
+    "slot": "builder-where",
+    "file": "builder-where.png",
+    "caption": "Blitz Builder: where do you want to play?",
+    "what": "The Builder destination menu for this computer, phone or handheld, PS5, and N64 or emulator"
+  },
+  {
+    "slot": "android-handheld",
+    "file": "android-handheld.jpg",
+    "caption": "New Blitz running on an RG DS",
+    "what": "A photograph of an RG DS handheld running New Blitz across both screens"
+  },
+  {
+    "slot": "touch-controls",
+    "file": "touch-controls.png",
+    "caption": "Touch controls in the phone app: choose a play",
+    "what": "Native phone app at defensive play selection, with the touch stick and Page, Pick and Flip buttons visible"
   }
 ]

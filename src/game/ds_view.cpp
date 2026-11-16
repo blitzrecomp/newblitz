@@ -76,6 +76,7 @@ extern "C" {
 extern "C" void blitz_rt64_render_to_ram(int mode);  // rt64_raster_shader_cache.cpp
 extern "C" volatile int blitz_field_up;  // tall_view.cpp
 namespace blitz { int potato_frame_copy(); void host_hide_splash(); void host_first_frame(); uint64_t first_presents(); }  // config.cpp, platform_android.cpp, fps_counter.cpp
+namespace blitz::firstrun_ui { bool shown(); }  // firstrun_screen.cpp
 #ifdef __ANDROID__
 namespace blitz { double potato_scale(); bool potato_narrow_waits(); }  // config.cpp
 #endif
@@ -1033,28 +1034,53 @@ namespace blitz {
         }
 #endif
 
+        // Taps the event watch saw, handled on the main thread (ds_update). An SDL event watch runs with SDL's own locks held
+        // (its watcher lock; the joystick lock too, for a pad's event from Android's UI thread), so it must never wait on the
+        // UI lock: the draw holds that while it asks SDL about controllers (touch_only's SDL_NumJoysticks, a pad's profile).
+        // On an RG DS with two screens, a pad press in Settings froze the game that way (2026-11-15): the present thread in
+        // the draw waited for the joystick lock, Android's UI thread (a pad release) held it and waited for the watcher lock,
+        // and SDL's thread held that here, waiting for the UI lock.
+        struct PendingTap { int screen; float x, y; bool mouse; };
+        std::mutex pending_taps_mutex;  // held only to push or swap
+        std::vector<PendingTap> pending_taps;
+
         int tap_watch(void*, SDL_Event* e) {
 #if !defined(__APPLE__)
             touch_raw(e);
-#endif
-            if (!have_second.load() || !ultramodern::is_game_started() || recompui::is_context_capturing_input()) {
-#if !defined(__APPLE__)
-                if (e->type == SDL_FINGERDOWN) tap_mark(0, e->tfinger.x, e->tfinger.y);  // one screen, or a menu's: still felt
-#endif
-                return 1;
+            if (e->type == SDL_FINGERDOWN) {
+                std::lock_guard lock{pending_taps_mutex};
+                pending_taps.push_back({0, e->tfinger.x, e->tfinger.y, false});
             }
-#if defined(__APPLE__)
+#else
             if (e->type == SDL_MOUSEBUTTONDOWN && e->button.button == SDL_BUTTON_LEFT && e->button.which != SDL_TOUCH_MOUSEID) {
                 SDL_Window* win = SDL_GetWindowFromID(e->button.windowID);
                 if (win == nullptr) return 1;
                 int w = 0, h = 0;
                 SDL_GetWindowSize(win, &w, &h);
-                if (w > 0 && h > 0) ds_tap(e->button.windowID == second_window ? 1 : 0, (float)e->button.x / w, (float)e->button.y / h);
+                if (w > 0 && h > 0) {
+                    std::lock_guard lock{pending_taps_mutex};
+                    pending_taps.push_back({e->button.windowID == second_window ? 1 : 0, (float)e->button.x / w, (float)e->button.y / h, true});
+                }
             }
-#else
-            if (e->type == SDL_FINGERDOWN) ds_tap(0, e->tfinger.x, e->tfinger.y);
 #endif
             return 1;
+        }
+
+        // Main thread (ds_update): what tap_watch used to do on the spot.
+        void handle_pending_taps() {
+            std::vector<PendingTap> taps;
+            {
+                std::lock_guard lock{pending_taps_mutex};
+                if (pending_taps.empty()) return;
+                taps.swap(pending_taps);
+            }
+            for (const PendingTap& t : taps) {
+                if (!have_second.load() || !ultramodern::is_game_started() || recompui::is_context_capturing_input()) {
+                    if (!t.mouse) tap_mark(0, t.x, t.y);  // one screen, or a menu's: still felt
+                    continue;
+                }
+                ds_tap(t.screen, t.x, t.y);
+            }
         }
     }
 
@@ -1306,14 +1332,16 @@ namespace blitz {
     // Every UI tick (main.cpp).
     void ds_update(SDL_Window* window) {
         if (window == nullptr) return;
+        handle_pending_taps();
 #ifdef __ANDROID__
         static int splash_ticks = 0;
         if (splash_ticks < 45 && ++splash_ticks == 45) host_hide_splash();
         // The UI ticks whatever the renderer's doing. Frames over a whole 5 s window mean the game's running: a crash on the first
         // draw would have ended the process by now. Presents mean they're reaching the screen: a surface RT64 can't present to lets
-        // the game swap at full rate behind a black one, and 30 is more than a stuck GPU's queues can pass off.
+        // the game swap at full rate behind a black one, and 30 is more than a stuck GPU's queues can pass off. Setup's screens
+        // before the game (Potato Mode's first run too) count: they're the renderer's frames reaching the screen.
         static bool drew = false;
-        if (!drew && fps_last_second() >= 1.0f && first_presents() >= 30) {
+        if (!drew && (fps_last_second() >= 1.0f || firstrun_ui::shown()) && first_presents() >= 30) {
             drew = true;
             host_first_frame();
         }

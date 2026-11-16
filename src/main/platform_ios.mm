@@ -5,7 +5,65 @@
 #include "blitz_host.h"
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#include <mutex>
 #include <string>
+#include <unistd.h>
+#include <vector>
+
+// A file opened into the app from another (Files' Share → New Blitz, Open In; Info.plist CFBundleDocumentTypes). With
+// the scene lifecycle, iOS hands it to the scene delegate, never to SDL's app delegate (whose openURL would have made
+// an SDL_DROPFILE): at a cold start in the connection options, later in openURLContexts. The file is copied into tmp
+// now, while the security-scoped URL is good, and the UI tick takes it (blitz::ios_take_opened_files, firstrun.cpp).
+static std::mutex opened_mutex;
+static std::vector<std::filesystem::path> opened_files;
+
+static void blitz_take_opened_url(NSURL* url) {
+    @autoreleasepool {
+        if (url == nil || ![url isFileURL]) {
+            NSLog(@"[rom] opened from another app: not a file (%@)", url);
+            return;
+        }
+        NSString* name = [url lastPathComponent] ?: @"file";
+        fprintf(stderr, "[rom] opened from another app: %s\n", [name UTF8String]);
+        // In place (LSSupportsOpeningDocumentsInPlace): a security-scoped URL to the file where it is, maybe in iCloud
+        // and not downloaded yet; the coordinated read waits for it. A copy sent by an app that doesn't share in place
+        // lands in Documents/Inbox, which is ours.
+        BOOL scoped = [url startAccessingSecurityScopedResource];
+        NSString* folder = [NSTemporaryDirectory() stringByAppendingPathComponent:@"opened"];
+        [[NSFileManager defaultManager] createDirectoryAtPath:folder withIntermediateDirectories:YES attributes:nil error:nil];
+        NSURL* dest = [NSURL fileURLWithPath:[folder stringByAppendingPathComponent:name]];
+        __block BOOL copied = NO;
+        __block NSError* copy_error = nil;
+        NSError* coord_error = nil;
+        NSFileCoordinator* coordinator = [[[NSFileCoordinator alloc] initWithFilePresenter:nil] autorelease];
+        [coordinator coordinateReadingItemAtURL:url options:NSFileCoordinatorReadingWithoutChanges error:&coord_error
+                                     byAccessor:^(NSURL* readable) {
+            [[NSFileManager defaultManager] removeItemAtURL:dest error:nil];
+            NSError* e = nil;
+            copied = [[NSFileManager defaultManager] copyItemAtURL:readable toURL:dest error:&e];
+            if (!copied) copy_error = [e retain];
+        }];
+        if (scoped) [url stopAccessingSecurityScopedResource];
+        // The Inbox copy isn't needed once it's in tmp (16 MB each).
+        NSString* inbox = [[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject]
+                           stringByAppendingPathComponent:@"Inbox"].stringByResolvingSymlinksInPath;
+        if (copied && inbox != nil && [[[url URLByResolvingSymlinksInPath] path] hasPrefix:[inbox stringByAppendingString:@"/"]]) {
+            [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+        }
+        // iOS makes Documents/Inbox when a file is opened into the app; an empty one would show in Files beside the
+        // player's ROMs (rmdir leaves it if anything is in it).
+        if (inbox != nil) rmdir([inbox fileSystemRepresentation]);
+        if (!copied) {
+            NSError* e = copy_error ?: coord_error;
+            fprintf(stderr, "[rom] opened from another app: couldn't copy %s (scoped=%d): %s\n", [name UTF8String], (int)scoped,
+                    e ? [[e localizedDescription] UTF8String] : "unknown");
+            [copy_error release];
+            return;
+        }
+        std::lock_guard lock{opened_mutex};
+        opened_files.emplace_back([[dest path] UTF8String]);
+    }
+}
 
 @interface BlitzSceneDelegate : UIResponder <UIWindowSceneDelegate>
 @property(nonatomic, retain) UIWindow* window;
@@ -13,7 +71,25 @@
 
 @implementation BlitzSceneDelegate
 @synthesize window;
+
+- (void)scene:(UIScene*)scene willConnectToSession:(UISceneSession*)session options:(UISceneConnectionOptions*)connectionOptions {
+    for (UIOpenURLContext* context in connectionOptions.URLContexts) blitz_take_opened_url(context.URL);
+}
+
+- (void)scene:(UIScene*)scene openURLContexts:(NSSet<UIOpenURLContext*>*)URLContexts {
+    for (UIOpenURLContext* context in URLContexts) blitz_take_opened_url(context.URL);
+}
 @end
+
+namespace blitz {
+    // Files opened into the app since the last call (firstrun.cpp's UI tick imports them as Load ROM would).
+    std::vector<std::filesystem::path> ios_take_opened_files() {
+        std::lock_guard lock{opened_mutex};
+        std::vector<std::filesystem::path> files;
+        files.swap(opened_files);
+        return files;
+    }
+}
 
 namespace blitz {
     // macOS's press-and-hold accent picker; iOS has none.
@@ -24,6 +100,9 @@ namespace blitz {
 
     // The macOS app menu; iOS has none.
     void install_app_menu(const std::string&) {}
+
+    // The launcher's "RECOMPILED FOR IPAD" (launcher.cpp).
+    bool is_ipad() { return [UIDevice currentDevice].userInterfaceIdiom == UIUserInterfaceIdiomPad; }
 }
 
 // HTTP: the same NSURLSession request as the Mac (macos_support.mm).
@@ -61,6 +140,36 @@ namespace blitz {
             if (code != 200) return false;
             body = std::move(got);
             return true;
+        }
+    }
+}
+
+namespace blitz {
+    // A blocking HTTP POST (call it off the main thread): true on a 2xx answer. Crash reports (crash_report.cpp).
+    bool http_post(const std::string& url, const std::string& content_type, const std::string& body, int& status) {
+        @autoreleasepool {
+            status = 0;
+            NSURL* u = [NSURL URLWithString:[NSString stringWithUTF8String:url.c_str()]];
+            if (u == nil) return false;
+            NSMutableURLRequest* req = [NSMutableURLRequest requestWithURL:u cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                           timeoutInterval:20];
+            [req setHTTPMethod:@"POST"];
+            // BRANDING: HTTP User-Agent
+            [req setValue:@"BlitzRecomp" forHTTPHeaderField:@"User-Agent"];
+            [req setValue:[NSString stringWithUTF8String:content_type.c_str()] forHTTPHeaderField:@"Content-Type"];
+            [req setHTTPBody:[NSData dataWithBytes:body.data() length:body.size()]];
+            dispatch_semaphore_t done = dispatch_semaphore_create(0);
+            __block NSInteger code = 0;
+            NSURLSessionDataTask* task = [[NSURLSession sharedSession] dataTaskWithRequest:req
+                completionHandler:^(NSData*, NSURLResponse* r, NSError* e) {
+                    if (e == nil && [r isKindOfClass:[NSHTTPURLResponse class]]) code = [(NSHTTPURLResponse*)r statusCode];
+                    dispatch_semaphore_signal(done);
+                }];
+            [task resume];
+            dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+            dispatch_release(done);
+            status = (int)code;
+            return code >= 200 && code < 300;
         }
     }
 }

@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -68,6 +69,9 @@ namespace {
     std::atomic<bool> running{false};
     std::atomic<int> listen_fd{-1};
     std::atomic<int> http_port{0};
+    // This run's id, made at start-up and put in the QR address (?g=...). A page keeps it and sends it back on every
+    // connect, so a tab left open from another New Blitz (same port on another machine) is told so, not attached.
+    std::string session_id;
 
     // ---- SHA-1 and base64, for the WebSocket handshake ----
     std::string sha1(const std::string& s) {
@@ -171,6 +175,7 @@ namespace {
         fprintf(stderr, "[phones] a phone connected\n");
         int sent_player = -1, sent_rumble = -1, sent_mode = -1;
         send_text(fd, "v " + std::to_string(phone_page_version));  // an older page reloads itself
+        send_text(fd, "g " + session_id);  // a page opened without ?g= keeps this for its reconnects
         std::string status_text;
         unsigned sent_status = blitz::latest_status(status_text);
         blitz::net::set_recv_timeout(fd, 100);  // wake every 100 ms to report the player and rumble
@@ -271,10 +276,25 @@ namespace {
                 blitz::net::close_socket(fd);
                 return;
             }
-            std::string token;
-            size_t q = req.find("?id=");
-            if (q != std::string::npos && q < req.find(' ', 4)) {
-                for (size_t i = q + 4; i < req.size() && std::isalnum((unsigned char)req[i]) && token.size() < 40; i++) token += req[i];
+            // "?id=<token>&g=<game>": the request line's query, letters and digits only.
+            std::string line = req.substr(0, std::min(req.find("\r\n"), req.size()));
+            auto param = [&](const char* name) {
+                std::string out, key = std::string(name) + "=";
+                size_t q = line.find(std::string("?") + key);
+                if (q == std::string::npos) q = line.find(std::string("&") + key);
+                if (q == std::string::npos) return out;
+                for (size_t i = q + 1 + key.size(); i < line.size() && std::isalnum((unsigned char)line[i]) && out.size() < 40; i++) out += line[i];
+                return out;
+            };
+            std::string token = param("id"), game = param("g");
+            if (!game.empty() && game != session_id) {
+                // A page from another New Blitz: finish the handshake so it can be told, and take no slot.
+                std::string accept = base64(sha1(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"));
+                send_all(fd, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + accept + "\r\n\r\n");
+                send_text(fd, "x other");
+                send_all(fd, std::string("\x88\x00", 2));
+                blitz::net::close_socket(fd);
+                return;
             }
             static std::mutex choose_mutex;
             std::lock_guard choose{choose_mutex};
@@ -363,11 +383,11 @@ namespace {
 }
 
 namespace blitz {
-    // The address phones open, e.g. "http://192.168.1.20:8770", or "" when off or offline.
+    // The address phones open, e.g. "http://192.168.1.20:8770/?g=0123abcd", or "" when off or offline.
     std::string phone_pads_url() {
         if (!running) return {};
         std::string ip = blitz::net::local_address();
-        return ip.empty() ? std::string() : "http://" + ip + ":" + std::to_string(http_port.load());
+        return ip.empty() ? std::string() : "http://" + ip + ":" + std::to_string(http_port.load()) + "/?g=" + session_id;
     }
 
     int phone_count() {
@@ -398,6 +418,12 @@ namespace blitz {
             }
             listen_fd = fd;
             http_port = port;
+            {
+                std::random_device rd;
+                char id[17];
+                snprintf(id, sizeof(id), "%08x%08x", (unsigned)rd(), (unsigned)rd());
+                session_id = id;
+            }
             running = true;
             std::thread(server_main).detach();  // a joinable std::thread left at exit would abort the app
             fprintf(stderr, "[phones] phone controllers at %s\n", phone_pads_url().c_str());

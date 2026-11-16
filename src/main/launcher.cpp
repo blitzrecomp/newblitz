@@ -1,6 +1,8 @@
 // The launcher screen: the Blitz logo instead of a text title, and the options that matter here
 // (no Mods: Blitz has none). The 2026 app also opens its content-pack and art drop-in folders,
 // which otherwise live out of sight in Application Support.
+#include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
@@ -17,14 +19,23 @@
 #include "logo_bytes.h"
 #include "ui_kit.h"
 #include "os_shell.h"
+#include "install_expiry.h"
 #include <array>
 #include <atomic>
+
+namespace blitz {
+#ifdef BLITZ_IOS
+    bool is_ipad();  // platform_ios.mm
+#else
+    inline bool is_ipad() { return false; }
+#endif
+}
 
 namespace {
     // The launcher's "RECOMPILED FOR ..." line: this platform's name (include/blitz_platform.h), as people say it.
     const char* platform_caps() {
         std::string_view n = blitz::platform::name;
-        return n == "macOS" ? "MAC" : n == "Windows" ? "WINDOWS" : n == "Linux" ? "LINUX" : n == "iOS" ? "IPHONE"
+        return n == "macOS" ? "MAC" : n == "Windows" ? "WINDOWS" : n == "Linux" ? "LINUX" : n == "iOS" ? (blitz::is_ipad() ? "IPAD" : "IPHONE")
              : n == "Android" ? "ANDROID" : "PLAYSTATION 5";
     }
 
@@ -42,14 +53,15 @@ namespace blitz {
 
 namespace blitz {
     std::string stored_rom_display_name();  // known_roms.cpp
-    bool hints_launcher_tip();              // hints.cpp
-    void export_rom_dialog();               // export_rom.cpp
     bool other_engine_available();          // experience.cpp
     bool other_engine_has_rom();
     bool engines_share_rom();
     const char* other_engine_title();
     void experience_switch();
-    void builder_open();  // builder.cpp: Blitz Builder, the setup questions again
+    void builder_open();  // firstrun.cpp: Blitz Builder, the setup questions again
+    bool firstrun_unfinished();          // firstrun.cpp: setup isn't done (welcomed is false)
+    std::string firstrun_rom_line();     // firstrun.cpp: "Using your saved ROM · ..."
+    void firstrun_finish_setup_row();
     extern std::atomic<int> stored_rom_changes;
 }
 
@@ -57,16 +69,22 @@ namespace {
     using namespace recompui;
 
     // One line under the title: which ROM to load until one is (with no CHANGE ROM: nothing to change yet), then
-    // for a new player (hints on, no game started yet) where to begin. Follows Load ROM straight away
-    // (stored_rom_changes) and is re-checked now and then.
+    // which one is in use (docs/design/FIRST_RUN_V2.md §3, "the player always knows which ROM is in use"): "Using
+    // your saved ROM · NFL Blitz 2000 (USA v1.1) · Change ROM", or for one stored before this install's setup began,
+    // "Using a ROM saved earlier (3 Nov 2026) · Change ROM". Follows Load ROM straight away (stored_rom_changes) and
+    // is re-checked now and then. (The "New here? Play to start" tip it showed went with the launcher at every start:
+    // first run does that job now.)
     class RomNeededNote : public Element {
         Label* label = nullptr;
-        std::vector<Element*> needs_rom;  // shown only once a ROM is loaded (Change ROM, Export ROM)
+        std::vector<Element*> needs_rom;  // shown only once a ROM is loaded (Change ROM, Blitz Builder)
         Element* switch_item = nullptr;   // shown once the other game has a ROM
+        Element* finish_item = nullptr;   // Finish setup: shown while setup isn't done
         int shown_switch = -1;
+        int shown_finish = -1;
         int shown_changes = -1;
         int ticks = 0;
-        int state = -1;  // 0 no ROM, 1 a ROM and a new player, 2 a ROM
+        int state = -1;  // 0 no ROM, 1 a ROM
+        std::string shown_line;
     protected:
         std::string_view get_type_name() override { return "BlitzRomNeeded"; }
         void process_event(const Event& e) override {
@@ -77,12 +95,19 @@ namespace {
                 ticks = 0;
                 std::u8string id = blitz::game_id;
                 bool ready = recomp::is_rom_valid(id);
-                int now = !ready ? 0 : blitz::hints_launcher_tip() ? 1 : 2;
-                if (now != state) {
+                int now = ready ? 1 : 0;
+                std::string line = ready ? blitz::firstrun_rom_line()
+                                         : blitz::engines_share_rom() ? shared_text : blitz::other_engine_available() ? both_text : need_text;
+                if (now != state || line != shown_line) {
                     state = now;
-                    set_display(now == 2 ? Display::None : Display::Flex);
-                    label->set_text(now == 0 ? (blitz::engines_share_rom() ? shared_text : blitz::other_engine_available() ? both_text : need_text) : new_text);
+                    shown_line = line;
+                    label->set_text(line);
                     for (Element* e : needs_rom) e->set_display(ready ? Display::Flex : Display::None);  // menu items are flex
+                }
+                int fin = blitz::firstrun_unfinished() ? 1 : 0;
+                if (finish_item != nullptr && fin != shown_finish) {
+                    shown_finish = fin;
+                    finish_item->set_display(fin ? Display::Flex : Display::None);
                 }
                 int sw = switch_item != nullptr && blitz::other_engine_has_rom() ? 1 : 0;
                 if (switch_item != nullptr && sw != shown_switch) {
@@ -101,14 +126,11 @@ namespace {
         static constexpr const char* both_text = "Load your NFL Blitz 2000 ROM: the USA v1.1 plays Classic Blitz, a Team Extension ROM plays Modern";
         // BRANDING: app name in the Load ROM prompt
         static constexpr const char* shared_text = "Load your NFL Blitz 2000 ROM: the USA cartridge, v1.1. It plays New Blitz and the original";
-        static constexpr const char* new_text = blitz::platform::phone
-            ? "New here? Play to start. In the game, the menu button (top left) or your controller's menu button opens Settings"
-            : blitz::platform::desktop
-            ? "New here? Play to start. In the game, Esc or your controller's menu button opens Settings"
-            : "New here? Play to start. In the game, press the touchpad to open Settings";  // the PS5 (frontend patch 0015)
+
     public:
-        RomNeededNote(ResourceId rid, Element* parent, std::vector<Element*> rom_items, Element* switch_to)
-            : Element(rid, parent, Events(EventType::Update), "div", false), needs_rom(std::move(rom_items)), switch_item(switch_to) {
+        RomNeededNote(ResourceId rid, Element* parent, std::vector<Element*> rom_items, Element* switch_to, Element* finish)
+            : Element(rid, parent, Events(EventType::Update), "div", false), needs_rom(std::move(rom_items)), switch_item(switch_to),
+              finish_item(finish) {
             set_position(Position::Absolute);
             set_top(blitz::ui::px(244));
             set_left(blitz::ui::px(0));
@@ -119,6 +141,63 @@ namespace {
             label->set_font_size(blitz::ui::px(17));
             label->set_font_weight(600);
             label->set_color(Color{143, 239, 245, 255});
+            queue_update();
+        }
+    };
+
+    // Under the ROM line, a sideloaded iPhone or iPad whose signature runs out in 3 days or fewer (install_expiry.cpp):
+    // "This install expires in 2 days (your saves stay). Keep your computer on for Sideloadly's refresh, or re-sign it:
+    // newblitz.com/start", in the warning colour. One line on a phone; it wraps on a narrower screen (an iPad, a Mac
+    // window), and the menu moves down by as much as it takes. Nothing for a paid account's year, or anywhere else.
+    // Re-checked now and then: a launcher left up overnight counts down.
+    class InstallExpiryNote : public Element {
+        Label* label = nullptr;
+        Element* menu_items = nullptr;  // the launcher's items: moved down while the line shows
+        std::string shown = "-";
+        float shown_top = -1.0f;
+        int ticks = 0;
+    protected:
+        std::string_view get_type_name() override { return "BlitzInstallExpiry"; }
+        void process_event(const Event& e) override {
+            if (e.type != EventType::Update) return;
+            if (ticks-- <= 0) {
+                ticks = 600;
+                std::string line = blitz::install_expiry_line();
+                if (line != shown) {
+                    shown = line;
+                    label->set_text(line);
+                    set_display(line.empty() ? Display::None : Display::Flex);
+                }
+            }
+            // The menu's top: under the line as laid out (its height in design px), never above where it was.
+            float top = menu_top;
+            if (!shown.empty()) {
+                float ratio = label->get_dp_to_pixel_ratio();
+                float h = ratio > 0.0f ? label->get_client_height() / ratio / blitz::ui::k : 0.0f;
+                top = std::max(menu_top, line_top + h + 6.0f);
+            }
+            if (std::abs(top - shown_top) > 0.5f) {
+                shown_top = top;
+                menu_items->set_top(blitz::ui::px(top));
+            }
+            queue_update();
+        }
+    public:
+        static constexpr float menu_top = 286.0f;  // style_launcher's set_top_anchor
+        static constexpr float line_top = 266.0f;
+        InstallExpiryNote(ResourceId rid, Element* parent, Element* items)
+            : Element(rid, parent, Events(EventType::Update), "div", false), menu_items(items) {
+            set_position(Position::Absolute);
+            set_top(blitz::ui::px(line_top));
+            set_left(blitz::ui::px(24));
+            set_right(blitz::ui::px(24));
+            set_display(Display::None);
+            set_justify_content(JustifyContent::Center);
+            label = get_current_context().create_element<Label>(this, "", theme::Typography::Body);
+            label->set_font_size(blitz::ui::px(16));
+            label->set_font_weight(600);
+            label->set_text_align(TextAlign::Center);
+            label->set_color(theme::color::Warning);
             queue_update();
         }
     };
@@ -159,7 +238,9 @@ namespace {
         std::array<Element*, 4> numbers{};
         std::array<std::string, 4> shown{"-", "-", "-", "-"};
         Label* select_glyph = nullptr;
+        Label* select_label = nullptr;
         std::string shown_glyph;
+        int shown_touch = -1;
         static constexpr Color player[4] = {{58, 123, 255, 255}, {255, 77, 77, 255}, {47, 211, 107, 255}, {255, 210, 63, 255}};
 
         static std::string short_name(const std::string& d) {
@@ -177,6 +258,13 @@ namespace {
             if (glyph != shown_glyph) {
                 shown_glyph = glyph;
                 select_glyph->set_text(glyph);
+            }
+            // Touch alone (a phone with no controller): the items themselves are tapped, so no button to name.
+            int touch = blitz::ui::touch_only() ? 1 : 0;
+            if (touch != shown_touch) {
+                shown_touch = touch;
+                select_glyph->set_display(touch ? Display::None : Display::Block);
+                select_label->set_display(touch ? Display::None : Display::Block);
             }
             auto now = blitz::port_descriptions();
             for (int i = 0; i < 4; i++) {
@@ -246,6 +334,7 @@ namespace {
             select_glyph->set_color(theme::color::Text);
             Label* select = context.create_element<Label>(this, "SELECT", theme::Typography::LabelSM);
             select->set_color(theme::color::Text);
+            select_label = select;
             queue_update();
         }
     };
@@ -351,12 +440,12 @@ namespace blitz {
 #if BLITZ_MODERN
         logo->set_width(blitz::ui::px(560.0f));   // the NFL Blitz 2027 logo, 1400x434
         logo->set_height(blitz::ui::px(174.0f));
-        const std::string app_name = std::string("MODERN BLITZ  ·  RECOMPILED FOR ") + platform_caps();
 #else
         logo->set_width(blitz::ui::px(560.0f));
         logo->set_height(blitz::ui::px(176.0f));
-        const std::string app_name = std::string("CLASSIC BLITZ  ·  RECOMPILED FOR ") + platform_caps();
 #endif
+        // Just the platform under the logo (team, 2026-11-15): the logo already names the game.
+        const std::string app_name = std::string("RECOMPILED FOR ") + platform_caps();
         Element* subtitle = context.create_element<Element>(title, 0, "div", false);
         subtitle->set_display(Display::Flex);
         subtitle->set_align_items(AlignItems::Center);
@@ -387,8 +476,12 @@ namespace blitz {
 
         context.create_element<PlayerFooter>(menu);
 
-        options->set_top_anchor(blitz::ui::px(286.0f), blitz::ui::px(420.0f));
+        options->set_top_anchor(blitz::ui::px(InstallExpiryNote::menu_top), blitz::ui::px(420.0f));
         std::vector<GameOption*> items;
+        // Finish setup, first, while setup isn't done (docs/design/FIRST_RUN_V2.md §6.1): the player's way back into
+        // it after backing out, and a tester's way to tell "it didn't start by itself" from "it doesn't work".
+        GameOption* finish = options->add_option("Finish Setup", [] { blitz::firstrun_finish_setup_row(); });
+        items.push_back(finish);
         // A launcher about content (docs/design/ONE_APP.md): play, the ROM, add-ons, export, settings.
         items.push_back(options->add_start_game_or_load_rom_option("Load ROM", "Play"));
         // One app with both games: Switch to Classic / Modern Blitz, once that game has a ROM.
@@ -407,17 +500,19 @@ namespace blitz {
             recompui::config::open();
         }));
         std::vector<Element*> rom_items{change_rom};
-        if (blitz::export_available) {
-            GameOption* export_rom = options->add_option("Export ROM", [] { blitz::export_rom_dialog(); });
-            items.push_back(export_rom);
-            rom_items.push_back(export_rom);
-        }
+        // No Export ROM row (team, 2026-11-15): Blitz Builder → N64 or emulator makes the cart.
         // BRANDING: the setup tool's name, "Blitz Builder"
-        GameOption* builder = options->add_option("Blitz Builder", [] { blitz::builder_open(); });  // setup again
-        items.push_back(builder);
-        rom_items.push_back(builder);
+        // A computer's only (the hub model, the team 2026-11-15): it sets up phones, handhelds and the PS5, which have none.
+        if (blitz::platform::desktop) {
+            GameOption* builder = options->add_option("Blitz Builder", [] { blitz::builder_open(); });  // setup again
+            items.push_back(builder);
+            rom_items.push_back(builder);
+        }
         items.push_back(options->add_settings_option());
-        context.create_element<RomNeededNote>(menu, rom_items, switch_item);
+        context.create_element<RomNeededNote>(menu, rom_items, switch_item, finish);
+        context.create_element<InstallExpiryNote>(menu, options);
+        if (!blitz::firstrun_unfinished()) finish->set_display(Display::None);
+        else context.set_autofocus_element(finish);  // Play's own autofocus otherwise
         items.push_back(options->add_exit_option());
         // Chrome caps around the focused item, with the red bar (the theme's focus style). Every row gets a fixed
         // height: the caps span the row, and without one the bar drew past their bottoms. Six or more items

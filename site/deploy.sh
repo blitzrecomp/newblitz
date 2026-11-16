@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deploy the website to Cloudflare Pages, project "newblitz", on the public account.
+# Deploy the website to Cloudflare Pages, project "newblitz-site" (newblitz.com), on the public account.
 #
 #   site/deploy.sh            # bake (tools/build.py), stage the public files, deploy
 #   site/deploy.sh --dry-run  # bake and stage only; prints the staging folder
@@ -25,5 +25,22 @@ if [ "${1:-}" = "--dry-run" ]; then
     exit 0
 fi
 
-cd "$ROOT"
-XDG_CONFIG_HOME="$ROOT/build/wrangler_public" npx wrangler@4 pages deploy "$STAGE" --project-name newblitz --branch main
+# Cloudflare serves Pages sites as Workers with static assets now (wrangler 4.16x): the staged files are the Worker
+# "newblitz-site"'s assets, on newblitz.com (and www) and newblitz-site.blitzrecomp.workers.dev. _headers and
+# _redirects work as they did on Pages. The config lives beside the staged files, never in the repo.
+PUB="$STAGE/public"; mkdir "$PUB"
+find "$STAGE" -mindepth 1 -maxdepth 1 ! -name public -exec mv {} "$PUB/" \;
+cat > "$STAGE/wrangler.jsonc" <<'JSON'
+{
+  "name": "newblitz-site",
+  "compatibility_date": "2026-11-13",
+  "workers_dev": true,
+  "assets": { "directory": "./public", "not_found_handling": "404-page" },
+  "routes": [
+    { "pattern": "newblitz.com", "custom_domain": true },
+    { "pattern": "www.newblitz.com", "custom_domain": true }
+  ]
+}
+JSON
+cd "$STAGE"
+XDG_CONFIG_HOME="$ROOT/build/wrangler_public" npx wrangler@4 deploy

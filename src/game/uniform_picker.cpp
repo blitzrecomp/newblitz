@@ -75,6 +75,7 @@ namespace blitz {
     bool probowl_code_saved(int side);
     void probowl_ask_code(int side);
     int probowl_ask_state(int side);  // 1 asking, 2 typed, 3 cancelled
+    void crew_hover(int side, int slot);  // crew.cpp: headshots for the team a cursor rests on
 #endif
 }
 
@@ -567,6 +568,7 @@ extern "C" {
         bool season = MEM_W(0, (gpr)(int32_t)game_mode) == 2;
 #if BLITZ_MODERN
         if (blitz::original_game()) return;  // the original game: no uniform sets, crews or Pro Bowl (nor the hint naming them)
+        blitz::crew_hover((int32_t)ctx->r21, (int32_t)ctx->r22);  // Pick Your Crew's faces, fetched while the cursor rests
 #endif
         if (!season) blitz::hints_mark_team_select();
         blitz::picker_season = season;

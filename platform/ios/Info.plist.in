@@ -38,6 +38,56 @@
 	</array>
 	<key>UIFileSharingEnabled</key><true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key><true/>
+	<!-- A ROM opened into the app from Files (Share → New Blitz) or another app (platform_ios.mm, scene openURLContexts).
+	     Delta's N64 type is listed by its own id: with Delta installed, a .z64 is Delta's type (its exported
+	     declaration wins over ours), and the share sheet offers only the apps that list that type. Alternate: never
+	     the default app for these files. -->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key><string>N64 ROM</string>
+			<key>CFBundleTypeRole</key><string>Viewer</string>
+			<key>LSHandlerRank</key><string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.blitzrecomp.n64-rom</string>
+				<string>com.rileytestut.delta.game.n64</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key><string>Zip Archive</string>
+			<key>CFBundleTypeRole</key><string>Viewer</string>
+			<key>LSHandlerRank</key><string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.zip-archive</string>
+			</array>
+		</dict>
+	</array>
+	<!-- Imported, not exported: the app uses these types without owning them. Ours for .z64/.n64/.v64 when no other
+	     app declares one; Delta's as Delta declares it (rileytestut/Delta, Delta/Supporting Files/Info.plist), so the
+	     id means the same thing to this app whether or not Delta is installed. Both conform to public.data. -->
+	<key>UTImportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key><string>com.blitzrecomp.n64-rom</string>
+			<key>UTTypeDescription</key><string>N64 ROM</string>
+			<key>UTTypeConformsTo</key><array><string>public.data</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key><array><string>z64</string><string>n64</string><string>v64</string></array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key><string>com.rileytestut.delta.game.n64</string>
+			<key>UTTypeDescription</key><string>N64 Game</string>
+			<key>UTTypeConformsTo</key><array><string>public.data</string><string>public.content</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key><array><string>n64</string><string>z64</string></array>
+			</dict>
+		</dict>
+	</array>
 	<key>NSLocalNetworkUsageDescription</key><string>Phones on your network can join as controllers, and open the Roster Room.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>

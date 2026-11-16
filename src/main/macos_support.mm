@@ -116,6 +116,36 @@ namespace blitz {
 }
 
 namespace blitz {
+    // A blocking HTTP POST (call it off the main thread): true on a 2xx answer. Crash reports (crash_report.cpp).
+    bool http_post(const std::string& url, const std::string& content_type, const std::string& body, int& status) {
+        @autoreleasepool {
+            status = 0;
+            NSURL* u = [NSURL URLWithString:[NSString stringWithUTF8String:url.c_str()]];
+            if (u == nil) return false;
+            NSMutableURLRequest* req = [NSMutableURLRequest requestWithURL:u cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                           timeoutInterval:20];
+            [req setHTTPMethod:@"POST"];
+            // BRANDING: HTTP User-Agent
+            [req setValue:@"BlitzRecomp" forHTTPHeaderField:@"User-Agent"];
+            [req setValue:[NSString stringWithUTF8String:content_type.c_str()] forHTTPHeaderField:@"Content-Type"];
+            [req setHTTPBody:[NSData dataWithBytes:body.data() length:body.size()]];
+            dispatch_semaphore_t done = dispatch_semaphore_create(0);
+            __block NSInteger code = 0;
+            NSURLSessionDataTask* task = [[NSURLSession sharedSession] dataTaskWithRequest:req
+                completionHandler:^(NSData*, NSURLResponse* r, NSError* e) {
+                    if (e == nil && [r isKindOfClass:[NSHTTPURLResponse class]]) code = [(NSHTTPURLResponse*)r statusCode];
+                    dispatch_semaphore_signal(done);
+                }];
+            [task resume];
+            dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+            dispatch_release(done);
+            status = (int)code;
+            return code >= 200 && code < 300;
+        }
+    }
+}
+
+namespace blitz {
     // A computer has file dialogs: no drop folder.
     std::filesystem::path rom_drop_folder() { return {}; }
 }

@@ -12,14 +12,14 @@ cfg() {
   python3 - "$RG/../rgds_restore/general.json" "$RG/general.run.json" "$two" "$sharp" "$copy" "$waits" <<'PY'
 import json,sys
 g=json.load(open(sys.argv[1]))
-g["potato_two_screens"]=sys.argv[3]=="1"; g["potato_two_sharpness"]=sys.argv[4]; g["potato_frame_copy"]=sys.argv[5]; g["potato_waits"]=sys.argv[6]
+g["potato_two_screens_on"]=sys.argv[3]=="1"; g["potato_two_screen_sharpness"]=sys.argv[4]; g["potato_frame_copy"]=sys.argv[5]; g["potato_waits"]=sys.argv[6]
 g["fps_counter"]=True; g["send_logs"]=False
 json.dump(g,open(sys.argv[2],"w"),indent=4)
 PY
   D shell am force-stop $P
   D push "$RG/general.run.json" $F/general.json >/dev/null
   local tw=false; [ "$two" = 1 ] && tw=true
-  sed "s/name=\"potato_two_screens\" value=\"[a-z]*\"/name=\"potato_two_screens\" value=\"$tw\"/" $RG/../rgds_restore/blitz_ds.xml > $RG/blitz_ds.run.xml
+  sed "s/name=\"potato_two_screens_on\" value=\"[a-z]*\"/name=\"potato_two_screens_on\" value=\"$tw\"/" $RG/../rgds_restore/blitz_ds.xml > $RG/blitz_ds.run.xml
   D push $RG/blitz_ds.run.xml /data/data/$P/shared_prefs/blitz_ds.xml >/dev/null
   D shell "chown \$(stat -c %U /data/data/$P):ext_data_rw $F/general.json; chown \$(stat -c %U:%G /data/data/$P) /data/data/$P/shared_prefs/blitz_ds.xml; chmod 660 /data/data/$P/shared_prefs/blitz_ds.xml $F/general.json"
 }

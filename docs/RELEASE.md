@@ -32,7 +32,33 @@
 | `NewBlitz-v<v>-macOS-arm64.zip` | `New Blitz.app`, ad hoc signed with the distribution entitlements (checklist step 4 would replace that with a Developer ID) |
 | `NewBlitz-v<v>-Windows-x64.zip` | the `New Blitz` folder: `New Blitz.exe`, its DLLs and resources |
 | `NewBlitz-v<v>-Linux-x64.tar.gz` | the `New Blitz` folder: the executable (debug info stripped) and its resources |
-| `SHA256SUMS`, `RELEASE_NOTES.md` | the notes are CHANGELOG.md's top section plus how to open each download |
+| `SHA256SUMS`, `RELEASE_NOTES.md` | the checksums of every `NewBlitz-*` file; the notes are CHANGELOG.md's top section plus how to open each download |
+
+Then one obvious file per device (tools/release/make_downloads.sh, from the same staged folders). These are what the
+site's download page and the README's "Get it" table point people to; the zips and the tarball stay for RecompLauncher
+and for anyone who'd rather unpack than install.
+
+| File | What | How a player opens it |
+|---|---|---|
+| `NewBlitz-v<v>-Windows-Setup.exe` | NSIS installer (platform/windows/installer.nsi) of the Windows folder: per user, into `%LOCALAPPDATA%\Programs\New Blitz`, Start menu shortcut, optional desktop shortcut, uninstaller in Settings → Apps (HKCU), the app's icon. Installs over an older version in place. The uninstaller removes the program only, never the game data in `%LOCALAPPDATA%\Blitz2026Recompiled` or `BlitzRecompiled` | Run it; SmartScreen: More info → Run anyway. No administrator prompt |
+| `NewBlitz-v<v>-macOS.dmg` | the same `New Blitz.app` as the zip (ad hoc signed; checked with `codesign --verify --deep --strict` inside the mounted image) and an Applications alias, in a styled window: navy background with the NEW BLITZ 2027 logo, a yellow arrow from the app to Applications, a caption, the app's icon as the volume's (dmgbuild from `.venv`: platform/macos/dmg_settings.py; the background is drawn at build time by tools/make_dmg_background.py) | Open it, drag New Blitz to Applications, then Open Anyway once |
+| `NewBlitz-v<v>-x86_64.AppImage` | the Linux folder, with Debian 12's SDL2 and FreeType and what they need that a desktop may lack (libpng, brotli, libsamplerate, libdecor, libXss) in `usr/lib`, found through the executable's RUNPATH. Vulkan, glibc, X11/Wayland, ALSA/PulseAudio and Mesa come from the system. **Untested on Linux** | `chmod +x`, run |
+| `NewBlitz-v<v>-Android.apk` | the Android device kit, as the build signed it (the release key when `BLITZ_ANDROID_KEYSTORE` is set: the script checks the APK's certificate against it). None with `RELEASE_NO_ANDROID=1` | Open it on the device, allow installs from that source, open New Blitz, pick your ROM |
+| `NewBlitz-v<v>-iPhone.ipa` | the iPhone device kit, **unsigned** (the script refuses one with a provisioning profile or a team) | Sideload with AltStore, SideStore or Sideloadly, open New Blitz, pick your ROM |
+
+Tools for these, all from Homebrew: `brew install makensis squashfs patchelf p7zip` (p7zip is for the scan). Set
+`HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 HOMEBREW_NO_INSTALL_CLEANUP=1` when installing them: on 2026-11-15 a plain
+`brew install` upgraded other formulae and its cleanup removed the old real `sdl2` keg (Homebrew's `sdl2` is now
+sdl2-compat), which CMakeLists.txt falls back to when `build/deps/prefix` is missing; run `tools/build_deps.sh` in a
+checkout without it.
+
+**The AppImage runtime.** An AppImage is the AppImage project's type 2 runtime (a small static x86_64 ELF) with the
+app's squashfs appended. Homebrew has `mksquashfs` but neither the runtime nor appimagetool, so the release takes the
+runtime from `build/appimage/runtime-x86_64` (or `APPIMAGE_RUNTIME=<file>`), and its SHA-256 from a line
+`<sha256>  appimage-runtime-x86_64` in tools/deps.sha256 once that line exists. Without the file, the AppImage is
+skipped with a message, the AppDir and its squashfs are left in `build/release/stage/downloads/`, and the rest of the
+release goes on. The runtime is the `runtime-x86_64` asset of https://github.com/AppImage/type2-runtime/releases (about
+1 MB); it isn't downloaded by any script here.
 
 Every archive also holds `recomplauncher.json` beside the app: the manifest RecompLauncher reads (platform/recomplauncher;
 its spec is recomplauncher.com/sdk). It asks the player for their USA v1.1 cartridge (game code NBIE), starts the app
@@ -44,9 +70,19 @@ Every computer's app carries the same device kits for Blitz Builder (`Resources/
 executable elsewhere): the PS5 title and launch payload, the Android APK and the iPhone app as an **unsigned**
 `NewBlitz.ipa` (Save the iPhone app (.ipa); docs/IOS_SIDELOAD.md §3). A team-signed iPhone kit (`DEVICE_KITS_IOS=1`) is
 refused. The APK is signed with `BLITZ_ANDROID_KEYSTORE`, else this Mac's debug key: keep the same key for every release,
-or Android won't update an installed copy.
+or Android won't update an installed copy. The release key (2026-11-14) is `~/Keys/newblitz-release.jks`, alias `newblitz`:
 
-Last, **tools/release_scan.sh** unpacks every download (and the `.apk`/`.ipa` inside) and fails the release on: this
+```
+read -rs "BLITZ_ANDROID_KEYSTORE_PASS?Keystore password: " && echo && export BLITZ_ANDROID_KEYSTORE_PASS \
+  BLITZ_ANDROID_KEYSTORE=~/Keys/newblitz-release.jks BLITZ_ANDROID_KEYSTORE_ALIAS=newblitz && make release VERSION=<v>
+```
+
+Keep the `-r`: without it zsh's `read` eats backslashes, and a password with a `\` then fails ("keystore password was
+incorrect").
+
+Last, **tools/release_scan.sh** unpacks every download (the `.dmg` attached read-only and detached, the AppImage's
+squashfs read with `unsquashfs` at the runtime's end, the installer extracted with `7z`, and the `.apk`/`.ipa` inside
+each) and fails the release on: this
 machine's home folder or user name; the developer's name and addresses (git identity, the private repo's owner,
 `build/public_deny.txt`); "Houston Texans"; any private address or key from `build/` (live rosters, the logs and
 remote-testing mailbox, install links, PSP and season-server keys; read at scan time, never printed) or any

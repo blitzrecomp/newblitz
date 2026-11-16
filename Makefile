@@ -6,7 +6,7 @@ VENV := .venv
 env:            ## Check the toolchain
 	@./tools/check_env.sh
 
-venv:           ## Python tools for ROM analysis (splat, spimdisasm)
+venv:           ## Python tools: ROM analysis (splat, spimdisasm), Pillow, dmgbuild
 	$(PY) -m venv $(VENV)
 	$(VENV)/bin/pip install -q --upgrade pip
 	$(VENV)/bin/pip install -q -r requirements.txt
@@ -18,6 +18,21 @@ test-adv:       ## Unit tests for Advanced mode's league model (standings, tiebr
 	@mkdir -p build/tests
 	clang++ -std=c++20 -O1 -g -Wall -isystem lib/N64ModernRuntime/thirdparty tests/adv_league_test.cpp src/game/adv_league.cpp -o build/tests/adv_league_test
 	@if [ -f packs/blitz2026/pack.json ]; then build/tests/adv_league_test packs/blitz2026/pack.json; else echo "adv_league: skipped (no packs/blitz2026)"; fi
+
+test-ps5-send:  ## Send to PS5 without a console (src/main/ps5_send.h): connect timeout, progress, manifest, whole sends to a local FTP server (pyftpdlib in .venv)
+	@mkdir -p build/tests
+	clang++ -std=c++20 -O1 -g -Wall tests/ps5_send_test.cpp src/common/sha256.cpp -o build/tests/ps5_send_test
+	@V=$(VENV)/bin/python; [ -x $$V ] || V=$(PY); \
+	if $$V -c 'import pyftpdlib' 2>/dev/null; then \
+		R=$$(mktemp -d)/console; mkdir -p $$R; P=$$((20000 + RANDOM % 20000)); \
+		$$V -m pyftpdlib -i 127.0.0.1 -p $$P -w -d $$R > $$R/../ftp.log 2>&1 & S=$$!; sleep 1; \
+		build/tests/ps5_send_test $$P $$R; rc=$$?; kill $$S; exit $$rc; \
+	else echo "ps5_send: no pyftpdlib (.venv/bin/pip install pyftpdlib): the FTP sends skipped"; build/tests/ps5_send_test; fi
+
+test-adb-parse: ## Send to Android's reading of adb's answers (src/main/adb_parse.h), from captured output
+	@mkdir -p build/tests
+	clang++ -std=c++20 -O1 -g -Wall tests/adb_parse_test.cpp -o build/tests/adb_parse_test
+	build/tests/adb_parse_test
 
 rom-scan:       ## Identify every ROM in rom/
 	@$(PY) tools/romtool.py scan

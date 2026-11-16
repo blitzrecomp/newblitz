@@ -6,12 +6,13 @@
 //   ios/NewBlitz.app.zip  the app signed for this Mac's team (zipped: the Mac app's own deep signing would re-sign it);
 //                         only with DEVICE_KITS_IOS=1, as Apple's signing data names the developer. A private build.
 //   ios/NewBlitz.ipa      the public app's iPhone app, signed by no one (make device-kits BLITZ_CONTENT=public): Blitz
-//                         Builder saves it to Downloads with the ROM and the setup beside it, for the player to install
-//                         with their own Apple ID (AltStore, SideStore, Sideloadly; docs/IOS_SIDELOAD.md). Any computer.
+//                         Builder saves a copy to Downloads with the ROM and the setup inside, for the player to install
+//                         with their own Apple ID (Sideloadly is recommended; AltStore, SideStore; docs/IOS_SIDELOAD.md). Any computer.
 //   android/NewBlitz.apk
 // How each goes, as the tools in tools/ do it by hand:
-//   PS5      FTP (etaHEN's server, port 1337, anonymous) to /data/homebrew/<title> (unchanged files skipped by size),
-//            the ROM to /data/blitzrecomp, the setup to its app folder; then launch.elf to the ELF loader (port 9021).
+//   PS5      FTP (etaHEN's server, port 1337, anonymous) to /data/homebrew/<title> (unchanged files skipped by the
+//            console's manifest), the ROM to /data/blitzrecomp if it has none, the setup to its app folder only if
+//            it isn't set up; then launch.elf to the ELF loader (port 9021). ps5_send.h has the details.
 //   iPhone   Xcode's devicectl (a Mac with Xcode): install, then the ROM into the app's Documents (imported at start)
 //            and the setup into its app folder. The first USB-connected or paired device.
 //   Android  adb (the Android SDK's platform-tools): install, then the ROM into the app's files folder. On a Mac, Windows
@@ -23,6 +24,7 @@
 #include "blitz_config.h"
 #include "blitz_platform.h"
 #include "net_compat.h"
+#include "adb_parse.h"
 #include "../game/season_pak.h"
 
 #include <array>
@@ -30,9 +32,11 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -41,6 +45,7 @@
 #include "recompui/recompui.h"
 #include "util/file.h"
 #include "os_shell.h"
+#include "miniz.h"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -51,9 +56,25 @@ namespace blitz {
 }
 
 #if defined(BLITZ_PLATFORM_DESKTOP)  // a computer sends; a phone or console is what's sent to
+#include "ps5_send.h"
 namespace {
     namespace fs = std::filesystem;
     std::atomic<bool> busy{false};
+    // How the last send went, for first run's screens (firstrun.cpp): 0 none yet, 1 running, 2 done, 3 failed; the
+    // last thing said about it; and the folder a save went to (Open Folder).
+    std::atomic<int> state{0};
+    std::mutex said_mutex;
+    std::string said;
+    fs::path saved_folder;
+
+    // A toast, and the line the setup screen shows.
+    void say(const std::string& text) {
+        {
+            std::lock_guard lock{said_mutex};
+            said = text;
+        }
+        blitz::post_status(text);
+    }
 
     fs::path kits() { return recompui::file::get_program_path() / "devices"; }
 
@@ -174,68 +195,109 @@ namespace {
     // BRANDING: kit file names
     fs::path ipa_kit() { return kits() / "ios" / "NewBlitz.ipa"; }
 
-    // The public iPhone app into Downloads/New Blitz for iPhone: NewBlitz.ipa, and beside it a folder holding what the
-    // app picks up from its Documents at start (main.cpp's drop folder): the ROM, this computer's setup, the season pak
-    // and Blitz Builder's mark. Plus a README with the steps. No signing here: the player's own tool does that.
+    // The public iPhone app into Downloads/New Blitz for iPhone: NewBlitz.ipa with the ROM, this computer's setup, the
+    // season pak and Blitz Builder's mark inside the app itself, in Payload/<app>/setup/ (team, 2026-11-15: no separate
+    // copy to the phone). The app takes them in at its first start (main.cpp, iOS). Made fresh from the kit's .ipa,
+    // which stays without them: the .ipa a phone downloads itself has no ROM, and asks for one with the Files picker.
+    // Plus a README with the steps. No signing here: the player's own tool signs the whole app, these files with it.
     bool save_ipa() {
         std::error_code ec;
         if (!fs::is_regular_file(ipa_kit(), ec)) {
-            blitz::post_status("This build has no iPhone app");
+            say("This build has no iPhone app");
             return false;
         }
         fs::path downloads = blitz::downloads_folder();
+        if (const char* d = getenv("BLITZ_EXPORT_DIR")) downloads = d;  // dev runs
         if (downloads.empty()) {
-            blitz::post_status("Couldn't find your Downloads folder");
+            say("Couldn't find your Downloads folder");
             return false;
         }
         // BRANDING: the iPhone folder's name in Downloads
-        fs::path out = downloads / "New Blitz for iPhone", phone = out / "Copy to the iPhone";
-        fs::remove_all(phone, ec);  // last time's ROM and setup
-        fs::create_directories(phone, ec);
+        fs::path out = downloads / "New Blitz for iPhone";
+        fs::remove_all(out / "Copy to the iPhone", ec);  // an older save's separate folder
+        fs::create_directories(out, ec);
         if (ec) {
-            blitz::post_status("Couldn't make a folder in Downloads");
+            say("Couldn't make a folder in Downloads");
             return false;
         }
-        auto copy = [&](const fs::path& from, const fs::path& to) {
-            std::error_code e;
-            fs::copy_file(from, to, fs::copy_options::overwrite_existing, e);
-            if (e) fprintf(stderr, "[send] copy %s: %s\n", utf8(from).c_str(), e.message().c_str());
-            return !e;
+        mz_zip_archive in{}, zip{};
+        if (!mz_zip_reader_init_file(&in, utf8(ipa_kit()).c_str(), 0)) {
+            say("The iPhone app in this build can't be read");
+            return false;
+        }
+        // The app's folder in the archive: Payload/<name>.app/
+        std::string app;
+        for (mz_uint i = 0; i < mz_zip_reader_get_num_files(&in) && app.empty(); i++) {
+            char name[1024];
+            mz_zip_reader_get_filename(&in, i, name, sizeof(name));
+            std::string n = name;
+            size_t dot = n.find(".app/");
+            if (n.rfind("Payload/", 0) == 0 && dot != std::string::npos) app = n.substr(0, dot + 5);
+        }
+        fs::path tmp = out / "NewBlitz.ipa.part", ipa = out / "NewBlitz.ipa";
+        bool ok = !app.empty() && mz_zip_writer_init_file(&zip, utf8(tmp).c_str(), 0);
+        for (mz_uint i = 0; ok && i < mz_zip_reader_get_num_files(&in); i++) {
+            char name[1024];
+            mz_zip_reader_get_filename(&in, i, name, sizeof(name));
+            if (std::string(name).rfind(app + "setup/", 0) == 0) continue;  // none in a kit; never two copies
+            ok = mz_zip_writer_add_from_zip_reader(&zip, &in, i);
+        }
+        auto add = [&](const fs::path& from, const std::string& name) {
+            if (!ok) return;
+            std::string data = read_all(from);
+            ok = !data.empty() && mz_zip_writer_add_mem(&zip, (app + "setup/" + name).c_str(), data.data(), data.size(),
+                                                         name.ends_with(".z64") || name.ends_with(".nbpak") ? MZ_NO_COMPRESSION : MZ_DEFAULT_COMPRESSION);
         };
-        bool ok = copy(ipa_kit(), out / "NewBlitz.ipa");
-        if (fs::is_regular_file(stored_rom(), ec)) ok = copy(stored_rom(), phone / "blitz.z64") && ok;
-        for (const fs::path& f : setup_files()) ok = copy(f, phone / f.filename()) && ok;
-        if (fs::path pak = season_pak_file(); !pak.empty()) ok = copy(pak, phone / pak.filename()) && ok;
-        std::ofstream(phone / "builder_done") << "1\n";
+        bool has_rom = fs::is_regular_file(stored_rom(), ec);
+        if (has_rom) add(stored_rom(), "blitz.z64");
+        for (const fs::path& f : setup_files()) add(f, f.filename().string());
+        if (fs::path pak = season_pak_file(); !pak.empty()) add(pak, pak.filename().string());
+        // The mark says when: an .ipa made again (another setup) is taken in again; the same one re-signed isn't.
+        std::string mark = "1 " + std::to_string((long long)std::time(nullptr)) + "\n";
+        if (ok) ok = mz_zip_writer_add_mem(&zip, (app + "setup/builder_done").c_str(), mark.data(), mark.size(), MZ_DEFAULT_COMPRESSION);
+        if (ok) ok = mz_zip_writer_finalize_archive(&zip);
+        mz_zip_writer_end(&zip);
+        mz_zip_reader_end(&in);
+        if (ok) {
+            fs::remove(ipa, ec);
+            fs::rename(tmp, ipa, ec);
+            ok = !ec;
+        }
+        if (!ok) {
+            fs::remove(tmp, ec);
+            say("Couldn't make the iPhone app with your ROM inside");
+            return false;
+        }
         // BRANDING: the iPhone README's app name
         std::ofstream(out / "README.txt")
             << "New Blitz for iPhone and iPad\n"
                "=============================\n\n"
+               "NewBlitz.ipa holds your ROM and this computer's setup. Don't share it.\n\n"
                "Apple lets you install apps you sign yourself. NewBlitz.ipa isn't signed by anyone: you sign it with your\n"
-               "own Apple ID as you install it. A free Apple ID works; its apps need re-signing every 7 days (your\n"
-               "saves stay). A paid developer account lasts a year.\n\n"
-               "1. Install NewBlitz.ipa with one of these, on a Mac or a Windows PC:\n"
-               "     AltStore    https://altstore.io\n"
-               "     SideStore   https://sidestore.io\n"
-               "     Sideloadly  https://sideloadly.io\n"
-               "   Each asks for your Apple ID and signs the app for your phone. They can change the bundle ID if yours\n"
-               "   must differ.\n\n"
-               "2. On the phone: Settings > Privacy & Security > Developer Mode > On (the phone restarts), then\n"
-               "   Settings > General > VPN & Device Management > your Apple ID > Trust.\n\n"
-               "3. Give New Blitz your ROM and this setup: copy everything in \"Copy to the iPhone\" into New Blitz's\n"
-               "   folder on the phone.\n"
-               "     - On the phone: Files > On My iPhone > New Blitz (open New Blitz once first so the folder exists).\n"
-               "       AirDrop or iCloud Drive gets the files onto the phone.\n"
-               "     - From a Mac: Finder > your iPhone > Files > drag them onto New Blitz.\n"
-               "     - From Windows: the Apple Devices app (or iTunes) > your iPhone > Files / File Sharing > New Blitz.\n"
-               "   Then open New Blitz again: it takes the ROM, the setup and the 2026 Season (if it's there).\n"
-               "   Or skip this and use Load ROM in the app.\n\n"
-               "More: docs/IOS_SIDELOAD.md in the source, or the project's README.\n";
-        fprintf(stderr, "[send] iPhone app saved in %s\n", utf8(out).c_str());
-        blitz::post_status(ok ? "The iPhone app is in Downloads → New Blitz for iPhone"
-                              : "The iPhone app is in Downloads, but the ROM or setup didn't copy");
-        blitz::reveal_in_file_browser(out / "NewBlitz.ipa");
-        return ok;
+               "own Apple ID as you install it. A free Apple ID works. Its install lasts 7 days, and Sideloadly can\n"
+               "renew it for you. A paid developer account lasts a year. A free one allows 3 sideloaded apps per device.\n\n"
+               "Recommended: Sideloadly, https://sideloadly.io (Mac or Windows)\n"
+               "1. Install Sideloadly. On Windows it needs Apple's iTunes and iCloud from apple.com (the web versions,\n"
+               "   not the Microsoft Store ones).\n"
+               "2. Plug the iPhone in with a cable.\n"
+               "3. Drag NewBlitz.ipa into Sideloadly and sign in with your own Apple ID. You type the password into\n"
+               "   Sideloadly. It's never shared with New Blitz.\n"
+               "4. Before you start, turn on AutoRefresh: the circular-arrows button left of Start.\n"
+               "5. On the iPhone: Settings > General > VPN & Device Management > trust your Apple ID. Turn on\n"
+               "   Developer Mode if iOS asks.\n"
+               "6. Turn on Wi-Fi sync for the phone. Mac: Finder > select the iPhone > \"Show this iPhone when on\n"
+               "   Wi-Fi\". Windows: the same option in iTunes.\n"
+               "7. Open New Blitz. It starts with your ROM and this setup, ready to play.\n\n"
+               "With AutoRefresh on, Sideloadly renews the app in the background whenever the computer is on and\n"
+               "the phone is on the same Wi-Fi. If it ever lapses, plug in and click Start again in Sideloadly.\n\n"
+               "Other options: AltStore https://altstore.io (also refreshes over Wi-Fi from a computer), SideStore\n"
+               "https://sidestore.io (refreshes on the phone, but setup is fiddlier).\n\n"
+               "More: newblitz.com/start, or docs/IOS_SIDELOAD.md in the source.\n";
+        fprintf(stderr, "[send] iPhone app saved in %s (%s)\n", utf8(out).c_str(), has_rom ? "with the ROM inside" : "no ROM stored");
+        saved_folder = out;
+        say("The iPhone app is in Downloads → New Blitz for iPhone");
+        blitz::reveal_in_file_browser(ipa);
+        return true;
     }
 
 #if defined(BLITZ_MACOS)
@@ -247,13 +309,13 @@ namespace {
             // The usual case: the Mac app doesn't carry a signed iPhone build (Makefile, DEVICE_KITS_IOS).
             fprintf(stderr, "[send] no iPhone kit in %s: build it with Xcode (make ios-modern, then tools/ios/install.sh modern)\n",
                     kits().string().c_str());
-            blitz::post_status("The iPhone app isn't included here: build it with Xcode on your Mac (make ios-modern, then "
+            say("The iPhone app isn't included here: build it with Xcode on your Mac (make ios-modern, then "
                                "tools/ios/install.sh modern)");
             return false;
         }
         std::string list;
         if (!run("xcrun devicectl list devices", &list)) {
-            blitz::post_status("Sending to an iPhone needs Xcode on this Mac");
+            say("Sending to an iPhone needs Xcode on this Mac");
             return false;
         }
         // The first real device that's reachable (USB or paired over Wi-Fi), by its id (8-16 hex).
@@ -279,17 +341,17 @@ namespace {
             }
         }
         if (device.empty()) {
-            blitz::post_status("No iPhone found: connect it (or pair it in Xcode) and unlock it");
+            say("No iPhone found: connect it (or pair it in Xcode) and unlock it");
             return false;
         }
         fs::path tmp = fs::temp_directory_path() / "newblitz-ios";
         fs::remove_all(tmp, ec);
         fs::create_directories(tmp, ec);
         // BRANDING: app name in Send to Device toasts (and below)
-        blitz::post_status("Sending New Blitz to the iPhone…");
+        say("Sending New Blitz to the iPhone…");
         if (!run("ditto -x -k " + quote(zip.string()) + " " + quote(tmp.string())) ||
             !run("xcrun devicectl device install app --device " + device + " " + quote((tmp / "NewBlitz.app").string()))) {
-            blitz::post_status("Couldn't install on the iPhone (is it unlocked?)");
+            say("Couldn't install on the iPhone (is it unlocked?)");
             return false;
         }
         const std::string bundle = "com.blitzrecomp.newblitz";  // platform/ios/ios_bundle.cmake
@@ -307,15 +369,70 @@ namespace {
             ok = copy_to(tmp / "builder_done", "Documents/builder_done");
         }
         fs::remove_all(tmp, ec);
-        blitz::post_status(ok ? "New Blitz is on the iPhone" : "New Blitz is on the iPhone, but the ROM or setup didn't copy");
+        say(ok ? "New Blitz is on the iPhone" : "New Blitz is on the iPhone, but the ROM or setup didn't copy");
         return ok;
     }
 #else
     bool send_iphone() {  // devicectl is Xcode's: a Mac's only
-        blitz::post_status("Sending straight to an iPhone needs a Mac with Xcode: save the iPhone app (.ipa) instead");
+        say("Sending straight to an iPhone needs a Mac with Xcode: save the iPhone app (.ipa) instead");
         return false;
     }
 #endif
+
+    // BRANDING: kit file names
+    fs::path apk_kit() { return kits() / "android" / "NewBlitz.apk"; }
+
+    // Save the APK (first run's Android, without USB): Downloads/New Blitz for Android holds NewBlitz.apk, and beside
+    // it "Copy to the device" with what the app picks up from its files folder at start (main.cpp's drop folder): the
+    // ROM, this computer's setup, the season pak and Blitz Builder's mark. A README says the steps.
+    bool save_apk() {
+        std::error_code ec;
+        if (!fs::is_regular_file(apk_kit(), ec)) {
+            say("This build has no Android app");
+            return false;
+        }
+        fs::path downloads = blitz::downloads_folder();
+        if (const char* d = getenv("BLITZ_EXPORT_DIR")) downloads = d;  // dev runs
+        if (downloads.empty()) {
+            say("Couldn't find your Downloads folder");
+            return false;
+        }
+        // BRANDING: the Android folder's name in Downloads
+        fs::path out = downloads / "New Blitz for Android", device = out / "Copy to the device";
+        fs::remove_all(device, ec);  // last time's ROM and setup
+        fs::create_directories(device, ec);
+        if (ec) {
+            say("Couldn't make a folder in Downloads");
+            return false;
+        }
+        auto copy = [&](const fs::path& from, const fs::path& to) {
+            std::error_code e;
+            fs::copy_file(from, to, fs::copy_options::overwrite_existing, e);
+            if (e) fprintf(stderr, "[send] copy %s: %s\n", utf8(from).c_str(), e.message().c_str());
+            return !e;
+        };
+        bool ok = copy(apk_kit(), out / "NewBlitz.apk");
+        if (fs::is_regular_file(stored_rom(), ec)) ok = copy(stored_rom(), device / "blitz.z64") && ok;
+        for (const fs::path& f : setup_files()) ok = copy(f, device / f.filename()) && ok;
+        if (fs::path pak = season_pak_file(); !pak.empty()) ok = copy(pak, device / pak.filename()) && ok;
+        std::ofstream(device / "builder_done") << "1\n";
+        // BRANDING: the Android README's app name
+        std::ofstream(out / "README.txt")
+            << "New Blitz for Android\n"
+               "=====================\n\n"
+               "1. Copy NewBlitz.apk to the device (USB, a cloud folder, or a card) and open it there. Android asks you to\n"
+               "   allow installs from that source.\n\n"
+               "2. Open New Blitz once, then close it (that makes its folder).\n\n"
+               "3. Copy everything in \"Copy to the device\" into New Blitz's folder on the device:\n"
+               "     Android/data/com.blitzrecomp.newblitz/files\n"
+               "   (a file manager, or Android File Transfer / Explorer over USB). It holds your ROM: don't share it.\n\n"
+               "4. Open New Blitz again: it starts with your ROM, this setup and the 2026 Season (if it's there).\n";
+        fprintf(stderr, "[send] Android app saved in %s\n", utf8(out).c_str());
+        saved_folder = out;
+        say(ok ? "The Android app is in Downloads → New Blitz for Android"
+               : "The Android app is in Downloads, but the ROM or setup didn't copy");
+        return ok;
+    }
 
     // adb: the SDK's platform-tools where each computer's Android Studio puts them, else the PATH.
     std::string adb_path() {
@@ -339,28 +456,82 @@ namespace {
         return "adb";
     }
 
-    bool send_android() {
+    // The last Android send's problem (adb_parse.h's name: "downgrade", "incompatible", "no-device" ...), for the
+    // Builder's failure screen to offer the way forward; "" when there was none.
+    std::string android_problem;
+
+    // In words, with what to do next (team, 2026-11-15: a downgrade only said "Couldn't install").
+    // BRANDING: app name in Send to Android's messages
+    std::string android_words(const blitz::adb::Verdict& v) {
+        using P = blitz::adb::Problem;
+        const std::string allow = "Connect the device by USB, unlock it, and tap Allow on the USB debugging prompt.";
+        switch (v.problem) {
+            case P::NoAdb:
+                return "Sending over USB needs adb (Android's platform-tools) on this computer. How to get it: "
+                       "newblitz.com/start, under Android. Or save the APK and copy it over yourself.";
+            case P::NoDevice:
+                return "No Android device found. " + allow +
+                       " (USB debugging: Settings \xE2\x86\x92 About \xE2\x86\x92 tap Build number 7 times, then Developer options.)";
+            case P::Unauthorized: return "The device hasn't allowed this computer yet. " + allow;
+            case P::Offline: return "The device isn't answering. " + allow + " If it stays this way, unplug it and plug it in again.";
+            case P::TooMany: return "More than one Android device is connected. Unplug all but the one to send to.";
+            case P::Downgrade:
+                if (v.installed > 0 && v.carried > 0)
+                    return "This device already has a newer New Blitz (build " + std::to_string(v.installed) + ") than this "
+                           "computer carries (" + std::to_string(v.carried) + "). Update New Blitz on this computer, or keep the "
+                           "one on the device.";
+                return "This device already has a newer New Blitz than this computer carries. Update New Blitz on this "
+                       "computer, or keep the one on the device.";
+            case P::Incompatible:
+                return "The New Blitz on this device was installed from somewhere else, so Android won't update it. Remove it "
+                       "and install this one? Its saves on the device will be lost.";
+            case P::Storage: return "The device is out of space for New Blitz. Free up some space on it, then try again.";
+            default:
+                return "Couldn't install on the Android device" + (v.code.empty() ? std::string(".") : " (" + v.code + ").");
+        }
+    }
+
+    bool android_failed(const blitz::adb::Verdict& v, const char* at) {
+        {
+            std::lock_guard lock{said_mutex};
+            android_problem = blitz::adb::name(v.problem);
+        }
+        fprintf(stderr, "[send] android %s: problem=%s code=%s carried=%ld installed=%ld\n", at, blitz::adb::name(v.problem),
+                v.code.c_str(), v.carried, v.installed);
+        say(android_words(v));
+        return false;
+    }
+
+    // replace: remove the device's New Blitz first (another signature: Android won't update it; its saves go too).
+    bool send_android(bool replace) {
+        {
+            std::lock_guard lock{said_mutex};
+            android_problem.clear();
+        }
         // BRANDING: kit file names
         fs::path apk = kits() / "android" / "NewBlitz.apk";
         std::error_code ec;
         if (!fs::is_regular_file(apk, ec)) {
-            blitz::post_status("This build has no Android kit (make device-kits)");
+            say("This build has no Android kit (make device-kits)");
             return false;
         }
         std::string adb = quote(adb_path()), devices;
-        if (!run(adb + " devices", &devices) || devices.find("\tdevice") == std::string::npos) {
-            blitz::post_status(devices.find("\tdevice") == std::string::npos && devices.find("List of devices") == std::string::npos
-                                   ? "Sending to Android needs adb (Android's platform-tools) on this computer"
-                                   : "No Android device found: connect it with USB debugging on (adb)");
-            return false;
+        bool started = run(adb + " devices", &devices);
+        if (blitz::adb::Verdict v = blitz::adb::devices(started, devices); v.problem != blitz::adb::Problem::None)
+            return android_failed(v, "devices");
+        const std::string package = "com.blitzrecomp.newblitz";  // android_stage.cmake
+        if (replace) {
+            std::string out;
+            bool removed = run(adb + " uninstall " + package, &out);
+            fprintf(stderr, "[send] android: removed the device's New Blitz first (%s)\n", removed ? "done" : out.c_str());
         }
         // BRANDING: app name in Send to Device toasts
-        blitz::post_status("Sending New Blitz to the Android device…");
-        if (!run(adb + " install -r " + quote(utf8(apk)))) {
-            blitz::post_status("Couldn't install on the Android device");
-            return false;
-        }
-        const std::string drop = "/sdcard/Android/data/com.blitzrecomp.newblitz/files/";  // android_stage.cmake
+        say("Sending New Blitz to the Android device\xE2\x80\xA6");
+        std::string out;
+        bool installed = run(adb + " install -r " + quote(utf8(apk)), &out);
+        if (blitz::adb::Verdict v = blitz::adb::install(installed, out); v.problem != blitz::adb::Problem::None)
+            return android_failed(v, "install");
+        const std::string drop = "/sdcard/Android/data/" + package + "/files/";
         bool ok = !fs::is_regular_file(stored_rom(), ec) || run(adb + " push " + quote(utf8(stored_rom())) + " " + drop + "blitz.z64");
         // The setup and Blitz Builder's mark, as to an iPhone: the app moves them into its folder at start (main.cpp).
         for (const fs::path& f : setup_files()) ok = run(adb + " push " + quote(utf8(f)) + " " + drop + f.filename().string()) && ok;
@@ -371,209 +542,80 @@ namespace {
             ok = run(adb + " push " + quote(utf8(mark)) + " " + drop + "builder_done");
             fs::remove(mark, ec);
         }
-        blitz::post_status(ok ? "New Blitz is on the Android device" : "New Blitz is installed, but the ROM or setup didn't copy");
+        say(ok ? "New Blitz is on the Android device" : "New Blitz is installed, but the ROM or setup didn't copy");
         return ok;
     }
 
-    // --- FTP (PS5) ------------------------------------------------------------------------------------------------------
+    // --- PS5 (ps5_send.h) ------------------------------------------------------------------------------------------
 
-    class Ftp {
-        int fd = -1;
-        std::string host;
-
-        static int dial(const std::string& host, int port) {
-            int s = blitz::net::open_tcp();
-            if (s < 0) return -1;
-            sockaddr_in a{};
-            a.sin_family = AF_INET;
-            a.sin_port = htons((uint16_t)port);
-            if (inet_pton(AF_INET, host.c_str(), &a.sin_addr) != 1 || ::connect(s, (sockaddr*)&a, sizeof(a)) != 0) {
-                blitz::net::close_socket(s);
-                return -1;
-            }
-            blitz::net::set_timeouts(s, 30000);
-            return s;
-        }
-
-        bool send_all(int s, const char* p, size_t n) {
-            while (n > 0) {
-                ssize_t k = blitz::net::send_some(s, p, n);
-                if (k <= 0) return false;
-                p += k;
-                n -= (size_t)k;
-            }
-            return true;
-        }
-
-        // The server's reply code (multi-line replies read to their end); 0 on a broken connection.
-        int reply(std::string* text = nullptr) {
-            std::string line, first;
-            for (;;) {
-                line.clear();
-                char c;
-                while (blitz::net::recv_some(fd, &c, 1) == 1) {
-                    if (c == '\n') break;
-                    if (c != '\r') line += c;
-                }
-                if (line.size() < 3) return 0;
-                if (first.empty()) first = line;
-                if (line.size() >= 4 && line.compare(0, 3, first, 0, 3) == 0 && line[3] == ' ') break;
-                if (first.size() >= 4 && first[3] != '-') break;
-            }
-            if (text) *text = first;
-            return std::atoi(first.substr(0, 3).c_str());
-        }
-
-    public:
-        int cmd(const std::string& c, std::string* text = nullptr) {
-            std::string line = c + "\r\n";
-            if (!send_all(fd, line.data(), line.size())) return 0;
-            return reply(text);
-        }
-
-        bool open(const std::string& h, int port) {
-            host = h;
-            fd = dial(h, port);
-            if (fd < 0 || reply() != 220) return false;
-            int r = cmd("USER anonymous");
-            if (r == 331) r = cmd("PASS blitz@");
-            return r == 230 && cmd("TYPE I") == 200;
-        }
-
-        void mkdirs(const std::string& path) {
-            std::string at;
-            size_t i = 1;
-            while (i <= path.size()) {
-                size_t j = path.find('/', i);
-                at = path.substr(0, j == std::string::npos ? path.size() : j);
-                cmd("MKD " + at);
-                if (j == std::string::npos) break;
-                i = j + 1;
-            }
-        }
-
-        long size_of(const std::string& path) {
-            std::string t;
-            int r = cmd("SIZE " + path, &t);
-            static bool told = false;
-            if (r != 213 && r != 550 && !told) {
-                told = true;
-                fprintf(stderr, "[send] SIZE answered %d (%s): every file is sent\n", r, t.c_str());
-            }
-            return r == 213 ? std::atol(t.c_str() + 4) : -1;
-        }
-
-        // A file up under a temporary name, then renamed into place (a cut-short send never leaves half a file).
-        bool put(const std::string& data, const std::string& path) {
-            std::string t;
-            if (cmd("PASV", &t) != 227) return false;
-            size_t l = t.find('(');
-            int v[6] = {0};
-            if (l == std::string::npos || sscanf(t.c_str() + l + 1, "%d,%d,%d,%d,%d,%d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) return false;
-            int data_fd = dial(host, v[4] * 256 + v[5]);
-            if (data_fd < 0) return false;
-            int r = cmd("STOR " + path + ".part");
-            bool ok = (r == 150 || r == 125) && send_all(data_fd, data.data(), data.size());
-            blitz::net::close_socket(data_fd);
-            if (!ok || reply() != 226) return false;
-            cmd("DELE " + path);
-            return cmd("RNFR " + path + ".part") == 350 && cmd("RNTO " + path) == 250;
-        }
-
-        void close() {
-            if (fd >= 0) {
-                cmd("QUIT");
-                blitz::net::close_socket(fd);
-                fd = -1;
-            }
-        }
-        ~Ftp() { close(); }
-    };
+    blitz::ps5::Progress ps5_progress;
 
     bool send_ps5(const std::string& ip) {
         fs::path title = kits() / "ps5" / "PPSA99961", launch = kits() / "ps5" / "launch.elf";
         std::error_code ec;
         if (!fs::is_directory(title, ec) || !fs::is_regular_file(launch, ec)) {
-            blitz::post_status("This build has no PS5 kit (make device-kits)");
+            say("This build has no PS5 kit (make device-kits)");
             return false;
         }
-        Ftp ftp;
-        const char* fp = getenv("BLITZ_PS5_FTP_PORT");  // dev: a stand-in server (tests)
-        const char* lp = getenv("BLITZ_PS5_LOADER_PORT");
-        if (!ftp.open(ip, fp ? std::atoi(fp) : 1337)) {
-            blitz::post_status("Couldn't reach the PS5 at " + ip + " (is etaHEN running?)");
-            return false;
-        }
+        blitz::ps5::Job job;
+        job.host = ip;
+        if (const char* fp = getenv("BLITZ_PS5_FTP_PORT")) job.ftp_port = std::atoi(fp);  // dev: a stand-in server (tests)
+        if (const char* lp = getenv("BLITZ_PS5_LOADER_PORT")) job.loader_port = std::atoi(lp);
+        job.title_dir = title;
+        job.launch_elf = launch;
+        job.rom = stored_rom();
+        job.rom_name = utf8(stored_rom().filename());
+        job.pak = season_pak_file();
+        job.setup = setup_files();
         // BRANDING: app name in Send to Device toasts; /data/blitzrecomp folder
-        blitz::post_status("Sending New Blitz to the PS5…");
-        const std::string remote = "/data/homebrew/PPSA99961";
-        int sent = 0;
-        for (fs::recursive_directory_iterator it{title, ec}, end; !ec && it != end; it.increment(ec)) {
-            std::string rel = fs::relative(it->path(), title, ec).generic_string();
-            if (it->is_directory(ec)) {
-                ftp.mkdirs(remote + "/" + rel);
-                continue;
-            }
-            std::string dst = remote + "/" + rel;
-            ftp.mkdirs(fs::path(dst).parent_path().generic_string());
-            auto size = (long)fs::file_size(it->path(), ec);
-            if (it->path().filename() != "eboot.bin" && ftp.size_of(dst) == size) continue;  // already there
-            if (!ftp.put(read_all(it->path()), dst)) {
-                blitz::post_status("The PS5 copy stopped at " + rel);
+        blitz::ps5::Result r = blitz::ps5::send(job, ps5_progress, [](const std::string& line) {
+            fprintf(stderr, "[ps5] %s\n", line.c_str());
+        });
+        switch (r.stage) {
+            case blitz::ps5::Result::Unreachable:
+                say("Nothing answered at " + ip + ". Check the address (Settings \xE2\x86\x92 Network on the PS5) and that the "
+                    "PS5 is on and on the same network.");
                 return false;
-            }
-            sent++;
+            case blitz::ps5::Result::Refused:
+                say("The PS5 at " + ip + " answered, but its FTP server didn't: is etaHEN running?");
+                return false;
+            case blitz::ps5::Result::CopyStopped:
+                say("The PS5 copy stopped at " + r.stopped_at + ". Try again: what's already there is kept.");
+                return false;
+            default:
+                break;
         }
-        ftp.mkdirs("/data/blitzrecomp/Blitz2026Recompiled");
-        if (fs::is_regular_file(stored_rom(), ec) && ftp.size_of("/data/blitzrecomp/blitz.z64") != (long)fs::file_size(stored_rom(), ec))
-            ftp.put(read_all(stored_rom()), "/data/blitzrecomp/blitz.z64");
-        bool setup_ok = true;
-        if (fs::path pak = season_pak_file(); !pak.empty()) {  // installed by the app at its next start
-            std::string dst = "/data/blitzrecomp/" + pak.filename().string();
-            if (ftp.size_of(dst) != (long)fs::file_size(pak, ec)) setup_ok = ftp.put(read_all(pak), dst);
-        }
-        for (const fs::path& f : setup_files()) setup_ok = ftp.put(read_all(f), "/data/blitzrecomp/Blitz2026Recompiled/" + f.filename().string()) && setup_ok;
-        if (setup_ok) ftp.put("1\n", "/data/blitzrecomp/Blitz2026Recompiled/builder_done");  // no Blitz Builder there (config.cpp)
-        ftp.close();
-        fprintf(stderr, "[send] PS5: %d files sent\n", sent);
-
-        // Start it: the launch payload to the ELF loader.
-        int s = blitz::net::open_tcp();
-        sockaddr_in a{};
-        a.sin_family = AF_INET;
-        a.sin_port = htons((uint16_t)(lp ? std::atoi(lp) : 9021));
-        bool started = s >= 0 && inet_pton(AF_INET, ip.c_str(), &a.sin_addr) == 1 && ::connect(s, (sockaddr*)&a, sizeof(a)) == 0;
-        if (started) {
-            std::string elf = read_all(launch);
-            const char* p = elf.data();
-            size_t n = elf.size();
-            while (n > 0) {
-                ssize_t k = blitz::net::send_some(s, p, n);
-                if (k <= 0) { started = false; break; }
-                p += k;
-                n -= (size_t)k;
-            }
-        }
-        if (!started) fprintf(stderr, "[send] the loader at %s:%d didn't take the payload (errno %d)\n", ip.c_str(), lp ? std::atoi(lp) : 9021, errno);
-        if (s >= 0) blitz::net::close_socket(s);
-        blitz::post_status(started ? "New Blitz is on the PS5 and starting" : "New Blitz is on the PS5: start it from the home screen");
+        std::string text = !r.launched ? "New Blitz is on the PS5. Start it from the home screen."
+                         : r.restarted == 0 ? "New Blitz is on the PS5. If the PS5 still shows the old game, close it and open New "
+                                              "Blitz from the home screen."
+                                            : "New Blitz is starting on your PS5.";
+        if (!r.setup_ok) text += " The ROM or the setup didn't copy: send again to finish.";
+        else if (r.set_up_already) text += " The PS5 kept its own Season and Rules settings.";
+        say(text);
         return true;
     }
 
     void in_background(std::function<bool()> job) {
         if (busy.exchange(true)) {
-            blitz::post_status("Already sending to a device");
+            say("Already sending to a device");
             return;
         }
+        state = 1;
+        {
+            std::lock_guard lock{said_mutex};
+            said.clear();
+        }
         std::thread([job] {
+            bool ok = false;
             try {
-                job();
+                ok = job();
             }
             catch (const std::exception& e) {
                 fprintf(stderr, "[send] %s\n", e.what());
-                blitz::post_status("Sending stopped: " + std::string(e.what()));
+                say("Sending stopped: " + std::string(e.what()));
             }
             busy = false;
+            state = ok ? 2 : 3;
         }).detach();
     }
 
@@ -604,6 +646,21 @@ namespace blitz {
         return fs::is_regular_file(ipa_kit(), ec);
     }
 
+    // The public build's Android app is in the kits (Save the APK; Send over USB too).
+    bool android_kit_available() {
+        std::error_code ec;
+        return fs::is_regular_file(apk_kit(), ec);
+    }
+
+    int device_send_state() { return state.load(); }
+    // The line under "Sending to your PS5…" (connecting, checking, "Sending 12 of 23 files · ..."); "" otherwise.
+    std::string device_send_progress() { return ps5_progress.text(); }
+    std::string device_send_message() {
+        std::lock_guard lock{said_mutex};
+        return said;
+    }
+    std::filesystem::path device_send_folder() { return saved_folder; }
+
     std::string ps5_last_address() {
         std::string a = read_all(ps5_address_file());
         while (!a.empty() && std::isspace((unsigned char)a.back())) a.pop_back();
@@ -616,17 +673,31 @@ namespace blitz {
     }
     void send_to_iphone() { in_background(send_iphone); }
     void save_iphone_ipa() { in_background(save_ipa); }
-    void send_to_android() { in_background(send_android); }
+    void save_android_apk() { in_background(save_apk); }
+    void send_to_android() { in_background([] { return send_android(false); }); }
+    void send_to_android_replacing() { in_background([] { return send_android(true); }); }
+    std::string device_send_problem() {
+        std::lock_guard lock{said_mutex};
+        return busy ? std::string() : android_problem;
+    }
 }
 #else
 namespace blitz {
     bool device_kits_available() { return false; }
     bool iphone_kit_available() { return false; }
     bool iphone_ipa_available() { return false; }
+    bool android_kit_available() { return false; }
     void save_iphone_ipa() {}
+    void save_android_apk() {}
+    int device_send_state() { return 3; }
+    std::string device_send_message() { return "This device can't send to another."; }
+    std::string device_send_progress() { return {}; }
+    std::filesystem::path device_send_folder() { return {}; }
     std::string ps5_last_address() { return {}; }
     void send_to_ps5(const std::string&) {}
     void send_to_iphone() {}
     void send_to_android() {}
+    void send_to_android_replacing() {}
+    std::string device_send_problem() { return {}; }
 }
 #endif

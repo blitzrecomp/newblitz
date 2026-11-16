@@ -27,6 +27,7 @@ Build steps: README.md.
 | BanjoRecomp | GPL-3.0. `src/main/main.cpp` and the root `CMakeLists.txt` started from its structure | file headers |
 | Zelda64Recomp patch headers | GPL-3.0, with RecompFrontend | patches/*.h |
 | SDL2 | zlib licence | built by tools/build_deps.sh (tools/deps.sha256) |
+| AppImage type2 runtime (the start of the Linux AppImage) | The AppImage project. MIT | github.com/AppImage/type2-runtime (tools/deps.sha256) |
 | FreeType | The FreeType Project. FreeType License | built by tools/build_deps.sh |
 | SDL_GameControllerDB | gabomdq and contributors. zlib licence | recompcontrollerdb.txt (its header names the source) |
 

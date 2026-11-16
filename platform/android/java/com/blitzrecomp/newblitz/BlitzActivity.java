@@ -122,6 +122,7 @@ public class BlitzActivity extends SDLActivity {
             if ("tdgsi_arm64_ab".equals(Build.DEVICE)) {
                 Os.setenv("BLITZ_NINTENDO_PAD", "1", true);
                 Os.setenv("BLITZ_SHOULDERS_ARE_TRIGGERS", "1", true);
+                Os.setenv("BLITZ_ONE_STICK", "1", true);  // L3 is a hotkey too there (controllers.cpp hotkey_down)
             }
             if (BlitzLauncher.lean(this)) {
                 Os.setenv("BLITZ_LEAN", "1", true);
@@ -399,6 +400,29 @@ public class BlitzActivity extends SDLActivity {
         } catch (Exception e) {
             Log.w(TAG, "httpGet " + url + ": " + e);
             return null;
+        } finally {
+            if (c != null) c.disconnect();
+        }
+    }
+
+    /** A POST of a body (crash reports, src/main/crash_report.cpp): the HTTP status, or 0 when it couldn't connect. */
+    public static int httpPost(String url, String contentType, byte[] body) {
+        HttpURLConnection c = null;
+        try {
+            c = (HttpURLConnection) new URL(url).openConnection();
+            c.setConnectTimeout(20000);
+            c.setReadTimeout(20000);
+            c.setRequestMethod("POST");
+            c.setDoOutput(true);
+            // BRANDING: HTTP User-Agent
+            c.setRequestProperty("User-Agent", "BlitzRecomp");
+            c.setRequestProperty("Content-Type", contentType);
+            c.setFixedLengthStreamingMode(body.length);
+            try (java.io.OutputStream o = c.getOutputStream()) { o.write(body); }
+            return c.getResponseCode();
+        } catch (Exception e) {
+            Log.w(TAG, "httpPost: " + e);
+            return 0;
         } finally {
             if (c != null) c.disconnect();
         }

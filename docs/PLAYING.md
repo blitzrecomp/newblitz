@@ -113,7 +113,7 @@ Rules → **Save Setup to File** saves the current codes as a file in the app fo
 
 Both go to **Pictures → New Blitz**. The first time, macOS asks to allow screen recording for the app.
 
-On Android the **hotkey + Select** (L3 or R3 held) saves a screenshot of both screens, the upper one on top, in **Pictures →
+On Android the **hotkey + Select** (R3 held, or L3 on a one-stick handheld) saves a screenshot of both screens, the upper one on top, in **Pictures →
 New Blitz**, where the gallery finds it; saved replays go there too. **Select** opens the menu, and so does a press of the
 device's own **Back** (an RG DS's side button, or the back gesture). Holding Back quits: after 2 seconds a note says to hold 3
 more, and at 5 the app closes, without asking to save. On GammaOS, though, the system takes a long Back itself: about half a
@@ -121,7 +121,7 @@ second in, it closes the app and goes back to its menu, before the app hears of 
 
 ## Save states (experimental)
 
-- **F5** (or on a controller, hold the hotkey, **L3 or R3**, a stick pressed in, and press **R1**) saves the game exactly as it is, mid-play included (on an RG DS, whose L1/R1 are turbo, it's **R2**, and **L2** loads; only a press made after the stick is in counts, so holding turbo and then pushing a stick in hard does nothing). **F7** (or **hotkey + L1**) loads it back, in this session or after quitting and reopening the app. A small note at the bottom right of the screen says "Slot 1: state saved" or "Slot 1: state loaded" and fades after a moment.
+- **F5** (or on a controller, hold the hotkey, **R3** (the right stick pressed in; L3 too on one-stick handhelds), and press **R1**) saves the game exactly as it is, mid-play included (on an RG DS, whose L1/R1 are turbo, it's **R2**, and **L2** loads; only a press made after the stick is in counts, so holding turbo and then pushing a stick in hard does nothing). **F7** (or **hotkey + L1**) loads it back, in this session or after quitting and reopening the app. A small note at the bottom right of the screen says "Slot 1: state saved" or "Slot 1: state loaded" and fades after a moment.
 - **Quitting during a game** (Cmd+Q, the window's close button or Settings → Quit) asks **Save this game?** **Save & Quit** saves it as it is. The next time the app opens, it asks **Pick up your game?** and Resume puts you straight back in. **Don't Save** asks once more before quitting. This saved game is separate from the three slots and is used up when you resume it.
 - **The hotkey's other buttons:** **□ / ○** (or **D-pad left / right**) pick the slot, **△** (or **D-pad up**) is Redo Play,
   **Select** takes a screenshot, and on two screens **Start** switches them. While it's held the game gets none of these.
@@ -133,7 +133,7 @@ second in, it closes the app and goes back to its menu, before the app hears of 
 
 ## Redo Play (experimental)
 
-Botched a kickoff, or want a do-over at a party? Hold the hotkey, **L3 or R3** (a stick pressed in), and press **△** or **D-pad up** (or **F8**) to run the last play again.
+Botched a kickoff, or want a do-over at a party? Hold the hotkey, **R3** (the right stick pressed in; L3 too on one-stick handhelds), and press **△** or **D-pad up** (or **F8**) to run the last play again.
 
 - During a play, or while its result is on screen, it goes back to that play's play select.
 - At play select it goes back one play more, and each press goes back another, up to 8 plays. Potato Mode keeps the last play only, and the menus have no step-back there: their snapshots are too much for a 1 GB handheld.

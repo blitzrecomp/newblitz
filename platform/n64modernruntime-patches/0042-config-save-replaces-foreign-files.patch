@@ -1,0 +1,44 @@
+--- a/librecomp/src/files.cpp
++++ b/librecomp/src/files.cpp
+@@ -1,4 +1,5 @@
+ #include "files.hpp"
++#include <cstdio>
+ 
+ constexpr std::u8string_view backup_suffix = u8".bak";
+ constexpr std::u8string_view temp_suffix = u8".temp";
+@@ -44,7 +45,14 @@
+     if (std::filesystem::exists(filepath, ec)) {
+         std::filesystem::copy_file(filepath, backup_path, std::filesystem::copy_options::overwrite_existing, ec);
+         if (ec) {
+-            return false;
++            // BlitzRecomp: a backup this app can't write over (another owner: the PS5's FTP server writes as root) is
++            // replaced; failing that the save goes on without one, rather than never saving again.
++            std::error_code ec2;
++            std::filesystem::remove(backup_path, ec2);
++            std::filesystem::copy_file(filepath, backup_path, std::filesystem::copy_options::overwrite_existing, ec2);
++            if (ec2) {
++                fprintf(stderr, "[files] no backup of %s (%s): saving without one\n", filepath.string().c_str(), ec.message().c_str());
++            }
+         }
+     }
+ #if defined(__PSP__)
+@@ -52,7 +60,18 @@
+ #endif
+     std::filesystem::copy_file(temp_path, filepath, std::filesystem::copy_options::overwrite_existing, ec);
+     if (ec) {
+-        return false;
++        // BlitzRecomp: the same for the file itself (on the PS5 a root-owned file can't be opened for writing, mode 777 or
++        // not, but the folder lets it be replaced): the new copy takes its place. A failure is logged and returned; the
++        // caller goes on (2026-11-15: rules.json.temp stuck beside a root-owned rules.json).
++        std::error_code ec2;
++        std::filesystem::remove(filepath, ec2);
++        std::filesystem::rename(temp_path, filepath, ec2);
++        if (ec2) {
++            fprintf(stderr, "[files] couldn't save %s: %s, then %s\n", filepath.string().c_str(), ec.message().c_str(), ec2.message().c_str());
++            return false;
++        }
++        fprintf(stderr, "[files] %s replaced (it couldn't be written over: %s)\n", filepath.string().c_str(), ec.message().c_str());
++        return true;
+     }
+     std::filesystem::remove(temp_path, ec);
+     return true;

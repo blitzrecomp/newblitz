@@ -1,0 +1,27 @@
+--- a/recompui/src/util/support_apple.mm
++++ b/recompui/src/util/support_apple.mm
+@@ -55,7 +55,23 @@
+                 dispatch_async(dispatch_get_main_queue(), ^{ cb(false, {}); });
+                 return;
+             }
+-            NSArray<UTType*>* types = folders ? @[UTTypeFolder] : @[UTTypeItem];
++            // A ROM's type may be claimed by an emulator (Delta's N64 type) without conforming to public.item, and the
++            // picker then greys the file out: offer the ROM extensions' own types too, whatever app declared them.
++            NSMutableArray<UTType*>* types = [NSMutableArray arrayWithObject:folders ? UTTypeFolder : UTTypeItem];
++            if (!folders) {
++                [types addObjectsFromArray:@[UTTypeData, UTTypeContent, UTTypeZIP]];
++                // Every type any app declared for the ROM extensions (Delta's included), not just the preferred one: the
++                // preferred lookup can return a dynamic type the file isn't tagged with, and the file stays greyed out.
++                for (NSString* ext in @[@"z64", @"n64", @"v64", @"zip"]) {
++                    for (UTType* t in [UTType typesWithTag:ext tagClass:UTTagClassFilenameExtension conformingToType:nil]) {
++                        if (![types containsObject:t]) [types addObject:t];
++                    }
++                }
++                for (NSString* known in @[@"com.rileytestut.delta.game.n64", @"com.rileytestut.delta.game"]) {  // Delta's own
++                    UTType* t = [UTType typeWithIdentifier:known];
++                    if (t != nil && ![types containsObject:t]) [types addObject:t];
++                }
++            }
+             UIDocumentPickerViewController* picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types asCopy:!folders];
+             picker.allowsMultipleSelection = multiple ? YES : NO;
+             recomp_picker_delegate = [RecompDocumentPicker new];

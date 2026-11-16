@@ -1,0 +1,36 @@
+diff --git a/recompui/src/composites/ui_prompt.cpp b/recompui/src/composites/ui_prompt.cpp
+--- a/recompui/src/composites/ui_prompt.cpp
++++ b/recompui/src/composites/ui_prompt.cpp
+@@ -230,6 +230,9 @@
+     prompt_state.prompt_controls->set_align_items(AlignItems::Center);
+     prompt_state.prompt_controls->set_gap(36, Unit::Dp);
+     prompt_state.prompt_controls->set_padding(30, Unit::Dp);
++    // Blitz: buttons size to their labels (ui_button.cpp); two that don't fit side by side stack, centred.
++    prompt_state.prompt_controls->set_flex_wrap(FlexWrap::Wrap);
++    prompt_state.prompt_controls->set_row_gap(24, Unit::Dp);
+ 
+     // Blitz '27: 52 px buttons at least 180 px wide; focus is the fill and rim alone (no outer ring).
+     prompt_state.confirm_button = context.create_element<Button>(prompt_state.prompt_controls, "", ButtonStyle::Primary, ButtonSize::Prompt);
+diff --git a/recompui/src/elements/ui_button.cpp b/recompui/src/elements/ui_button.cpp
+--- a/recompui/src/elements/ui_button.cpp
++++ b/recompui/src/elements/ui_button.cpp
+@@ -56,6 +56,9 @@
+         set_padding_left(button_padding_internal);
+ 
+         set_width_auto();
++        // Blitz: a button is as wide as its label and never squeezed below it; a row too narrow for its buttons wraps
++        // them (flex-wrap on the row) instead of wrapping the text inside one.
++        set_flex_shrink(0.0f);
+         set_height(float_size_internal);
+         set_min_height(float_size_internal);
+         set_max_height(float_size_internal);
+@@ -89,6 +92,9 @@
+                 label->set_font_size(34.0f);
+                 break;
+         }
++        // Blitz: one line, always ("JUST THE 1999 / GAME" wrapped inside a fixed button on a phone, 2026-11-15).
++        label->set_white_space(WhiteSpace::Nowrap);
++        label->set_flex_shrink(0.0f);
+ 
+         set_cursor(Cursor::Pointer);
+         set_color(theme::color::Text);

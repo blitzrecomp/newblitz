@@ -340,3 +340,26 @@ extern "C" void blitz_osMotorInit(uint8_t* rdram, recomp_context* ctx) {
             break;
     }
 }
+
+namespace blitz {
+    uint8_t* monitor_rdram();  // dev_monitor.cpp
+
+    // Game thread (osContGetReadData: controllers.cpp's port_input), for a connected port 2-4. The game looks at its ports only
+    // at boot and when it probes them (pak_probe 0x80004250, e.g. leaving the title screen), keeping what it found in a byte
+    // per port (0x8005DEFC + port: 0 nothing there, 1 a controller, 5 one with a Rumble Pak), and it reads no input from a
+    // port it found empty. So a controller that joined after that (a phone opening the page from the main menu, a pad
+    // switched on there) did nothing as player 2-4: no icon at Controller Select and no presses, on every platform (the team's
+    // phone as player 2 next to a DualSense on Windows, 2026-11-15; as player 1 a phone always worked: port 1 is always
+    // there). Mark the port as the probe would have: a controller with a Rumble Pak, its motor's channel set (an OSPfs per
+    // port at 0x8005E390, 0x68 apart). Only an empty port: what the game's own probe found stays. Controller Select makes its
+    // icons when it opens, so a controller that joins while it's up shows after backing out and going in again.
+    void game_port_plugged(int port) {
+        uint8_t* rdram = monitor_rdram();
+        if (rdram == nullptr || port < 1 || port > 3) return;
+        const gpr state = (gpr)(int32_t)(0x8005DEFC + port);
+        if (MEM_BU(0, state) != 0) return;
+        MEM_W(0x8, (gpr)(int32_t)(0x8005E390 + 0x68 * port)) = port;
+        MEM_B(0, state) = 5;
+        fprintf(stderr, "[pads] player %d joined after the game looked at its ports: marked plugged in\n", port + 1);
+    }
+}

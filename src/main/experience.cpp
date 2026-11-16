@@ -227,6 +227,23 @@ namespace blitz {
         if (other_engine_available()) remember(self_name);
     }
 
+    // Reset Data (reset_data.cpp): the shared folder that remembers which game opens next (BlitzRecomp, beside the app
+    // folders) goes; on the PS5, where the file sits in /data/blitzrecomp itself, only the file.
+    void experience_reset() {
+        std::error_code ec;
+        fs::path file = experience_file(), folder = file.parent_path();
+        if (folder.filename() == "BlitzRecomp") {
+            bool had = fs::exists(folder, ec);
+            std::uintmax_t n = had ? fs::remove_all(folder, ec) : 0;
+            fprintf(stderr, "[reset] experience folder %s: %s\n", folder.string().c_str(),
+                    !had ? "none" : ec ? ec.message().c_str() : (std::to_string((unsigned long long)n) + " removed").c_str());
+        }
+        else {
+            bool removed = fs::remove(file, ec);
+            fprintf(stderr, "[reset] experience file %s: %s\n", file.string().c_str(), ec ? ec.message().c_str() : removed ? "removed" : "none");
+        }
+    }
+
     // The launcher's Switch to …: remember it, then quit; main execs the other engine (experience_exec).
     void experience_switch() {
         if (!other_engine_available()) return;

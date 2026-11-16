@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "recompui/recompui.h"
@@ -114,8 +115,22 @@ namespace {
         struct Row { Button* button; Label* state; const Extra* extra; };
         std::vector<Row> rows;
         Label* about = nullptr;
+        Label* intro = nullptr;
         Button* first = nullptr;
     } sc;
+
+    // Opened by Blitz Builder's N64 or emulator path (firstrun.cpp): its Back goes back a step there, and Export tells
+    // it the export is under way. Both empty when opened any other way.
+    std::function<void()> setup_back, setup_exported;
+    std::string default_intro;
+
+    void close_back() {
+        recompui::hide_context(sc.context);
+        if (auto f = std::exchange(setup_back, nullptr)) {
+            setup_exported = nullptr;
+            f();
+        }
+    }
 
     void restyle() {
         uint32_t p = preset();
@@ -158,7 +173,7 @@ namespace {
         std::string_view get_type_name() override { return "ExportRoot"; }
         void process_event(const Event& e) override {
             if (e.type == EventType::MenuAction && std::get<EventMenuAction>(e.variant).action == MenuAction::Back) {
-                recompui::hide_context(sc.context);
+                close_back();
             }
         }
     public:
@@ -250,7 +265,9 @@ namespace {
         const char* intro = "A .z64 with your rosters and art built in, saved to your Downloads folder. The name says "
                             "when you made it.";
 #endif
-        text(content, intro, theme::Typography::Body, 15, Color{242, 242, 242, 255});
+        default_intro = intro;
+        sc.intro = text(content, intro, theme::Typography::Body, 15, Color{242, 242, 242, 255});
+        sc.intro->set_white_space(WhiteSpace::Normal);
 
         Element* cuts = row(content, 8);
         for (const Shortcut& s : shortcuts) {
@@ -354,19 +371,22 @@ namespace {
         bar->set_display(Display::Flex);
         bar->set_flex_direction(FlexDirection::Row);
         bar->set_justify_content(JustifyContent::FlexEnd);
+        bar->set_flex_wrap(FlexWrap::Wrap);
         bar->set_gap(blitz::ui::px(8));
         bar->set_margin_top(blitz::ui::px(6));
         bar->set_as_navigation_container(NavigationType::Horizontal);
         Button* back = sc.context.create_element<Button>(bar, "Back", ButtonStyle::Tertiary, ButtonSize::Card);
         back->hide_focus_ring();
         back->set_min_width(blitz::ui::px(110));
-        back->add_pressed_callback([] { recompui::hide_context(sc.context); });
+        back->add_pressed_callback([] { close_back(); });
         back->set_focus_callback([](bool f) { if (f) sc.about->set_text("Back to the menu, nothing exported."); });
         Button* go = sc.context.create_element<Button>(bar, "Export", ButtonStyle::Primary, ButtonSize::Card);
         go->hide_focus_ring();
         go->set_min_width(blitz::ui::px(140));
         go->add_pressed_callback([] {
             recompui::hide_context(sc.context);
+            setup_back = nullptr;
+            if (auto f = std::exchange(setup_exported, nullptr)) f();
             blitz::export_rom_go();
         });
         go->set_focus_callback([](bool f) { if (f) sc.about->set_text("Saves the ROM to your Downloads folder."); });
@@ -379,10 +399,37 @@ namespace blitz {
     // Settings → Export's Kind of ROM: its shortcut's values (with export_applying set by the caller).
     void export_preset_values(uint32_t value) { set_values(value); }
 
+    // Blitz Builder → N64 or emulator (firstrun.cpp): the screen as it is, with a line of its own first and Lite
+    // chosen (it fits a plain N64 and the emulators that freeze with Choose CPU Opponent).
+    void export_screen_open_for_setup(const std::string& lead, std::function<void()> back, std::function<void()> exported) {
+        void export_screen_open_with(const std::string& lead);
+        setup_back = std::move(back);
+        setup_exported = std::move(exported);
+#if BLITZ_ENGINE_ORIGINAL
+        if (blitz::season_content() && !blitz::original_game() && preset() != 1 && preset() != 3)
+            cfg().update_option_value("export_preset", (uint32_t)1);  // Lite: Season
+#endif
+        export_screen_open_with(lead);
+    }
+
+    void export_screen_close() {
+        setup_back = nullptr;
+        setup_exported = nullptr;
+        if (sc.context != ContextId::null() && recompui::is_context_shown(sc.context)) recompui::hide_context(sc.context);
+    }
+
     void export_screen_open() {
+        void export_screen_open_with(const std::string& lead);
+        setup_back = nullptr;
+        setup_exported = nullptr;
+        export_screen_open_with("");
+    }
+
+    void export_screen_open_with(const std::string& lead) {
         if (sc.context == ContextId::null()) build();
         if (recompui::is_context_shown(sc.context)) return;
         sc.context.open();
+        sc.intro->set_text(lead.empty() ? default_intro : lead + " " + default_intro);
 #if BLITZ_ENGINE_ORIGINAL
         // Original 1999 shows its own shortcut (and Custom) and no roster choice: the ROM's own teams go in. So does New
         // Blitz without the 2026 Season (2026-11-13): no 2026 rosters, season or uniforms to put on a cart.

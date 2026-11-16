@@ -7,6 +7,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
@@ -22,6 +23,7 @@ using ssize_t = long long;
 #include <net/if.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -132,6 +134,67 @@ namespace blitz::net {
 #else
         timeval t{ms / 1000, (ms % 1000) * 1000};
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &t, sizeof(t));
+#endif
+    }
+
+    // connect() that gives up after ms (a wrong address otherwise waits for the system's own timeout, about 75 s
+    // on a Mac): non-blocking, then select for the answer. 0 connected; ETIMEDOUT nothing answered in time;
+    // otherwise the error (ECONNREFUSED: the machine is there, nothing listens on the port). The socket is left
+    // blocking again.
+    inline int connect_within(int fd, const sockaddr_in& addr, int ms) {
+#ifdef _WIN32
+        SOCKET s = (SOCKET)fd;
+        u_long on = 1, off = 0;
+        ioctlsocket(s, FIONBIO, &on);
+        int result = 0;
+        if (::connect(s, (const sockaddr*)&addr, sizeof(addr)) != 0) {
+            int e = WSAGetLastError();
+            if (e != WSAEWOULDBLOCK && e != WSAEINPROGRESS) result = e == WSAECONNREFUSED ? ECONNREFUSED : e;
+            else {
+                fd_set w, x;
+                FD_ZERO(&w);
+                FD_ZERO(&x);
+                FD_SET(s, &w);
+                FD_SET(s, &x);  // a refused connect shows up here on Windows
+                timeval t{ms / 1000, (ms % 1000) * 1000};
+                int n = ::select(0, nullptr, &w, &x, &t);
+                if (n == 0) result = ETIMEDOUT;
+                else if (n < 0) result = WSAGetLastError();
+                else {
+                    int err = 0, len = sizeof(err);
+                    getsockopt(s, SOL_SOCKET, SO_ERROR, (char*)&err, &len);
+                    result = err == 0 && FD_ISSET(s, &w) ? 0 : err == WSAECONNREFUSED ? ECONNREFUSED : (err ? err : ECONNREFUSED);
+                }
+            }
+        }
+        ioctlsocket(s, FIONBIO, &off);
+        return result;
+#else
+        int flags = fcntl(fd, F_GETFL, 0);
+        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        int result = 0;
+        if (::connect(fd, (const sockaddr*)&addr, sizeof(addr)) != 0) {
+            if (errno != EINPROGRESS && errno != EINTR) result = errno;
+            else {
+                // select, not poll: the same call on every desktop (a fresh socket's number is far below FD_SETSIZE)
+                fd_set w;
+                FD_ZERO(&w);
+                FD_SET(fd, &w);
+                timeval t{ms / 1000, (ms % 1000) * 1000};
+                int n;
+                do n = ::select(fd + 1, nullptr, &w, nullptr, &t); while (n < 0 && errno == EINTR);
+                if (n == 0) result = ETIMEDOUT;
+                else if (n < 0) result = errno;
+                else {
+                    int err = 0;
+                    socklen_t len = sizeof(err);
+                    getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len);
+                    result = err;
+                }
+            }
+        }
+        fcntl(fd, F_SETFL, flags);
+        return result;
 #endif
     }
 

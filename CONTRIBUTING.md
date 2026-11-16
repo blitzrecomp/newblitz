@@ -2,7 +2,7 @@
 
 Thanks for helping keep Blitz alive. Start in **#dev** on our [Discord](https://discord.gg/AtcKN9dY5): say what you're making, ask when
 you're stuck. Bugs: #bugs, or an issue here with the zip from Settings → General → Save Logs. The
-[contributor guide](https://newblitz.pages.dev/contribute) covers roster packs, uniform sets, ports to new devices, and
+[contributor guide](https://newblitz.com/contribute) covers roster packs, uniform sets, ports to new devices, and
 prompts for AI coding agents.
 
 ## The one rule: no game data

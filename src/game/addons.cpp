@@ -46,6 +46,7 @@ namespace fs = std::filesystem;
 namespace blitz {
     void request_restart();  // main.cpp: Settings → Restart
     void export_rom_dialog();  // export_rom.cpp
+    void firstrun_settings_row(int which);  // firstrun.cpp: 6 Blitz Builder → N64 or emulator
     void post_status(const std::string& msg);
 #if BLITZ_MODERN
     void original_settings_visibility();  // adv_mode.cpp: the settings that need the 2026 Season
@@ -441,6 +442,7 @@ namespace recompui {
                 top->set_display(Display::Flex);
                 top->set_flex_direction(FlexDirection::Row);
                 top->set_align_items(AlignItems::Center);
+                top->set_flex_wrap(FlexWrap::Wrap);  // buttons keep their labels' width (ui_button.cpp): a narrow window wraps them
                 top->set_gap(14.0f);
                 top->set_as_navigation_container(NavigationType::GridRow);
                 Button* add = context.create_element<Button>(top, "Add…", ButtonStyle::Primary, ButtonSize::Card);
@@ -487,8 +489,9 @@ namespace recompui {
                     blitz::open_in_file_browser(app());
                 });
                 if (blitz::export_available) {
-                    Button* exp = context.create_element<Button>(top, "Export ROM", ButtonStyle::Tertiary, ButtonSize::Card);
-                    exp->add_pressed_callback([]() { blitz::export_rom_dialog(); });
+                    // Export ROM is Blitz Builder's N64 or emulator path now (team, 2026-11-15): this opens it there.
+                    Button* exp = context.create_element<Button>(top, "N64 or Emulator", ButtonStyle::Tertiary, ButtonSize::Card);
+                    exp->add_pressed_callback([]() { blitz::firstrun_settings_row(6); });
                 }
                 restart = context.create_element<Button>(top, "Restart", ButtonStyle::Secondary, ButtonSize::Card);
                 restart->add_pressed_callback([]() { blitz::request_restart(); });

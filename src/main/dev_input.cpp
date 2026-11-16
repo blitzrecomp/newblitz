@@ -281,6 +281,17 @@ namespace {
             recompui::open_quit_game_prompt();
             return true;
         }
+        if (word == "PROMPT") {  // "PROMPT Title|Text|Confirm|Cancel": a two-button prompt, to check how its buttons lay out
+            std::string rest;
+            std::getline(ss, rest);
+            std::vector<std::string> parts;
+            std::stringstream ps{rest.empty() ? rest : rest.substr(1)};
+            for (std::string p; std::getline(ps, p, '|');) parts.push_back(p);
+            parts.resize(4);
+            recompui::open_choice_prompt(parts[0], parts[1], parts[2], parts[3], [] {}, [] {},
+                                         recompui::ButtonStyle::Primary, recompui::ButtonStyle::Secondary, false);
+            return true;
+        }
         if (word == "QUIT") {  // as confirming the quit prompt does
             ultramodern::quit();
             return true;
@@ -438,6 +449,12 @@ namespace blitz {
     void dev_input_game_started() {
         if (!live_mode) game_start = std::chrono::steady_clock::now();  // live presses keep their own clock
         started = true;
+    }
+
+    // The launcher's and first run's screens (main.cpp, at start): the live file's commands (KEY Return, KEY Down ...)
+    // are read from the start, not only once the game polls its controllers. Presses still wait for the game.
+    void dev_input_early() {
+        if (getenv("BLITZ_INPUT_LIVE") != nullptr) std::call_once(parsed, parse);
     }
 
     bool port_input(int port, uint16_t* buttons, float* x, float* y);  // controllers.cpp

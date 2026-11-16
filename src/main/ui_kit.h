@@ -43,8 +43,16 @@ namespace blitz::ui {
     // Swaps a panel's frame (e.g. a player's colour when a controller connects).
     void set_panel_frame(recompui::ContextId ctx, recompui::Element* box, const char* frame);
 
-    // Registers the kit as recompui's panel decorator (prompts and their title strips). Before the UI exists.
+    // Registers the kit as recompui's panel decorator (prompts and their title strips), and touch_only() as recompui's
+    // touch-only check (hint rows). Before the UI exists.
     void register_decorators();
+
+    // A phone (or tablet) played by touch alone: no controller connected, and the last key wasn't from a keyboard.
+    // Button hints then name what's on screen to tap, not keys. BLITZ_TOUCH_ONLY=1 forces it on a computer (dev).
+    bool touch_only();
+    // Main thread (controllers_update), every ~100 ms: whether a controller's connected, for touch_only. touch_only runs in
+    // the draw under the UI lock and must not ask SDL there.
+    void touch_only_refresh();
 
     // Chrome "[ ]" caps outside a row's ends (the row must be positioned: relative or absolute) (the focused-item look); returns the two cap holders so
     // callers can show or hide them.

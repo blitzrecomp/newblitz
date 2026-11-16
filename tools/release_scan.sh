@@ -3,8 +3,9 @@
 #
 #   tools/release_scan.sh <artifact or folder>...       e.g. tools/release_scan.sh build/release/0.9.1
 #
-# Every artifact is unpacked (zips, .tar.gz, and the .ipa/.apk inside them, as deep as they go) and every file, binary
-# or not, is searched for:
+# Every artifact is unpacked (zips, .tar.gz, the Mac .dmg (attached read-only, copied, detached), the Linux .AppImage
+# (its squashfs read with unsquashfs: no Linux needed), the Windows *Setup*.exe (NSIS, with 7z), and the .ipa/.apk inside
+# them, as deep as they go) and every file, binary or not, is searched for:
 #   - this machine's home folder and user name, as paths (/Users/<name>, /home/<name>, C:\Users\<name>), in ASCII and
 #     UTF-16 (Windows resources);
 #   - the developer's own name and address: this checkout's git identity (family name, e-mail and the part before the
@@ -20,6 +21,7 @@
 #
 # BLITZ_SECRETS_DIR=<folder>: another build/ folder whose secret files count too (a worktree's build/ may lack them).
 # Hits print as "<archive>!<file>: <what>", never the secret itself. Exit 1 on any hit.
+# Tools beyond macOS's: unsquashfs for an AppImage (brew install squashfs), 7z for an installer (brew install p7zip).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 [ $# -gt 0 ] || { sed -n '2,4p' "$0"; exit 2; }
@@ -59,6 +61,46 @@ unpack() {  # archive dest
                 echo "${1#"$WORK"/in.*/}: tar entries owned by the user name"; echo hit >> "$WORK/hits"
             fi
             tar -xzf "$1" -C "$2" ;;
+        *.dmg)
+            # Read-only, never shown in the Finder; its contents copied out (links stay links), then detached.
+            local mnt="$WORK/mnt.$RANDOM$RANDOM"
+            mkdir -p "$mnt"
+            hdiutil attach -quiet -readonly -nobrowse -noautoopen -mountpoint "$mnt" "$1" \
+                || { echo "${1#"$WORK"/in.*/}: can't attach"; echo hit >> "$WORK/hits"; return 0; }
+            ditto "$mnt" "$2" || { echo "${1#"$WORK"/in.*/}: can't copy out"; echo hit >> "$WORK/hits"; }
+            hdiutil detach -quiet "$mnt" || hdiutil detach -quiet -force "$mnt" ;;
+        *.appimage|*.AppImage)
+            # An AppImage is the runtime (an ELF file) with a squashfs straight after it: the ELF's own size says where.
+            command -v unsquashfs >/dev/null || { echo "unsquashfs is needed for an AppImage: brew install squashfs"; exit 2; }
+            local off
+            off=$(python3 -I - "$1" <<'PY'
+import struct, sys
+d = open(sys.argv[1], "rb").read(1 << 22)
+if d[:4] != b"\x7fELF" or d[4] != 2:
+    sys.exit("not a 64-bit ELF")
+shoff, = struct.unpack_from("<Q", d, 0x28)
+shentsize, shnum = struct.unpack_from("<HH", d, 0x3A)
+off = shoff + shentsize * shnum
+if d[off:off + 4] != b"hsqs":
+    off = d.find(b"hsqs")
+if off < 0:
+    sys.exit("no squashfs")
+print(off)
+PY
+            ) || { echo "${1#"$WORK"/in.*/}: not an AppImage"; echo hit >> "$WORK/hits"; return 0; }
+            local owners
+            owners=$(unsquashfs -o "$off" -lln "$1" | awk '{print $2}' | sort -u)
+            if grep -q "^$(id -u)/" <<< "$owners"; then
+                echo "${1#"$WORK"/in.*/}: squashfs entries owned by this user"; echo hit >> "$WORK/hits"
+            fi
+            unsquashfs -q -n -f -o "$off" -d "$2" "$1" > /dev/null ;;
+        *.exe|*.EXE)
+            command -v 7z >/dev/null || { echo "7z is needed for the installer: brew install p7zip"; exit 2; }
+            local listing
+            listing=$(7z l "$1" 2>&1 || true)
+            grep -q '^Type = Nsis' <<< "$listing" \
+                || { echo "${1#"$WORK"/in.*/}: not an NSIS installer"; echo hit >> "$WORK/hits"; return 0; }
+            7z x -y -bd -o"$2" "$1" > /dev/null ;;
         *) ditto -x -k "$1" "$2" 2>/dev/null || unzip -q -o "$1" -d "$2" ;;
     esac
 }
@@ -70,7 +112,8 @@ for depth in 1 2 3 4; do
     found=0
     while IFS= read -r -d '' f; do
         unpack "$f" "$f!" && rm -f "$f"; found=1
-    done < <(find "$WORK"/in.* -type f \( -iname '*.zip' -o -iname '*.ipa' -o -iname '*.apk' -o -iname '*.tar.gz' -o -iname '*.tgz' \) -print0)
+    done < <(find "$WORK"/in.* -type f \( -iname '*.zip' -o -iname '*.ipa' -o -iname '*.apk' -o -iname '*.tar.gz' -o -iname '*.tgz' \
+        -o -iname '*.dmg' -o -iname '*.appimage' -o -iname '*setup*.exe' \) -print0)
     [ $found = 1 ] || break
 done
 

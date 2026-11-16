@@ -1,6 +1,7 @@
 #include "ui_kit.h"
 
 #include <array>
+#include <atomic>
 #include <cstdlib>
 #include <filesystem>
 #include <limits>
@@ -11,6 +12,8 @@
 #include <vector>
 
 #include "util/file.h"
+#include "SDL2/SDL.h"
+#include "blitz_platform.h"
 
 namespace {
     using namespace recompui;
@@ -127,7 +130,35 @@ namespace blitz::ui {
         for (int i = 0; i < 9; i++) it->second[i]->set_src(src(std::string(frame) + "." + parts[i]));
     }
 
+    // Whether a controller's connected, as the main thread last saw it (touch_only_refresh). touch_only runs in the draw,
+    // holding the UI lock, where asking SDL (its joystick lock) can deadlock with a pad event on Android's UI thread: on an
+    // RG DS with two screens a pad press in Settings froze the game that way (2026-11-15).
+    std::atomic<bool> any_controller{false};
+
+    void touch_only_refresh() {
+        static Uint32 last = 0;
+        Uint32 now = SDL_GetTicks();
+        if (last != 0 && now - last < 100) return;
+        last = now | 1;
+        bool any = false;
+        for (int i = 0; i < SDL_NumJoysticks(); i++) {
+            if (SDL_IsGameController(i)) {
+                any = true;
+                break;
+            }
+        }
+        any_controller = any;
+    }
+
+    bool touch_only() {
+        static const bool forced = getenv("BLITZ_TOUCH_ONLY") != nullptr;
+        if (!blitz::platform::touch_controls && !forced) return false;
+        if (recompui::get_keyboard_last()) return false;  // an iPad's keyboard: its keys, from the first press
+        return !any_controller.load();
+    }
+
     void register_decorators() {
+        recompui::set_touch_only_check(touch_only);
         recompui::set_panel_decorator([](ContextId ctx, Element* box, const char* kind) -> Element* {
             std::string k = kind;
             if (k == "prompt") {

@@ -88,6 +88,43 @@ namespace blitz {
 }
 
 namespace blitz {
+    // A blocking HTTP POST (call it off the main thread): true on a 2xx answer. Crash reports (crash_report.cpp).
+    bool http_post(const std::string& url, const std::string& content_type, const std::string& body, int& status) {
+        status = 0;
+        std::wstring wurl = widen(url);
+        URL_COMPONENTS parts{};
+        parts.dwStructSize = sizeof(parts);
+        wchar_t host[256], path[2048];
+        parts.lpszHostName = host;
+        parts.dwHostNameLength = (DWORD)std::size(host);
+        parts.lpszUrlPath = path;
+        parts.dwUrlPathLength = (DWORD)std::size(path);
+        parts.dwExtraInfoLength = 1;
+        if (!WinHttpCrackUrl(wurl.c_str(), 0, 0, &parts)) return false;
+        std::wstring object(parts.lpszUrlPath, parts.dwUrlPathLength);
+        if (parts.lpszExtraInfo && parts.dwExtraInfoLength) object.append(parts.lpszExtraInfo, parts.dwExtraInfoLength);
+        // BRANDING: HTTP User-Agent
+        Handle session{WinHttpOpen(L"BlitzRecomp", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0)};
+        if (!session.h) return false;
+        WinHttpSetTimeouts(session.h, 20000, 20000, 20000, 20000);
+        Handle connection{WinHttpConnect(session.h, std::wstring(parts.lpszHostName, parts.dwHostNameLength).c_str(), parts.nPort, 0)};
+        if (!connection.h) return false;
+        DWORD flags = parts.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0;
+        Handle request{WinHttpOpenRequest(connection.h, L"POST", object.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags)};
+        if (!request.h) return false;
+        std::wstring headers = L"Content-Type: " + widen(content_type) + L"\r\n";
+        if (!WinHttpSendRequest(request.h, headers.c_str(), (DWORD)-1L, (LPVOID)body.data(), (DWORD)body.size(), (DWORD)body.size(), 0) ||
+            !WinHttpReceiveResponse(request.h, nullptr))
+            return false;
+        DWORD code = 0, size = sizeof(code);
+        WinHttpQueryHeaders(request.h, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &code, &size,
+                            WINHTTP_NO_HEADER_INDEX);
+        status = (int)code;
+        return code >= 200 && code < 300;
+    }
+}
+
+namespace blitz {
     // A computer has file dialogs: no drop folder.
     std::filesystem::path rom_drop_folder() { return {}; }
 }

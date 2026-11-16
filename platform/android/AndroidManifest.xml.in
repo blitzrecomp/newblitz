@@ -76,9 +76,15 @@
             android:theme="@android:style/Theme.Translucent.NoTitleBar"
             android:excludeFromRecents="true"
             android:noHistory="true" />
+        <!-- Potato Mode's first launch: setup's ROM screen before the game loads. A task of its own, so on two screens it can
+             open on the lower one, the touch screen, whichever the launcher's on (BlitzLauncher.startRomFirst). -->
         <activity android:name="com.blitzrecomp.newblitz.BlitzRomFirst"
             android:label="@BLITZ_BUNDLE_NAME@"
-            android:exported="false" />
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:taskAffinity="@BLITZ_ANDROID_PACKAGE@.romfirst"
+            android:screenOrientation="sensorLandscape"
+            android:resizeableActivity="true" />
         <activity android:name="com.blitzrecomp.newblitz.BlitzLauncher"
             android:label="@BLITZ_BUNDLE_NAME@"
             android:exported="true"

@@ -46,6 +46,7 @@ extern "C" int blitz_touch_port(void);  // savestate.cpp: the player BLITZ DS's 
 
 #include <atomic>
 namespace blitz { std::atomic<bool> digital_trigger[2]{}; }
+namespace blitz::ui { void touch_only_refresh(); }  // ui_kit.cpp
 namespace blitz { extern std::atomic<bool> hotkey_held; }
 // ui_state.cpp: Select with the hotkey is a screenshot, so it mustn't open the menu too.
 extern "C" int blitz_hotkey_held(void) { return blitz::hotkey_held.load() ? 1 : 0; }
@@ -59,11 +60,12 @@ namespace blitz {
     bool replay_is_open();
     void capture_screenshot();              // capture.cpp
     void toggle_development();              // config.cpp: the Development settings rows
-    std::atomic<bool> hotkey_held{false};   // L3 or R3 held on any controller (the main thread's last look)
+    std::atomic<bool> hotkey_held{false};   // the hotkey (hotkey_down) held on any controller (the main thread's last look)
     void touch_controls_read(uint16_t* buttons, float* x, float* y);  // touch_controls.cpp
     bool player1_rumble();  // config.cpp: Settings → General → Player 1 Rumble
     int fullscreen_button();  // config.cpp: Settings → General → Fullscreen Button
     bool savestate_buttons();  // config.cpp: Settings → General → Save State Buttons
+    void game_port_plugged(int port);  // controller_pak.cpp: tells the game a port it found empty has a controller now
     int button_icons();        // config.cpp: Settings → General → Button Icons
     // dev_input.cpp: scripted presses for a port (port > 0, for virtual controllers).
     void dev_scripted_state(int port, uint16_t* buttons, float* x, float* y, bool* any);
@@ -303,7 +305,7 @@ namespace {
     // A press too quick for the game to see: buttons are looked at once per game read, under 20-30 reads a second on a
     // slow handheld, so a tap that went down and up between two reads was lost and needed pressing again (team, RG DS).
     // Each press is kept for the next read of its controller (if within 150 ms: a press made while the menu had the
-    // pad isn't handed to the game later). Presses with L3 or R3 held are the hotkey's, not kept. Only SDL's own events
+    // pad isn't handed to the game later). Presses with the hotkey held (hotkey_down) are the hotkey's, not kept. Only SDL's own events
     // are used here, no SDL calls (its joystick lock is held while events are sent).
     struct Latch { uint32_t held = 0; uint32_t kept = 0; uint64_t at[SDL_CONTROLLER_BUTTON_MAX] = {}; };
     std::mutex latch_mutex;
@@ -359,16 +361,26 @@ namespace {
         return std::clamp(v, 0.0f, 1.0f);
     }
 
+    // The hotkey button on this pad: R3. L3 too only on a one-stick handheld (an RG DS, BLITZ_ONE_STICK from BlitzActivity) or
+    // a pad without a right stick: on a two-stick pad, the left stick clicks in by accident while running and pressing
+    // another button (team, 2026-11-15).
+    bool hotkey_down(SDL_GameController* c) {
+        if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_RIGHTSTICK)) return true;
+        static const bool one_stick_device = getenv("BLITZ_ONE_STICK") != nullptr;
+        const bool one_stick = one_stick_device || !SDL_GameControllerHasAxis(c, SDL_CONTROLLER_AXIS_RIGHTX);
+        return one_stick && SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_LEFTSTICK);
+    }
+
     // The N64 state of one controller under the Controls tab's controller bindings.
     void read_controller(SDL_GameController* c, uint16_t* buttons, float* x, float* y) {
         using recompinput::GameInput;
         int profile = recompinput::profiles::get_sp_controller_profile_index();
-        // L3 or R3 held is the hotkey (below): with one of its buttons down too, the press is the combo's, not the game's,
+        // The hotkey held (hotkey_down): with one of its buttons down too, the press is the combo's, not the game's,
         // so Redo in a menu doesn't also move the cursor. A stick clicked in alone (pushed hard on a handheld) keeps them.
         bool combo = false;
         static const bool shoulders_turbo = getenv("BLITZ_SHOULDERS_ARE_TRIGGERS") != nullptr;
         reading_kept = take_kept(c);
-        if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_RIGHTSTICK) || SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_LEFTSTICK)) {
+        if (hotkey_down(c)) {
             // Turbo held (an RG DS's L1/R1) while a stick is pushed hard isn't a combo: the save/load buttons there are L2/R2.
             if (!shoulders_turbo && (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) || SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_LEFTSHOULDER))) combo = true;
             for (SDL_GameControllerButton b : {SDL_CONTROLLER_BUTTON_X,
@@ -504,6 +516,7 @@ namespace blitz {
     // Main thread, from update_gfx (about every millisecond); the device scan runs every 100 ms.
     void controllers_update() {
         ui_late_init();
+        blitz::ui::touch_only_refresh();  // ui_kit.cpp: what touch_only reads in the draw, which mustn't ask SDL
         std::vector<std::pair<bool, int>> todo;
         std::string menu;
         std::vector<std::array<std::string, 3>> configs;
@@ -585,7 +598,8 @@ namespace blitz {
             if (down && !was_down) recompui::config::graphics::toggle_fullscreen();
             was_down = down;
         }
-        // The hotkey: L3 or R3 held, on any controller (team, 2026-11-02), the way handhelds' RetroArch hotkeys go. With it:
+        // The hotkey: R3 held (L3 too on a one-stick handheld: hotkey_down), on any controller (team, 2026-11-02 and 11-15), the
+        // way handhelds' RetroArch hotkeys go. With it:
         //   R1 saves a state, L1 loads it (Settings → General → Save State Buttons);
         //   □ / ○ (or D-pad left / right) step the slot back / on, △ (or D-pad up) is Redo Play;
         //   Start steps through the DS screens, on two screens; Select takes a screenshot.
@@ -610,7 +624,7 @@ namespace blitz {
                     auto trigger = [&](SDL_GameControllerAxis a, int side) {
                         return SDL_GameControllerGetAxis(p.controller, a) > 24000 || digital_trigger[side].load();
                     };
-                    if (!pressed(SDL_CONTROLLER_BUTTON_RIGHTSTICK) && !pressed(SDL_CONTROLLER_BUTTON_LEFTSTICK)) continue;
+                    if (!hotkey_down(p.controller)) continue;
                     any_hotkey = true;
                     const bool states = savestate_buttons();
                     if (states && (shoulders_turbo ? trigger(SDL_CONTROLLER_AXIS_TRIGGERRIGHT, 1) : pressed(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER))) down |= k_save;
@@ -784,6 +798,7 @@ namespace blitz {
         *x = 0;
         *y = 0;
         if (!port_connected(port)) return false;
+        if (port > 0) game_port_plugged(port);  // joined after the game last looked at its ports (controller_pak.cpp)
         if (recompinput::game_input_disabled()) return true;
         {
             std::lock_guard lock{pads_mutex};

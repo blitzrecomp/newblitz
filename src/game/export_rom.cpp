@@ -664,6 +664,8 @@ namespace {
         return keep;
     }
 
+    std::string last_path;  // the last export's file (Blitz Builder says where it went)
+
     std::string export_now(std::string& detail) {
 #if BLITZ_MODERN
         // The players the Rosters option asks for, for this export only.
@@ -848,6 +850,7 @@ namespace {
             detail += ".";
         }
         fprintf(stderr, "[export] %s (%zu bytes, %d teams in 2026 uniforms)\n", out.string().c_str(), rom.size(), uniforms);
+        last_path = out.string();
         if (reveal_it) blitz::reveal_in_file_browser(out);
         return "";
     }
@@ -856,6 +859,7 @@ namespace {
 }
 
 namespace blitz {
+    bool firstrun_export_finished(bool ok, const std::string& path, const std::string& detail);  // firstrun.cpp
     void export_screen_open();  // export_screen.cpp
     extern bool export_applying;  // export_screen.cpp: a shortcut is setting the toggles
     void export_preset_values(uint32_t value);
@@ -863,7 +867,11 @@ namespace blitz {
     // The export, with the game running, and what was saved.
     void export_rom_finish() {
         std::string detail;
+        last_path.clear();
         std::string problem = export_now(detail);
+        // Blitz Builder's N64 or emulator path says where it went on its own last screen.
+        if (blitz::firstrun_export_finished(problem.empty(), last_path, problem.empty() ? detail : "The ROM wasn't saved: " + problem + "."))
+            return;
         if (problem.empty()) recompui::open_info_prompt("ROM exported", detail, "OK", [] {}, recompui::ButtonStyle::Secondary);
         else recompui::open_info_prompt("Couldn't export", "The ROM wasn't saved: " + problem + ".", "OK", [] {}, recompui::ButtonStyle::Secondary);
     }

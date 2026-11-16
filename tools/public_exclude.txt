@@ -82,3 +82,4 @@ docs/LAUNCH.md
 # Launch trailer working notes (2026-11-14): the shot list and the designer's brief, written for the two of us.
 docs/TRAILER_SHOTS.md
 docs/design/TRAILER_GRAPHICS_PROMPT.md
+docs/design/GITHUB_BANNER_BRIEF.md

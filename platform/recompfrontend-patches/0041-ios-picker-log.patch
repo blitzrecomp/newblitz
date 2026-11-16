@@ -1,0 +1,53 @@
+--- a/recompui/src/util/support_apple.mm
++++ b/recompui/src/util/support_apple.mm
+@@ -55,8 +55,9 @@
+                 dispatch_async(dispatch_get_main_queue(), ^{ cb(false, {}); });
+                 return;
+             }
+-            // A ROM's type may be claimed by an emulator (Delta's N64 type) without conforming to public.item, and the
+-            // picker then greys the file out: offer the ROM extensions' own types too, whatever app declared them.
++            // A ROM's type may be claimed by an emulator (Delta exports com.rileytestut.delta.game.n64 for .z64/.n64), and
++            // with Delta installed the picker greyed the .z64 out even for public.item (the team's iPhone, iOS 27): offer the
++            // ROM extensions' own types too, whatever app declared them, and the app's imported N64 ROM type (Info.plist).
+             NSMutableArray<UTType*>* types = [NSMutableArray arrayWithObject:folders ? UTTypeFolder : UTTypeItem];
+             if (!folders) {
+                 [types addObjectsFromArray:@[UTTypeData, UTTypeContent, UTTypeZIP]];
+@@ -67,11 +68,29 @@
+                         if (![types containsObject:t]) [types addObject:t];
+                     }
+                 }
+-                for (NSString* known in @[@"com.rileytestut.delta.game.n64", @"com.rileytestut.delta.game"]) {  // Delta's own
++                for (NSString* known in @[@"com.blitzrecomp.n64-rom", @"com.rileytestut.delta.game.n64", @"com.rileytestut.delta.game"]) {
+                     UTType* t = [UTType typeWithIdentifier:known];
+                     if (t != nil && ![types containsObject:t]) [types addObject:t];
+                 }
+             }
++            // The device log says what the picker was offered (declared or dynamic here) and what a .z64 is to this app.
++            {
++                NSMutableArray<NSString*>* names = [NSMutableArray array];
++                for (UTType* t in types) {
++                    [names addObject:[NSString stringWithFormat:@"%@%s%s", t.identifier, t.isDeclared ? "" : " (undeclared)",
++                                      t.isDynamic ? " (dynamic)" : ""]];
++                }
++                fprintf(stderr, "[picker] %s types: %s\n", folders ? "folder" : "file", [[names componentsJoinedByString:@", "] UTF8String]);
++                if (!folders) {
++                    for (NSString* ext in @[@"z64", @"zip"]) {
++                        UTType* t = [UTType typeWithFilenameExtension:ext];
++                        NSMutableArray<NSString*>* supers = [NSMutableArray array];
++                        for (UTType* s in t.supertypes) [supers addObject:s.identifier];
++                        fprintf(stderr, "[picker] .%s is %s here, conforms to %s\n", [ext UTF8String],
++                                t ? [t.identifier UTF8String] : "nothing", [[supers componentsJoinedByString:@", "] UTF8String]);
++                    }
++                }
++            }
+             UIDocumentPickerViewController* picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types asCopy:!folders];
+             picker.allowsMultipleSelection = multiple ? YES : NO;
+             recomp_picker_delegate = [RecompDocumentPicker new];
+@@ -81,6 +100,7 @@
+                     if ([url isFileURL] && [url path] != nil) paths.emplace_back([[url path] UTF8String]);
+                 }
+                 bool ok = !paths.empty();
++                fprintf(stderr, "[picker] %s\n", ok ? ("picked " + paths.front().filename().string()).c_str() : "closed without a file");
+                 dispatch_async(dispatch_get_main_queue(), ^{ cb(ok, paths); recomp_picker_delegate = nil; });
+             };
+             picker.delegate = recomp_picker_delegate;

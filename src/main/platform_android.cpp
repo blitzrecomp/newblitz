@@ -93,6 +93,24 @@ namespace blitz {
         return status == 200;
     }
 
+    // BlitzActivity.httpPost: the same HttpURLConnection. Crash reports (crash_report.cpp).
+    bool http_post(const std::string& url, const std::string& content_type, const std::string& body, int& status) {
+        status = 0;
+        Activity a;
+        if (!a) return false;
+        jmethodID m = a.method("httpPost", "(Ljava/lang/String;Ljava/lang/String;[B)I");
+        if (!m) return false;
+        JNIEnv* env = a.env;
+        jstring ju = jstr(env, url), jt = jstr(env, content_type);
+        jbyteArray jb = env->NewByteArray((jsize)body.size());
+        if (!body.empty()) env->SetByteArrayRegion(jb, 0, (jsize)body.size(), reinterpret_cast<const jbyte*>(body.data()));
+        jint code = env->CallStaticIntMethod(a.cls, m, ju, jt, jb);
+        bool threw = a.failed("httpPost");
+        for (jobject o : {(jobject)ju, (jobject)jt, (jobject)jb}) env->DeleteLocalRef(o);
+        status = threw ? 0 : code;
+        return status >= 200 && status < 300;
+    }
+
     // The app's external files folder (Android/data/<package>/files): adb push and file managers reach it.
     std::filesystem::path rom_drop_folder() {
         const char* p = SDL_AndroidGetExternalStoragePath();
@@ -109,19 +127,56 @@ namespace {
         return window && SDL_GetWindowWMInfo(window, &info) ? info.info.android.window : nullptr;
     }
 
+    // The game's surface as Android has it now, held (ANativeWindow_fromSurface acquires it): nullptr while there's none, or
+    // one on its way out. SDL's own pointer (sdl_native_window) is SDL's to release when the surface goes, on Java's thread,
+    // so a copy of it can be freed memory by the time it's used (the team's RG DS, 2026-11-15: the renderer made its swap chain on a
+    // window minimized a moment before, and crashed in RefBase::incStrong).
+    ANativeWindow* acquire_current_window() {
+        Activity a;
+        if (!a) return nullptr;
+        jmethodID m = a.method("getNativeSurface", "()Landroid/view/Surface;");  // SDLActivity's
+        if (!m) return nullptr;
+        jobject surface = a.env->CallStaticObjectMethod(a.cls, m);
+        if (a.failed("getNativeSurface") || surface == nullptr) return nullptr;
+        ANativeWindow* w = ANativeWindow_fromSurface(a.env, surface);
+        a.env->DeleteLocalRef(surface);
+        if (w != nullptr && (ANativeWindow_getWidth(w) <= 0 || ANativeWindow_getHeight(w) <= 0)) {  // abandoned
+            ANativeWindow_release(w);
+            w = nullptr;
+        }
+        return w;
+    }
+
+    // The window Plume follows (plume_android_set_window keeps only the pointer), held here until the next one replaces it, so
+    // it can't be freed under Plume before Plume takes its own reference.
+    std::mutex plume_window_mutex;
+    ANativeWindow* plume_window = nullptr;
+    void set_plume_window(ANativeWindow* held) {
+        std::lock_guard lock{plume_window_mutex};
+        plume_android_set_window(held);
+        if (plume_window != nullptr) ANativeWindow_release(plume_window);
+        plume_window = held;
+    }
+
     // Android takes the app's window away in the background and gives it a new one back: the renderer follows. A low-memory
     // warning goes in the log.
     int on_app_event(void* window, SDL_Event* e) {
         switch (e->type) {
             case SDL_APP_WILLENTERBACKGROUND:
             case SDL_APP_DIDENTERBACKGROUND:
-                plume_android_set_window(nullptr);
+                set_plume_window(nullptr);
                 fprintf(stderr, "[android] background\n");
                 break;
-            case SDL_APP_DIDENTERFOREGROUND:
-                plume_android_set_window(sdl_native_window(static_cast<SDL_Window*>(window)));
-                fprintf(stderr, "[android] foreground\n");
+            case SDL_APP_DIDENTERFOREGROUND: {
+                ANativeWindow* w = acquire_current_window();
+                if (w == nullptr) {  // no surface yet: SDL's, as before (Plume takes its own reference when it uses it)
+                    w = sdl_native_window(static_cast<SDL_Window*>(window));
+                    if (w != nullptr) ANativeWindow_acquire(w);
+                }
+                set_plume_window(w);
+                fprintf(stderr, "[android] foreground%s\n", w == nullptr ? ", no surface yet" : "");
                 break;
+            }
             case SDL_APP_LOWMEMORY:  // SDL's onLowMemory; BlitzActivity logs onTrimMemory's levels
                 fprintf(stderr, "[pressure] SDL low memory\n");
                 break;
@@ -134,8 +189,32 @@ namespace {
 
 namespace blitz {
     void window_created(SDL_Window* window) {
-        plume_android_set_window(sdl_native_window(window));
+        ANativeWindow* w = sdl_native_window(window);
+        if (w != nullptr) ANativeWindow_acquire(w);
+        set_plume_window(w);
         SDL_AddEventWatch(on_app_event, window);
+    }
+
+    // The window the renderer is made on (main.cpp's create_render_context), on the graphics thread: the game's surface as it
+    // is now, not the one create_window saw, which Android may have taken away since (backgrounded, minimized). Waits for one
+    // while there's none. Held for good: the renderer keeps the pointer.
+    ANativeWindow* render_window(ANativeWindow* from_create_window) {
+        static ANativeWindow* held = nullptr;
+        Uint32 began = SDL_GetTicks();
+        bool said = false;
+        ANativeWindow* w;
+        while ((w = acquire_current_window()) == nullptr) {
+            if (!said) {
+                fprintf(stderr, "[android] no surface for the renderer yet (the app is in the background): waiting for one\n");
+                said = true;
+            }
+            SDL_Delay(50);
+        }
+        if (said) fprintf(stderr, "[android] the renderer's surface came back after %u ms\n", (unsigned)(SDL_GetTicks() - began));
+        if (w != from_create_window) fprintf(stderr, "[android] the renderer starts on the current surface, not create_window's\n");
+        if (held != nullptr) ANativeWindow_release(held);
+        held = w;
+        return w;
     }
 }
 

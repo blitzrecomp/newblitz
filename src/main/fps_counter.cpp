@@ -88,6 +88,7 @@ namespace {
     // 1, 2, 3, 4 or more.
     int ticks_since_swap = 0;
     int log_ticks[4] = {};
+    std::atomic<uint64_t> swaps_total{0};  // the game's swaps this launch (game_frames), read on any thread
 
 #ifdef __ANDROID__
     std::atomic<uint64_t> watch_vi_ticks{0}, watch_swaps{0}, watch_save_ms{0};
@@ -375,6 +376,12 @@ namespace {
 
 namespace blitz {
     float fps_last_second() { return latest_fps.load(); }  // BLITZ DS holds to it (ds_view.cpp); a 5-second average
+    // The game's frames (framebuffer swaps) this launch: savestate.cpp's resume guard waits for them after a resume.
+    uint64_t game_frames() { return swaps_total.load(std::memory_order_relaxed); }
+    // The UI thread's ticks (update_gfx, about one a millisecond), for the PS5's stall watch (platform_ps5.cpp).
+    static std::atomic<uint64_t> ui_ticks_total{0};
+    void ui_tick() { ui_ticks_total.fetch_add(1, std::memory_order_relaxed); }
+    uint64_t ui_ticks() { return ui_ticks_total.load(std::memory_order_relaxed); }
 #ifdef __ANDROID__
     // Frames that really went to the first screen, this launch. fps_last_second counts the game's swaps, which keep coming with
     // nothing shown when a surface can't be presented to.
@@ -422,6 +429,7 @@ namespace blitz {
             last_frame = now;
             frames++;
             log_frames++;
+            swaps_total.fetch_add(1, std::memory_order_relaxed);
         }
         if (now - window_start >= std::chrono::seconds(1)) {
             shown_fps = frames;

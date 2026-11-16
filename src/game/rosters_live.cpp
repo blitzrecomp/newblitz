@@ -523,7 +523,7 @@ namespace blitz {
         config.add_enum_option(
             opt_lineups,
             "Lineups",
-            "Which week's players take the field, with the 2026 Season's rosters. With <b>Roster Updates</b> on, new "
+            "Which week's players take the field, with the 2026 Season's rosters. With <b>Keep Rosters and Uniforms Up to Date</b> on, new "
             "lineups download when the app starts: on Thursdays and Saturdays during the season."
             "<br /><br />"
             "<b>This Week</b>: who's starting this week, injuries and all. In an Advanced season, each week plays "
@@ -541,13 +541,16 @@ namespace blitz {
 
     // Settings → Teams → Roster Updates (season_settings.cpp), after Lineups.
     void add_live_rosters_option(recomp::config::Config& config) {
+        // (Was Roster Updates: since 2026-11-15 a newer 2026 Season pak follows it too, season_pak.cpp.)
         config.add_bool_option(
             "live_rosters",
-            "Roster Updates",
+            "Keep Rosters and Uniforms Up to Date",
             "New lineups download when the app starts, on Thursdays and Saturdays during the season (and every few "
-            "hours while it runs)."
+            "hours while it runs). A newer 2026 Season (uniforms, team art) downloads too, and goes in the next time "
+            "the app starts."
             "<br /><br />"
-            "<b>Off</b>: nothing is downloaded; the rosters stay as they are (the 2026 Season's, or the last update).",
+            "<b>Off</b>: nothing is downloaded; the rosters and uniforms stay as they are (the 2026 Season's, or the "
+            "last update).",
             rosters_build_source());
         config.add_option_change_callback("live_rosters", [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant,
                                                              recomp::config::OptionChangeContext ctx) {

@@ -74,6 +74,12 @@ namespace blitz {
     // The macOS app menu; the PS5 has none.
     void install_app_menu(const std::string&) {}
 
+    // No crash reports from the PS5 in 0.9.5 (docs/design/FIRST_RUN_V2.md §2.3): nothing is sent.
+    bool http_post(const std::string&, const std::string&, const std::string&, int& status) {
+        status = 0;
+        return false;
+    }
+
     // A blocking HTTP GET (call it off the main thread): true with the body when the server answers 200.
     // Rosters at launch (rosters_live.cpp).
     bool http_get(const std::string& url, const std::string& bearer, const std::string& accept, std::string& body, int& status) {
@@ -138,10 +144,12 @@ extern "C" {
 // (the start-up code calls catchReturnFromMain) and every exit/_Exit/quick_exit (wrapped: tools/ps5/link_title.sh)
 // ask the system shell to close it instead. The log pipe gets a moment to reach blitz.log first.
 #include <unistd.h>
+extern "C" void blitz_ps5_crumb(const char* step);  // below
 extern "C" {
     int sceSystemServiceLoadExec(const char* path, char* const argv[]);
 
     [[noreturn]] void catchReturnFromMain(int status) {
+        blitz_ps5_crumb("closing");
         fprintf(stderr, "[ps5] closing (status %d)\n", status);
         fflush(nullptr);
         usleep(200000);
@@ -196,6 +204,8 @@ namespace {
     void boot_first() {
         std::set_terminate(early_terminate);
         mkdir("/data/blitzrecomp", 0777);
+        // The last run's crumbs stay a start longer: a run that hung (a Save & Quit, a resume) is followed by this one.
+        rename("/data/blitzrecomp/boot.log", "/data/blitzrecomp/boot.prev.log");
         int fd = open("/data/blitzrecomp/boot.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd >= 0) close(fd);
         blitz_ps5_crumb("preinit (before static constructors)");
@@ -214,6 +224,71 @@ namespace blitz {
     void window_created(SDL_Window*) {}
 }
 
+// The PS5's watch (2026-11-15: the team's Save & Quit froze, and the next start hung, with nothing in blitz.log to say where):
+//   - a quit that hasn't closed the title 8 s after the game was told to stop is closed through the system shell anyway
+//     (a Save & Quit's file is written and synced by then; the Controller Pak's saving thread gets those 8 s too);
+//   - the UI thread or the game's frames stopping for 10 s, mid-run, goes to boot.log (straight to the file, past the log
+//     pipe, which a stalled printer would hold up), and their coming back.
+#include <atomic>
+#include <chrono>
+#include <thread>
+extern std::atomic_bool exited;  // librecomp recomp.cpp: set by ultramodern::quit
 namespace blitz {
-    void early_init() {}
+    uint64_t game_frames();  // fps_counter.cpp
+    uint64_t ui_ticks();
+}
+namespace {
+    void ps5_watch() {
+        using Clock = std::chrono::steady_clock;
+        Clock::time_point ui_at = Clock::now(), frames_at = ui_at;
+        uint64_t last_ui = 0, last_frames = 0;
+        bool ui_quiet = false, frames_quiet = false;
+        int said = 0;  // at most 40 stall lines a run
+        auto say = [&](const char* what, Clock::duration for_how_long) {
+            if (said++ >= 40) return;
+            char line[160];
+            snprintf(line, sizeof(line), "%s (%lld s; UI ticks %llu, game frames %llu)", what,
+                     (long long)std::chrono::duration_cast<std::chrono::seconds>(for_how_long).count(),
+                     (unsigned long long)blitz::ui_ticks(), (unsigned long long)blitz::game_frames());
+            blitz_ps5_crumb(line);
+        };
+        for (;;) {
+            usleep(250000);
+            if (exited.load()) {
+                blitz_ps5_crumb("quit: the game was told to stop");
+                for (int i = 0; i < 32; i++) usleep(250000);
+                blitz_ps5_crumb("quit: still not closed after 8 s; closing the title anyway");
+                fprintf(stderr, "[ps5] the quit hasn't finished after 8 s: closing the title anyway\n");
+                catchReturnFromMain(0);
+            }
+            const Clock::time_point now = Clock::now();
+            const uint64_t ui = blitz::ui_ticks(), frames = blitz::game_frames();
+            if (ui != last_ui) {
+                if (ui_quiet) say("stall: the UI thread runs again", now - ui_at);
+                last_ui = ui;
+                ui_at = now;
+                ui_quiet = false;
+            }
+            else if (!ui_quiet && ui != 0 && now - ui_at > std::chrono::seconds(10)) {
+                ui_quiet = true;
+                say("stall: the UI thread hasn't ticked", now - ui_at);
+            }
+            if (frames != last_frames) {
+                if (frames_quiet) say("stall: the game's frames come again", now - frames_at);
+                last_frames = frames;
+                frames_at = now;
+                frames_quiet = false;
+            }
+            else if (!frames_quiet && frames != 0 && now - frames_at > std::chrono::seconds(10)) {
+                frames_quiet = true;
+                say("stall: no game frame", now - frames_at);
+            }
+        }
+    }
+}
+
+namespace blitz {
+    void early_init() {
+        std::thread(ps5_watch).detach();
+    }
 }

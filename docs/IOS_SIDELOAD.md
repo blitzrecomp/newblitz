@@ -2,14 +2,34 @@
 
 Written 2026-11-04; the public `.ipa` added 2026-11-14. Two ways onto an iPhone or iPad, both signed with **your** Apple ID, which can be a free one. Nobody else's certificate or name is involved.
 
-- **The public app's `.ipa` (no Mac needed; §3, Route B).** The New Blitz download for Mac, Windows or Linux carries the iPhone app, unsigned. Blitz Builder → Somewhere else → A console or phone → Phone → **Save the iPhone app (.ipa)** saves it to Downloads → New Blitz for iPhone with your ROM and setup beside it, and you install it with AltStore, SideStore or Sideloadly.
+- **Recommended: Sideloadly with the public `.ipa` (no Mac needed; the next section, then §3, Route B).** The New Blitz download for Mac, Windows or Linux carries the iPhone app, unsigned. Blitz Builder → Somewhere else → A console or phone → Phone → **Save the iPhone app (.ipa)** saves it to Downloads → New Blitz for iPhone with your ROM and setup beside it, and you install it with Sideloadly (recommended), AltStore or SideStore.
 - **Build it yourself (§2, Route A).** The source, your own NFL Blitz 2000 (USA) v1.1 dump, a Mac with Xcode.
 
 The last section answers a different question: whether the app can be passed around privately to a group.
 
 Tags: **[V]** checked in this repo or in a source cited with its date. **[I]** inference, not tested yet. **[HW]** must be tried on a phone.
 
-> **Read this first: the free-Apple-ID route has one open technical question.** The game reserves 4 GiB of address space at start-up (`docs/IOS_FEASIBILITY.md`, device probe 2026-10-21). On the maintainer's iPhone that works because the app carries Apple's **Extended Virtual Addressing** entitlement. Apple's capability table lists that entitlement for paid Apple Developer Program and Enterprise members only, **not for free accounts** ([Supported capabilities (iOS)](https://developer.apple.com/help/account/reference/supported-capabilities-ios), read 2026-11-04) [V]. The **Increased Memory Limit** entitlement, the other one we use, does work with a free Personal Team when Xcode signs the app ([MacNativeGames issue #99](https://github.com/ly05010419/MacNativeGames/issues/99), 2026-10-21; [SideStore issue #1616](https://github.com/SideStore/SideStore/issues/1616), 2026-09-24) [V]. Whether the 4 GiB reservation fits without Extended Virtual Addressing has **not been tried** [HW]. The signs are good, though. In that same issue, another iOS port, signed by free Personal Teams through Xcode, mapped about 6 GiB when the profile lacked increased-memory-limit, and fit a 16 GiB layout once the profile granted it. Both are more than our 4 GiB [I]. Step 5 of Route A shows how to check with the repo's small probe app before you spend an hour on the full build. A friend with a **paid** account ($99 a year) avoids the question entirely.
+> **Free Apple IDs work (tried 2026-11-15).** The game reserves 4 GiB of address space at start-up, and the paid-only **Extended Virtual Addressing** entitlement isn't needed for it: on an iPhone 15 Pro (iOS 27) the app, signed with only what a free Personal Team gets (`platform/ios/FreeAccount.entitlements`, through `BLITZ_IOS_ENTITLEMENTS=… tools/ios/install.sh`), started a game and played at 30 fps, and so did a copy with **no** memory entitlements at all, so it doesn't matter which entitlements AltStore, SideStore or Sideloadly ask for. Not tried yet: an iPhone with 4 GB of RAM or less (iPhone 12 and older). The probe in step 5 is still there for such a phone. You can still leave the extended-virtual-addressing key in when signing with a paid account.
+
+---
+
+## Recommended: install with Sideloadly
+
+Sideloadly ([sideloadly.io](https://sideloadly.io)) runs on a Mac or Windows. You sign in with your own Apple ID (a free one works), and with AutoRefresh on it re-signs the app by itself over the same Wi-Fi. Two kinds of `NewBlitz.ipa` work: the one on the release page (the app asks for your ROM when you first open it), and the one the computer app's Blitz Builder saves ("No camera? Make the file here" → iPhone), which already has your ROM and setup inside.
+
+1. Install Sideloadly. On Windows it needs Apple's iTunes and iCloud from apple.com (the web versions, not the Microsoft Store ones).
+2. Plug the iPhone in with a cable.
+3. Drag `NewBlitz.ipa` into Sideloadly and sign in with your own Apple ID. You type the password into Sideloadly; it's never shared with New Blitz.
+4. Before you start, turn on **AutoRefresh**: the circular-arrows button to the left of Start.
+5. On the iPhone: Settings → General → VPN & Device Management → trust your Apple ID. Turn on Developer Mode if iOS asks.
+6. Turn on Wi-Fi sync for the phone. On a Mac: Finder → select the iPhone → "Show this iPhone when on Wi-Fi". On Windows: the same option in iTunes.
+7. Open New Blitz and pick your ROM with **Load ROM**. The app asks on first launch.
+
+**Refreshing.** A free Apple ID's install lasts 7 days. With AutoRefresh on, Sideloadly re-signs it in the background every few days whenever the computer is on and the phone is on the same Wi-Fi. There is nothing to click, and your saves stay. If it ever lapses, the app won't open until it is refreshed: plug in and click Start again in Sideloadly (don't delete the app, which deletes its saves). A paid Apple developer account lasts a year. A free account allows 3 sideloaded apps per device (§1).
+
+**Other options.**
+- [AltStore](https://altstore.io) with AltServer: also refreshes over Wi-Fi from a computer.
+- [SideStore](https://sidestore.io): refreshes on the phone itself, but setup is fiddlier.
 
 ---
 
@@ -148,7 +168,7 @@ Copy to the iPhone/       blitz.z64 (your stored ROM), season.json and rules.jso
 ```
 
 ### Step 2. Install it with your Apple ID
-Use one of the tools below, on a Mac or a Windows PC. Each asks for your Apple ID, makes your own development certificate and a profile for your phone, and re-signs every binary in the `.ipa`; they can rewrite the bundle ID to one your team can own (`com.blitzrecomp.newblitz` belongs to the maintainer's team). Then on the phone: **Developer Mode** on (§2, step 6.3) and **Trust** your Apple ID (step 8.1).
+Use Sideloadly (the steps are near the top), or one of the tools below, on a Mac or a Windows PC. Each asks for your Apple ID, makes your own development certificate and a profile for your phone, and re-signs every binary in the `.ipa`; they can rewrite the bundle ID to one your team can own (`com.blitzrecomp.newblitz` belongs to the maintainer's team). Then on the phone: **Developer Mode** on (§2, step 6.3) and **Trust** your Apple ID (step 8.1).
 
 ### Step 3. Give it the ROM and the setup
 The app shares its Documents (`UIFileSharingEnabled`, `LSSupportsOpeningDocumentsInPlace` in `platform/ios/Info.plist.in`), and at start it imports a ROM from there and moves `season.json`, `rules.json`, `builder_done` and a season pak in (`main.cpp`, the drop folder; `paks_at_launch`). Open New Blitz once so its folder exists, then copy everything in `Copy to the iPhone` into it:

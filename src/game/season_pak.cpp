@@ -40,6 +40,7 @@
 #include "json/json.hpp"
 #include "miniz.h"
 #include "librecomp/game.hpp"
+#include "ultramodern/ultramodern.hpp"
 #include "recompui/config.h"
 #include "util/file.h"
 
@@ -48,6 +49,7 @@ using json = nlohmann::json;
 
 namespace blitz {
     void post_notice(const std::string& msg);  // notices.cpp
+    void post_status(const std::string& msg);  // notices.cpp: a toast once the game is up
 }
 
 namespace {
@@ -334,6 +336,81 @@ namespace {
         return server + ref;
     }
 
+    // ---- Updates follow Roster Updates (team, 2026-11-15) ----------------------------------------------------------
+    // With Roster Updates on and the pak installed, a newer 2026 Season on the server (new uniforms, art ...) comes in by
+    // itself: the catalog's SHA-256 against the installed copy's (paks/season2026.nbpak), a download in the background
+    // with every check the first one has, kept aside as paks/season2026.update.nbpak, and put in at the next start,
+    // before anything reads the pak (never under a running game). A pak the catalog withdraws stays as it is.
+    fs::path update_file() { return blitz::paks_dir() / (std::string(blitz::season_pak_id) + ".update.nbpak"); }
+    fs::path update_sha_file() { return blitz::paks_dir() / (std::string(blitz::season_pak_id) + ".update.sha256"); }
+
+    // The background check (after a catalog read): a different pak than the one installed is fetched and kept for the
+    // next start.
+    void check_for_update(const json& catalog) {
+        if (!blitz::live_rosters_on() || !blitz::season_pak_installed()) return;
+        json entry = catalog_entry(catalog);
+        if (!entry.is_object() || !entry.contains("file") || !entry.contains("sha256")) return;  // withdrawn: left alone
+        if (entry.value("min_build", 0) > std::atoi(BLITZ_BUILD)) {
+            fprintf(stderr, "[season pak] update %s needs a newer New Blitz: not taken\n", entry.value("version", "").c_str());
+            return;
+        }
+        std::string want = entry.value("sha256", ""), have;
+        if (blitz::file_exists(pak_copy())) {
+            std::string data = read_file(pak_copy());
+            have = blitzsha::sha256_hex(data.data(), data.size());
+        }
+        if (want == have) return;
+        if (have.empty() && entry.value("version", "") == blitz::season_pak_version()) return;  // no copy to compare: the version
+        if (blitz::file_exists(update_file()) && trimmed(read_file(update_sha_file())) == want) return;  // already waiting
+        std::string url = resolve(blitz::pak_server(), entry.value("file", "")), body;
+        int status = 0;
+        fprintf(stderr, "[season pak] update %s on the server: downloading\n", entry.value("version", "").c_str());
+        if (!blitz::http_get(url, "", "", body, status)) {
+            fprintf(stderr, "[season pak] update: download failed (HTTP %d); again at the next start\n", status);
+            return;
+        }
+        if (body.size() > max_pak || blitzsha::sha256_hex(body.data(), body.size()) != want) {
+            fprintf(stderr, "[season pak] update: the download doesn't match the catalog's SHA-256: dropped\n");
+            return;
+        }
+        if (!write_file(update_file(), body) || !write_file(update_sha_file(), want + "\n")) {
+            std::error_code ec;
+            fs::remove(update_file(), ec);
+            fprintf(stderr, "[season pak] update: couldn't keep it in %s\n", blitz::paks_dir().string().c_str());
+            return;
+        }
+        fprintf(stderr, "[season pak] update %s downloaded: it goes in at the next start\n", entry.value("version", "").c_str());
+    }
+
+    // At start, before the game reads the pak: an update kept last time goes in (its SHA-256 and every file checked,
+    // as any install), then a toast once the game is up.
+    void install_waiting_update() {
+        if (!blitz::file_exists(update_file())) return;
+        std::error_code ec;
+        std::string want = trimmed(read_file(update_sha_file())), error;
+        std::string before = blitz::season_pak_version();
+        if (!blitz::live_rosters_on()) {  // Roster Updates was turned off since: it isn't wanted
+            fs::remove(update_file(), ec);
+            fs::remove(update_sha_file(), ec);
+            fprintf(stderr, "[season pak] update: Roster Updates is off now; dropped\n");
+            return;
+        }
+        bool ok = blitz::pak_install_file(update_file(), want, error);
+        fs::remove(update_file(), ec);
+        fs::remove(update_sha_file(), ec);
+        if (!ok) {
+            fprintf(stderr, "[season pak] update: not installed (%s); the season stays %s\n", error.c_str(), before.c_str());
+            return;
+        }
+        fprintf(stderr, "[season pak] update installed: %s -> %s\n", before.c_str(), blitz::season_pak_version().c_str());
+        // The toast waits for the game: one posted before it starts is dropped (main.cpp's update_gfx).
+        std::thread([] {
+            while (!ultramodern::is_game_started()) std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            blitz::post_status("2026 Season updated: new uniforms and art");
+        }).detach();
+    }
+
     void download(std::function<void(bool, const std::string&)> done) {
         auto fail = [&](const std::string& why) {
             fprintf(stderr, "[season pak] download: %s\n", why.c_str());
@@ -498,6 +575,7 @@ namespace blitz {
             });
             while (started && !finished) std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
+        install_waiting_update();
 #if BLITZ_HAS_ROM_DROP_FOLDER
         // A pak in the drop folder (Send to Device from a computer, or copied there by hand): installed before the
         // game starts, then removed from there. Not a second time if it's the version already in.
@@ -543,7 +621,10 @@ namespace blitz {
             try {
                 json catalog;
                 std::string error;
-                if (fetch_catalog(catalog, error)) fprintf(stderr, "[season pak] catalog read%s\n", pak_update_available().empty() ? "" : ": a newer 2026 Season is out");
+                if (fetch_catalog(catalog, error)) {
+                    fprintf(stderr, "[season pak] catalog read%s\n", pak_update_available().empty() ? "" : ": a newer 2026 Season is out");
+                    check_for_update(catalog);
+                }
                 else fprintf(stderr, "[season pak] catalog: %s (the last one read stands)\n", error.c_str());
             }
             catch (const std::exception& e) {
