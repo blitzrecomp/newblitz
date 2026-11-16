@@ -11,3 +11,12 @@ compatibility_date = "2026-10-01"
 [[kv_namespaces]]
 binding = "ROSTERS"
 id = "23eebe0246f24cb680c7e9157a73eb20"
+
+# The daily counts (src/index.js, Stats): one SQLite Durable Object, a number per day and kind, nothing about anyone.
+[[durable_objects.bindings]]
+name = "STATS"
+class_name = "Stats"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Stats"]

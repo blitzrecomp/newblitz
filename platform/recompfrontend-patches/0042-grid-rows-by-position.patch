@@ -1,0 +1,44 @@
+diff --git a/recompui/src/elements/ui_document.cpp b/recompui/src/elements/ui_document.cpp
+index a60c585..e75eed8 100644
+--- a/recompui/src/elements/ui_document.cpp
++++ b/recompui/src/elements/ui_document.cpp
+@@ -214,7 +214,38 @@ namespace recompui {
+                 // we don't have any disabled/unavailable elements within the nav parent > nav children tree.
+                 // This could be added.
+                 Element *next_el = try_get_element_at_index(cur_element_index + nav_dir_value, nav_parent->nav_children);
+-                if (next_el != nullptr) {
++                if (next_el != nullptr && !next_el->nav_children.empty()) {
++                    // BlitzRecomp: rows of different lengths (the on-screen keyboard's Shift, Space, Delete and Done
++                    // under ten keys) go to the element straight across by position, not the same index: Up from
++                    // Delete went to C (and on up to 3). Rows of the same length keep the index, as before.
++                    if (next_el->nav_children.size() != this_element->nav_children.size() &&
++                        original_focused_element != nullptr) {
++                        // The most overlap wins; a wide key over two (Delete over M and the comma) takes the first
++                        // of them. Nothing overlapping: the nearest centre.
++                        const bool across_x = nav_dir_type != NavigationType::Horizontal;
++                        RmlPosSize from(original_focused_element->base);
++                        const float from_lo = across_x ? from.position.x : from.position.y;
++                        const float from_hi = across_x ? from.bottom_right.x : from.bottom_right.y;
++                        const float centre = (from_lo + from_hi) * 0.5f;
++                        Element *best = nullptr;
++                        float best_overlap = 0.0f;
++                        float best_distance = std::numeric_limits<float>::max();
++                        for (Element *child : next_el->nav_children) {
++                            RmlPosSize to(child->base);
++                            const float lo = across_x ? to.position.x : to.position.y;
++                            const float hi = across_x ? to.bottom_right.x : to.bottom_right.y;
++                            const float overlap = std::min(hi, from_hi) - std::max(lo, from_lo);
++                            const float distance = std::abs((lo + hi) * 0.5f - centre);
++                            if (overlap > best_overlap + 1.0f || (best_overlap <= 0.0f && overlap <= 0.0f && distance < best_distance)) {
++                                best_overlap = std::max(overlap, 0.0f);
++                                best_distance = distance;
++                                best = child;
++                            }
++                        }
++                        if (best != nullptr) {
++                            return best;
++                        }
++                    }
+                     int safe_index = std::clamp(retained_grid_index, 0, static_cast<int>(next_el->nav_children.size()) - 1);
+                     return next_el->nav_children[safe_index];
+                 }

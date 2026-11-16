@@ -91,4 +91,38 @@ check("a bad id is 404", (await call("GET", "/secretkey123/reports/not-an-id")).
 env.ROSTERS.m.set(`reports:count:${new Date().toISOString().slice(0, 10)}`, "300");
 check("at most 300 a day", (await call("POST", "/reports/crash", report)).status === 429);
 
+
+// Daily counts: only with a STATS binding, after the response, never anything about the sender.
+{
+  env.ROSTERS.m.delete(`reports:count:${new Date().toISOString().slice(0, 10)}`);  // the limit test above used up today's
+  const seen = [];
+  const rows = new Map();
+  const stats = {
+    idFromName: (n) => n,
+    get: () => ({
+      fetch: async (u, o) => {
+        const url = new URL(u);
+        if (o && o.method === "POST") { seen.push(url.searchParams.get("kind")); rows.set(url.searchParams.get("kind"), (rows.get(url.searchParams.get("kind")) || 0) + 1); return new Response("ok"); }
+        return new Response(JSON.stringify([...rows].map(([kind, n]) => ({ day: "d", kind, n }))));
+      },
+    }),
+  };
+  const waits = [];
+  const ctx = { waitUntil: (p) => waits.push(p) };
+  const env2 = { ...env, STATS: stats };
+  const go = (method, path, body) => worker.fetch(new Request(`https://hub.example${path}`, { method, body, headers: { "cf-connecting-ip": "203.0.113.9" } }), env2, ctx);
+  await go("GET", "/paks/catalog.json");
+  await go("GET", "/paks/season2026-1.nbpak");
+  await go("GET", "/paks/nope-1.nbpak");  // a 404: not counted
+  await go("POST", "/reports/crash", report);
+  await go("GET", "/secretkey123/status");  // the team's own reads: not counted
+  await Promise.all(waits);
+  check("counts what was served", JSON.stringify(seen) === JSON.stringify(["season_catalog", "season_downloads", "crash_reports"]));
+  check("counts carry no address", !seen.join(" ").includes("203.0.113.9"));
+  check("stats need the key", (await go("GET", "/stats")).status === 404 && (await go("GET", "/paks/stats")).status === 404);
+  const got = JSON.parse(await (await go("GET", "/secretkey123/stats")).text());
+  check("stats with the key", got.length === 3 && got.every((r) => r.n === 1));
+  check("no STATS binding: no stats route", (await call("GET", "/secretkey123/stats")).status === 404);
+  check("no ctx: still answers", (await worker.fetch(new Request("https://hub.example/paks/catalog.json"), env2)).status === 200);
+}
 console.log(`ok ${n}`);

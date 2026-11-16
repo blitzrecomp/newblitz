@@ -37,7 +37,8 @@ official route (partner program, NDA SDK, dev kits) isn't available to this proj
 - **Toolchain** (once: `brew install llvm make meson glslang bison`):
   - `tools/ps5/setup_sdk.sh`: the [PS5_PayloadSDK fork](https://github.com/mihawk-99/PS5_PayloadSDK) UnleashedRecomp-Prospero
     pins (`95c08f2`: upstream v0.42 plus ps5platform) into `build/ps5/sdk-m`; SDL2's PS5 port (joystick, audio,
-    events), FreeType and libsamplerate into `build/ps5/prefix`; the UnleashedRecomp-Prospero checkout (pinned, its
+    events) with `platform/sdl-ps5-patches` on top (`setup_sdk.sh sdl` rebuilds it alone; `make ps5-*` does that
+    when the patches changed), FreeType and libsamplerate into `build/ps5/prefix`; the UnleashedRecomp-Prospero checkout (pinned, its
     `runtime/libc.prx` checked against its published hash) and `ps5-native-tool` built for the Mac.
   - `tools/ps5/build_radv.sh`: Mesa RADV for the PS5 from [PS5_Mesa](https://github.com/mihawk-99/PS5_Mesa) `0b2d6d1`,
     with their options and OpenCL cache, into `build/ps5/radv` (`libvulkan_radeon.ps5.a`). Needs mako/ply/pyyaml in

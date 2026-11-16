@@ -374,14 +374,20 @@ PS5_CMAKE = $(PS5_ENV) cmake -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_
 ps5_art = $(PY) tools/ps5/make_title_art.py $(2) $(1)/sce_sys && \
 	for p in pic0 pic1; do build/ps5/host/png_to_bc7_dds $(1)/sce_sys/$$p.png $(1)/sce_sys/$$p.dds > /dev/null && rm $(1)/sce_sys/$$p.png; done
 
-ps5-classic: recomp rsp patches   ## build/ps5/app_classic/PPSA99960: Classic Blitz as a PS5 title folder
+# SDL2 is rebuilt with platform/sdl-ps5-patches when they changed since the installed one was built (its stamp).
+.PHONY: ps5-sdl
+ps5-sdl:
+	@want=$$(cat platform/sdl-ps5-patches/*.patch | shasum -a 256 | cut -d' ' -f1); \
+	if [ "$$(cat build/ps5/prefix/.sdl-patches 2>/dev/null)" != "$$want" ]; then echo "SDL2 for the PS5: rebuilding with platform/sdl-ps5-patches"; tools/ps5/setup_sdk.sh sdl; fi
+
+ps5-classic: recomp rsp patches ps5-sdl   ## build/ps5/app_classic/PPSA99960: Classic Blitz as a PS5 title folder
 	$(call SS_CODE,build/savestate/RecompiledFuncs,build/RecompiledFuncs)
 	$(PS5_CMAKE) -S . -B build/ps5/app_classic -DBLITZ_FLAVOUR=classic $(SS_FLAG)
 	$(PS5_ENV) cmake --build build/ps5/app_classic --target BlitzRecompiled
 	@$(call ps5_art,build/ps5/app_classic/PPSA99960,icons/logo_2026.png)
 	@echo "-> build/ps5/app_classic/PPSA99960"
 
-ps5-modern: recomp-modern rsp patches   ## build/ps5/app_modern/PPSA99961: Modern Blitz as a PS5 title folder, content from <app folder> (APP_FOLDER=<dir>)
+ps5-modern: recomp-modern rsp patches ps5-sdl   ## build/ps5/app_modern/PPSA99961: Modern Blitz as a PS5 title folder, content from <app folder> (APP_FOLDER=<dir>)
 	$(call SS_CODE,build/engine32/savestate/RecompiledFuncs,build/engine32/RecompiledFuncs)
 	$(PS5_CMAKE) -S . -B build/ps5/app_modern -DBLITZ_FLAVOUR=modern -DBLITZ_CONTENT=$(BLITZ_CONTENT) $(SS_FLAG)
 	$(PS5_ENV) cmake --build build/ps5/app_modern --target BlitzRecompiled

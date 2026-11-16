@@ -17,11 +17,13 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -135,6 +137,31 @@ namespace {
         }
     }
 
+    // Connect and disconnect lines (main thread): a controller that comes and goes over and over must not fill the log. The team's
+    // PS5 (2026-11-15) logged its DualSense connecting and disconnecting every 100 ms for hours, and blitz.log hit its 8 MB
+    // cap. Up to 8 lines at once, then one every 10 s; the next line that gets out says how many were held back.
+    void pad_log(const char* fmt, ...) {
+        static double tokens = 8.0;
+        static Uint64 last_ms = 0;
+        static unsigned held = 0;
+        const Uint64 now = SDL_GetTicks64();
+        if (last_ms != 0) tokens = std::min(8.0, tokens + (double)(now - last_ms) / 10000.0);
+        last_ms = now;
+        if (tokens < 1.0) {
+            held++;
+            return;
+        }
+        tokens -= 1.0;
+        if (held != 0) {
+            fprintf(stderr, "[pads] (%u connect/disconnect lines held back: a controller keeps coming and going)\n", held);
+            held = 0;
+        }
+        va_list args;
+        va_start(args, fmt);
+        vfprintf(stderr, fmt, args);
+        va_end(args);
+    }
+
     // Player LEDs and light bar show the port; a short pulse says "this one is connected".
     void show_port(Pad& p) {
         SDL_GameControllerSetPlayerIndex(p.controller, p.port);
@@ -159,7 +186,7 @@ namespace {
             last_port[p.key] = want;
         }
         show_port(p);
-        fprintf(stderr, "[pads] %s \"%s\" connected: %s\n", type_name(p.controller), p.name.c_str(),
+        pad_log("[pads] %s \"%s\" connected: %s\n", type_name(p.controller), p.name.c_str(),
                 want >= 0 ? ("player " + std::to_string(want + 1)).c_str() : "no free port");
     }
 
@@ -168,7 +195,7 @@ namespace {
         std::lock_guard lock{pads_mutex};
         for (auto it = pads.begin(); it != pads.end();) {
             if (!SDL_GameControllerGetAttached(it->controller)) {
-                fprintf(stderr, "[pads] \"%s\" disconnected (player %d)\n", it->name.c_str(), it->port + 1);
+                pad_log("[pads] \"%s\" disconnected (player %d)\n", it->name.c_str(), it->port + 1);
                 if (it->port >= 0) {
                     port_pad[it->port] = -1;
                     rumble_level[it->port] = 0;
@@ -190,15 +217,30 @@ namespace {
             if (std::any_of(pads.begin(), pads.end(), [&](const Pad& p) { return p.id == id; })) continue;
             SDL_GameController* c = SDL_GameControllerOpen(i);
             if (c == nullptr) continue;
+            // SDL hands back the controller already open under this instance id; one that was marked removed stays so.
+            // Taking it would be "connected" now and "disconnected" 100 ms later, forever: the team's PS5 (2026-11-15), where a
+            // phone controller's virtual pad had been given the DualSense's id (platform/sdl-ps5-patches/0001). Said once.
+            if (!SDL_GameControllerGetAttached(c)) {
+                static std::set<SDL_JoystickID> said;
+                if (said.insert(id).second) {
+                    const char* name = SDL_GameControllerName(c);
+                    fprintf(stderr, "[pads] \"%s\" (instance %d) is listed but SDL has it removed: left alone\n", name ? name : "controller", (int)id);
+                }
+                SDL_GameControllerClose(c);
+                continue;
+            }
             Pad p;
             p.controller = c;
             p.id = id;
             p.key = key_of(c);
             const char* name = SDL_GameControllerName(c);
             p.name = name ? name : "controller";
-            if (char* mapping = SDL_GameControllerMapping(c)) {
-                fprintf(stderr, "[pad] %s: %s\n", p.name.c_str(), mapping);
-                SDL_free(mapping);
+            static std::set<std::string> mapping_said;  // once per controller a run: the line is long
+            if (mapping_said.insert(p.key).second) {
+                if (char* mapping = SDL_GameControllerMapping(c)) {
+                    fprintf(stderr, "[pad] %s: %s\n", p.name.c_str(), mapping);
+                    SDL_free(mapping);
+                }
             }
             assign(p);
             pads.push_back(std::move(p));

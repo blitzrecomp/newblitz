@@ -1,0 +1,59 @@
+SDL2's PS5 port (ps5-payload-dev/SDL, release-2.30.x-ps5), applied by tools/ps5/setup_sdk.sh.
+
+PS5 pads: SDL's shared joystick instance ids. The driver counted its own instance ids from 0, while the virtual joystick
+driver (phone controllers, phone_pads.cpp) takes SDL's shared counter, also from 0: a phone's virtual pad got the
+DualSense's id. SDL then handed the phone the DualSense's own SDL_Joystick (SDL_JoystickOpen finds an open joystick by
+id), the phone's detach marked the DualSense removed (SDL_PrivateJoystickRemoved by id), and RecompFrontend's
+never-closed controller kept that removed joystick alive under the id: every reopen of the DualSense returned it, already
+detached. The game logged the DualSense connecting and disconnecting every 100 ms until the log was full (the team's PS5,
+2026-11-15), with the pad dead. Also: a slot whose user changes without a logout in between drops the old pad first.
+
+--- a/src/joystick/ps5/SDL_ps5joystick.c
++++ b/src/joystick/ps5/SDL_ps5joystick.c
+@@ -53,7 +53,6 @@
+ } PS5_PadContext;
+ 
+ static PS5_PadContext pad_ctx[PS5_MAX_USERS];
+-static SDL_JoystickID instance_counter = 0;
+ 
+ // Map analog inputs from [0, 255] to [-32768, 32767]
+ static int analog_map[256] = {
+@@ -310,10 +309,24 @@
+     for (int i = 0; i < PS5_MAX_USERS; i++) {
+         if (user_ids[i] == pad_ctx[i].user_id) {
+             continue;
++        }
++
++        if (pad_ctx[i].instance_id != -1) {
++            /* Another user in this slot without a logout seen in between: the old pad goes first. */
++            SDL_PrivateJoystickRemoved(pad_ctx[i].instance_id);
++            if (pad_ctx[i].handle >= 0) {
++                scePadClose(pad_ctx[i].handle);
++            }
++            pad_ctx[i].instance_id = -1;
++            pad_ctx[i].handle = -1;
++            pad_ctx[i].name[0] = 0;
+         }
+ 
+         if (user_ids[i] != -1) {
+-            pad_ctx[i].instance_id = instance_counter++;
++            /* SDL's own counter, shared with every other driver (the virtual joysticks): a private counter here
++               starting at 0 gave the first virtual joystick the DualSense's instance id, and SDL then took one
++               for the other (SDL_JoystickOpen, SDL_PrivateJoystickRemoved). */
++            pad_ctx[i].instance_id = SDL_GetNextJoystickInstanceID();
+             pad_ctx[i].user_id = user_ids[i];
+             SDL_zero(pad_ctx[i].pad);
+             if (sceUserServiceGetUserName(user_ids[i], pad_ctx[i].name,
+@@ -322,12 +335,7 @@
+             }
+             SDL_PrivateJoystickAdded(pad_ctx[i].instance_id);
+         } else {
+-            SDL_PrivateJoystickRemoved(pad_ctx[i].instance_id);
+-            scePadClose(pad_ctx[i].handle);
+-            pad_ctx[i].instance_id = -1;
+-            pad_ctx[i].handle = -1;
+             pad_ctx[i].user_id = user_ids[i];
+-            pad_ctx[i].name[0] = 0;
+         }
+     }
+ }

@@ -236,6 +236,7 @@ extern std::atomic_bool exited;  // librecomp recomp.cpp: set by ultramodern::qu
 namespace blitz {
     uint64_t game_frames();  // fps_counter.cpp
     uint64_t ui_ticks();
+    const char* ui_step_name();  // where in its tick the UI thread is
 }
 namespace {
     void ps5_watch() {
@@ -246,10 +247,10 @@ namespace {
         int said = 0;  // at most 40 stall lines a run
         auto say = [&](const char* what, Clock::duration for_how_long) {
             if (said++ >= 40) return;
-            char line[160];
-            snprintf(line, sizeof(line), "%s (%lld s; UI ticks %llu, game frames %llu)", what,
+            char line[240];
+            snprintf(line, sizeof(line), "%s (%lld s; UI ticks %llu, game frames %llu; UI thread at: %s)", what,
                      (long long)std::chrono::duration_cast<std::chrono::seconds>(for_how_long).count(),
-                     (unsigned long long)blitz::ui_ticks(), (unsigned long long)blitz::game_frames());
+                     (unsigned long long)blitz::ui_ticks(), (unsigned long long)blitz::game_frames(), blitz::ui_step_name());
             blitz_ps5_crumb(line);
         };
         for (;;) {

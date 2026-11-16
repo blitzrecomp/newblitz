@@ -1,0 +1,76 @@
+diff --git a/recompui/src/config/ui_config_page_options_menu.cpp b/recompui/src/config/ui_config_page_options_menu.cpp
+--- a/recompui/src/config/ui_config_page_options_menu.cpp
++++ b/recompui/src/config/ui_config_page_options_menu.cpp
+@@ -83,13 +83,28 @@
+ 
+ void ConfigPageOptionsMenu::describe(const std::string &title, const std::string &text) {
+     description_option_id.clear();
++    show_description(title, text, false);
++}
++
++void ConfigPageOptionsMenu::show_description(const std::string &title, const std::string &text, bool unsafe) {
++    if (description_shown && title == shown_title && text == shown_text && unsafe == shown_unsafe) {
++        return;
++    }
++    description_shown = true;
++    shown_title = title;
++    shown_text = text;
++    shown_unsafe = unsafe;
+     if (description_title) {
+         description_title->set_text(title);
+-        description_title->set_display(Display::Block);
+-        description_rule->set_display(Display::Block);
++        description_title->set_display(title.empty() ? Display::None : Display::Block);
++        description_rule->set_display(title.empty() ? Display::None : Display::Block);
+     }
+     if (description_container) {
+-        description_container->set_text(text);
++        if (unsafe) {
++            description_container->set_text_unsafe(text);
++        } else {
++            description_container->set_text(text);
++        }
+     }
+ }
+ 
+@@ -168,20 +183,9 @@
+ void ConfigPageOptionsMenu::set_description_text(const std::string &text_in) {
+     // With nothing focused, the tab's name and how to get a description (controller words, not mouse ones).
+     const std::string text = text_in.empty() ? "Move to a setting to see what it does." : text_in;
+-    if (description_title) {
+-        std::string title = (!text_in.empty() && !description_option_id.empty()) ? config->get_option(description_option_id).name : config->name;
+-        for (char& c : title) c = (char)std::toupper((unsigned char)c);
+-        description_title->set_text(title);
+-        description_title->set_display(title.empty() ? Display::None : Display::Block);
+-        description_rule->set_display(title.empty() ? Display::None : Display::Block);
+-    }
+-    if (description_container) {
+-        if (is_internal || text_in.empty()) {
+-            description_container->set_text_unsafe(text);
+-        } else {
+-            description_container->set_text(text);
+-        }
+-    }
++    std::string title = (!text_in.empty() && !description_option_id.empty()) ? config->get_option(description_option_id).name : config->name;
++    for (char& c : title) c = (char)std::toupper((unsigned char)c);
++    show_description(title, text, is_internal || text_in.empty());
+ }
+ 
+ ConfigOptionElement* ConfigPageOptionsMenu::get_element_from_option_id(const std::string &option_id) {
+diff --git a/recompui/src/config/ui_config_page_options_menu.h b/recompui/src/config/ui_config_page_options_menu.h
+--- a/recompui/src/config/ui_config_page_options_menu.h
++++ b/recompui/src/config/ui_config_page_options_menu.h
+@@ -33,6 +33,13 @@
+         ConfigOptionElement* get_element_from_option_id(const std::string &option_id);
+         void perform_option_render_updates();
+         void set_description_text(const std::string &text);
++        // What the description panel shows now. Setting it again, unchanged, is skipped: each set rebuilds the text's elements
++        // and relayouts the whole page, and with the pointer resting on the panel that rebuild ends its hover, whose
++        // handler sets the description again, every frame (Settings → General at 5-9 fps on the RG DS).
++        void show_description(const std::string &title, const std::string &text, bool unsafe);
++        bool description_shown = false;
++        std::string shown_title, shown_text;
++        bool shown_unsafe = false;
+     public:
+         ConfigPageOptionsMenu(
+             ResourceId rid,

@@ -33,6 +33,13 @@
 //                                         At most 300 a day (KV's free writes), then 429 and the app tries next start.
 //   GET  /<HUB_KEY>/reports               the newest 100: id, when, size, first crash line
 //   GET  /<HUB_KEY>/reports/<id>          one report's text
+//
+// Daily counts (2026-11-15 night): totals per day (Pacific time) of what the public routes served, so we can see that
+// people use it without tracking anyone. Only a number per day and kind is kept: no address, header, id or anything
+// about who asked. Kinds: roster_checks (GET /paks/rosters/manifest.json, which an installed copy asks for at start
+// and every few hours), season_catalog (GET /paks/catalog.json), season_downloads (a pak served), crash_reports.
+// Kept in the STATS Durable Object (SQLite) when the deployment binds it (wrangler.public.toml); without it, nothing.
+//   GET  /<HUB_KEY>/stats                 the last 60 days: [{day, kind, n}]
 
 const PATH = /^(manifest\.json|players\.json|lineups\/[A-Za-z0-9._-]+\.json|psp\/[A-Za-z0-9._-]+\.txt)$/;
 const TEXT = /^psp\//;  // plain text, not JSON
@@ -158,6 +165,52 @@ function is_pack(body) {
   return lines.length > 1 && lines.slice(1).every((l) => /^[PL]\|[^\r]*$/.test(l));
 }
 
+// The daily counts (above): one row per day and kind, a number and nothing else.
+export class Stats {
+  constructor(state) {
+    this.sql = state.storage.sql;
+    this.sql.exec("CREATE TABLE IF NOT EXISTS counts (day TEXT NOT NULL, kind TEXT NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (day, kind))");
+  }
+  async fetch(request) {
+    const url = new URL(request.url);
+    if (request.method === "POST") {
+      const kind = url.searchParams.get("kind") || "";
+      if (!STAT_KINDS.includes(kind)) return new Response("no", { status: 400 });
+      this.sql.exec("INSERT INTO counts (day, kind, n) VALUES (?, ?, 1) ON CONFLICT (day, kind) DO UPDATE SET n = n + 1", today(), kind);
+      return new Response("ok");
+    }
+    const since = today(Date.now() - 60 * 86400e3);
+    return json(this.sql.exec("SELECT day, kind, n FROM counts WHERE day >= ? ORDER BY day, kind", since).toArray());
+  }
+}
+
+const STAT_KINDS = ["roster_checks", "season_catalog", "season_downloads", "crash_reports"];
+
+// YYYY-MM-DD in Pacific time (the team's day).
+function today(ms = Date.now()) {
+  return new Date(ms).toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
+}
+
+// Which count a served request adds to, if any: only successful public reads and accepted crash reports.
+function stat_kind(request, head, path, status) {
+  if (head === "paks" && request.method === "GET" && status === 200) {
+    if (path === "rosters/manifest.json") return "roster_checks";
+    if (path === "catalog.json") return "season_catalog";
+    if (PAK.test(path)) return "season_downloads";
+  }
+  if (head === "reports" && status === 201) return "crash_reports";
+  return null;
+}
+
+// Adds one, after the response has gone (it never slows or breaks a request).
+function count(env, ctx, kind) {
+  if (!kind || !env.STATS || !ctx || typeof ctx.waitUntil !== "function") return;
+  try {
+    const stub = env.STATS.get(env.STATS.idFromName("stats"));
+    ctx.waitUntil(stub.fetch(`https://stats/count?kind=${kind}`, { method: "POST" }).catch(() => {}));
+  } catch {}
+}
+
 function json(body, status = 200) {
   return new Response(JSON.stringify(body, null, 1), {
     status,
@@ -166,63 +219,74 @@ function json(body, status = 200) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const parts = url.pathname.replace(/^\/+/, "").split("/");
     const head = parts.shift();
     const path = parts.join("/");
-
-    if (head === "reports") {  // public: the app's crash reports, in only (above)
-      if (path !== "crash" || request.method !== "POST") return new Response("Not found", { status: 404 });
-      return report_crash(request, env);
-    }
-
-    if (head === "paks") {  // public: no key (above)
-      if (request.method !== "GET" && request.method !== "HEAD") return new Response("Not found", { status: 404 });
-      return paks(path, env);
-    }
-
-    if (head === "upload") {
-      if (request.method !== "PUT") return json({ error: "PUT only" }, 405);
-      if (!env.UPLOAD_SECRET || request.headers.get("authorization") !== `Bearer ${env.UPLOAD_SECRET}`) return json({ error: "no" }, 403);
-      if (path.startsWith("paks/")) return upload_pak(path.slice("paks/".length), request, env);
-      if (!PATH.test(path)) return json({ error: "not a roster file" }, 400);
-      const body = await request.text();
-      if (TEXT.test(path)) {
-        if (!is_pack(body)) return json({ error: "not a PSP pack" }, 400);  // a broken file never reaches a device
-      } else {
-        try {
-          JSON.parse(body);  // a broken file never reaches a device
-        } catch {
-          return json({ error: "not JSON" }, 400);
-        }
-      }
-      await env.ROSTERS.put(`file:${path}`, body);
-      if (path === "manifest.json") {
-        const latest = JSON.parse(body).latest || null;
-        await env.ROSTERS.put("status", JSON.stringify({ uploaded: new Date().toISOString(), latest }));
-      }
-      return json({ ok: true, path, bytes: body.length });
-    }
-
-    if (!env.HUB_KEY || head !== env.HUB_KEY || request.method !== "GET") return new Response("Not found", { status: 404 });
-    if (path === "reports" || path.startsWith("reports/")) return read_reports(path, env);
-    if (path === "status") {  // the last upload, how long ago, and whether that's overdue (a day and a half)
-      const st = JSON.parse((await env.ROSTERS.get("status")) || "{}");
-      if (st.uploaded) {
-        st.hours_ago = Math.round((Date.now() - Date.parse(st.uploaded)) / 36e5 * 10) / 10;
-        st.stale = st.hours_ago > 36;
-      }
-      return json(st);
-    }
-    if (!PATH.test(path)) return new Response("Not found", { status: 404 });
-    const body = await env.ROSTERS.get(`file:${path}`);
-    if (body === null) return new Response("Not found", { status: 404 });
-    return new Response(body, {
-      headers: {
-        "content-type": TEXT.test(path) ? "text/plain; charset=utf-8" : "application/json",
-        "cache-control": path === "manifest.json" ? "no-store" : "max-age=300",
-      },
-    });
+    const response = await handle(request, env, head, path);
+    count(env, ctx, stat_kind(request, head, path, response.status));
+    return response;
   },
 };
+
+// The routes (fetch above counts what they served).
+async function handle(request, env, head, path) {
+
+  if (head === "reports") {  // public: the app's crash reports, in only (above)
+    if (path !== "crash" || request.method !== "POST") return new Response("Not found", { status: 404 });
+    return report_crash(request, env);
+  }
+
+  if (head === "paks") {  // public: no key (above)
+    if (request.method !== "GET" && request.method !== "HEAD") return new Response("Not found", { status: 404 });
+    return paks(path, env);
+  }
+
+  if (head === "upload") {
+    if (request.method !== "PUT") return json({ error: "PUT only" }, 405);
+    if (!env.UPLOAD_SECRET || request.headers.get("authorization") !== `Bearer ${env.UPLOAD_SECRET}`) return json({ error: "no" }, 403);
+    if (path.startsWith("paks/")) return upload_pak(path.slice("paks/".length), request, env);
+    if (!PATH.test(path)) return json({ error: "not a roster file" }, 400);
+    const body = await request.text();
+    if (TEXT.test(path)) {
+      if (!is_pack(body)) return json({ error: "not a PSP pack" }, 400);  // a broken file never reaches a device
+    } else {
+      try {
+        JSON.parse(body);  // a broken file never reaches a device
+      } catch {
+        return json({ error: "not JSON" }, 400);
+      }
+    }
+    await env.ROSTERS.put(`file:${path}`, body);
+    if (path === "manifest.json") {
+      const latest = JSON.parse(body).latest || null;
+      await env.ROSTERS.put("status", JSON.stringify({ uploaded: new Date().toISOString(), latest }));
+    }
+    return json({ ok: true, path, bytes: body.length });
+  }
+
+  if (!env.HUB_KEY || head !== env.HUB_KEY || request.method !== "GET") return new Response("Not found", { status: 404 });
+  if (path === "reports" || path.startsWith("reports/")) return read_reports(path, env);
+  if (path === "stats") {
+    if (!env.STATS) return new Response("Not found", { status: 404 });
+    return env.STATS.get(env.STATS.idFromName("stats")).fetch("https://stats/counts");
+  }
+  if (path === "status") {  // the last upload, how long ago, and whether that's overdue (a day and a half)
+    const st = JSON.parse((await env.ROSTERS.get("status")) || "{}");
+    if (st.uploaded) {
+      st.hours_ago = Math.round((Date.now() - Date.parse(st.uploaded)) / 36e5 * 10) / 10;
+      st.stale = st.hours_ago > 36;
+    }
+    return json(st);
+  }
+  if (!PATH.test(path)) return new Response("Not found", { status: 404 });
+  const body = await env.ROSTERS.get(`file:${path}`);
+  if (body === null) return new Response("Not found", { status: 404 });
+  return new Response(body, {
+    headers: {
+      "content-type": TEXT.test(path) ? "text/plain; charset=utf-8" : "application/json",
+      "cache-control": path === "manifest.json" ? "no-store" : "max-age=300",
+    },
+  });
+}

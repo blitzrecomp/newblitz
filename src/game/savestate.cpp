@@ -63,6 +63,7 @@ namespace blitz {
     void release_status();
     float fps_last_second();                   // fps_counter.cpp
     uint64_t game_frames();                    // fps_counter.cpp: the game's swaps this launch
+    void ui_step(const char* step);            // fps_counter.cpp: where the UI thread is (the PS5's stall line)
     void replay_close();  // replay_screen.cpp
 
     struct StateModule {
@@ -1066,6 +1067,7 @@ namespace blitz {
         }
         std::error_code ec;
         if (!std::filesystem::exists(state_file(0), ec)) return;
+        blitz::ui_step("savestate prompt: quit.state's header");
         if (!file_compatible(0)) {
             // Saved by another version of the app: Resume could only fail, so don't offer it; keep the file aside.
             std::filesystem::path old = state_file(0);
@@ -1080,6 +1082,7 @@ namespace blitz {
         guard_arm(Guard::offer);
         ps5_crumb("resume: offering quit.state");
         fprintf(stderr, "[savestate] offering the game saved on quitting: %s\n", what.c_str());
+        blitz::ui_step("savestate prompt: open_choice_prompt");
         recompui::open_choice_prompt(
             "Pick up your game?",
             what.empty() ? "You saved a game when you last quit." : "You saved this game when you last quit.",
@@ -1097,7 +1100,9 @@ namespace blitz {
                 guard_disarm("discarded");
             },
             recompui::ButtonStyle::Success, recompui::ButtonStyle::Danger, false);
+        blitz::ui_step("savestate prompt: set_prompt_scoreline");
         recompui::set_prompt_scoreline(what);  // ○ is "later": the save stays and this asks again next start
+        blitz::ui_step("savestate prompt");
         ps5_crumb("resume: prompt open");
     }
 }

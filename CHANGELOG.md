@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.1 (unreleased)
+
+- **On-screen keyboard:** Up and Down from the bottom row (Shift, Space, Delete, Done) go to the key straight above
+  or below, not one further along.
+- **Settings → General** no longer crawls on slower devices (the RG DS ran it at 5-9 fps): its description panel was
+  rebuilding itself every frame while the pointer rested on it.
+- **PS5:** after a phone controller left, the DualSense could drop and reconnect every 100 ms until restart (a phone's
+  pad had been given the DualSense's id). Fixed; controllers that come and go no longer fill the log.
+- **PS5:** if a start ever hangs, the log now says what the app was doing.
+
 ## 1.0.0 (2026-11-15)
 
 The first public release. The 0.9.x builds are its test builds.

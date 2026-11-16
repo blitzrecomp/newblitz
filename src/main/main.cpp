@@ -301,16 +301,22 @@ namespace blitz {
     void party_tab_refresh();  // tournament.cpp
     bool checkpoint_quit_prompt();
     void ui_tick();                    // fps_counter.cpp
+    void ui_step(const char* step);    //   ... and where in the tick the UI thread is (the PS5's stall line names it)
 }
 
 // Main thread, about every millisecond (recomp.cpp's loop).
 void update_gfx(void*) {
     blitz::ui_tick();
+    blitz::ui_step("events (SDL pump)");
     recompinput::handle_events();
+    blitz::ui_step("controllers");
     blitz::controllers_update();
     // Problems found on the game thread (Controller Pak, content packs) are queued and shown here.
+    blitz::ui_step("checkpoint prompt");
     blitz::checkpoint_startup_prompt();
+    blitz::ui_step("savestate prompt");
     blitz::savestate_startup_prompt();
+    blitz::ui_step("party");
     blitz::party_update();
     // First-time hints (hints.cpp), a few times a second.
     {
@@ -318,6 +324,7 @@ void update_gfx(void*) {
         Uint32 now = SDL_GetTicks();
         if (now - last >= 50) {
             last = now;
+            blitz::ui_step("hints, builder, export, rosters");
             blitz::hints_update();
             blitz::install_expiry_update();
             blitz::builder_update();
@@ -328,6 +335,7 @@ void update_gfx(void*) {
 #endif
         }
     }
+    blitz::ui_step("toasts, replay, screens");
     blitz::party_tab_refresh();
     // Statuses (save states, Redo Play) show as a toast at the bottom right for a moment.
     std::string status = blitz::take_status();
@@ -342,12 +350,14 @@ void update_gfx(void*) {
     blitz::tall_view_update(window);
     blitz::receiver_targets_update(window);
     blitz::window_size_update(window);
+    blitz::ui_step("notice");
     std::string notice = blitz::take_notice();
     // BLITZ_QUIET_NOTICES=1 (dev/test runs): log only, no dialog on the desktop.
     static const bool quiet = getenv("BLITZ_QUIET_NOTICES") != nullptr;
     if (!notice.empty() && !quiet) {
         recompui::message_box(notice.c_str());
     }
+    blitz::ui_step("between ticks (the runtime's loop)");
 }
 
 extern RspUcodeFunc n_aspMain;

@@ -382,6 +382,11 @@ namespace blitz {
     static std::atomic<uint64_t> ui_ticks_total{0};
     void ui_tick() { ui_ticks_total.fetch_add(1, std::memory_order_relaxed); }
     uint64_t ui_ticks() { return ui_ticks_total.load(std::memory_order_relaxed); }
+    // Which step of the tick the UI thread is in (main.cpp, savestate.cpp's prompt): the PS5's stall line names it, so a hang
+    // there says where (2026-11-15: a start with quit.state hung on the UI thread, and nothing said in what).
+    static std::atomic<const char*> ui_step_now{"start"};
+    void ui_step(const char* step) { ui_step_now.store(step, std::memory_order_relaxed); }
+    const char* ui_step_name() { return ui_step_now.load(std::memory_order_relaxed); }
 #ifdef __ANDROID__
     // Frames that really went to the first screen, this launch. fps_last_second counts the game's swaps, which keep coming with
     // nothing shown when a surface can't be presented to.
