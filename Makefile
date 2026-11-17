@@ -227,11 +227,32 @@ ios_ipa = A=$(1); O=$(2); \
 		if codesign -dv $$O/stage/Payload/NewBlitz.app 2>&1 | grep -q 'TeamIdentifier=[A-Z0-9]'; then echo "ios: signed for a team"; exit 1; fi && \
 		(cd $$O/stage && zip -qry -X ../NewBlitz.ipa Payload) && rm -rf $$O/stage && echo "ios: NewBlitz.ipa (unsigned, for the player's own Apple ID)"; fi
 
+# The pinned stable PS5 kit (a folder or a link to one): see device-kits.
+PS5_STABLE ?= build/ps5_stable/current
+PS5_THIS_VERSION = $(or $(VERSION),$(shell sed -n 's/^ *set(BLITZ_VERSION "\(.*\)")/\1/p' CMakeLists.txt))
+
 device-kits:   ## build/devices: the PS5 and Android builds (+ the iPhone's with DEVICE_KITS_IOS=1) for Blitz Builder to send from the Mac app
 	@rm -rf build/devices; mkdir -p build/devices
-	@if [ -f build/ps5/app_modern/PPSA99961/eboot.bin ] && [ -f build/ps5/host/launch-PPSA99961.elf ]; then \
+	@# The PS5 (2026-11-16): the stable kit is the build tested on a PS5, pinned in $(PS5_STABLE) (PPSA99961/, launch.elf,
+	@# STABLE.txt: "1.0.2 (build 805)"); the team has no PS5 since, so a later version's own PS5 build goes in as the beta
+	@# (devices/ps5-beta), sent only when the player picks Send Beta. No pinned kit: this build's own, as before (dev).
+	@# A stable kit of this very version (1.0.2's build 805, tested 2026-11-17) has no beta beside it: a rebuild of the same
+	@# code (another build number, RELEASE=1) would only be an untested copy of it.
+	@if [ -f "$(PS5_STABLE)/PPSA99961/eboot.bin" ] && [ -f "$(PS5_STABLE)/launch.elf" ] && [ -s "$(PS5_STABLE)/STABLE.txt" ]; then \
+		mkdir -p build/devices/ps5 && ditto "$(PS5_STABLE)/PPSA99961" build/devices/ps5/PPSA99961 && \
+		cp "$(PS5_STABLE)/launch.elf" build/devices/ps5/launch.elf && cp "$(PS5_STABLE)/STABLE.txt" build/devices/ps5/STABLE.txt && \
+		echo "ps5: stable kit $$(cat "$(PS5_STABLE)/STABLE.txt")"; \
+		if [ "$$(head -1 "$(PS5_STABLE)/STABLE.txt" | cut -d' ' -f1)" = "$(PS5_THIS_VERSION)" ]; then \
+			echo "ps5: no beta kit (the stable kit is this version, $(PS5_THIS_VERSION))"; \
+		elif [ -f build/ps5/app_modern/PPSA99961/eboot.bin ] && [ -f build/ps5/host/launch-PPSA99961.elf ] && \
+			! cmp -s build/ps5/app_modern/PPSA99961/eboot.bin "$(PS5_STABLE)/PPSA99961/eboot.bin"; then \
+			mkdir -p build/devices/ps5-beta && ditto build/ps5/app_modern/PPSA99961 build/devices/ps5-beta/PPSA99961 && \
+			cp build/ps5/host/launch-PPSA99961.elf build/devices/ps5-beta/launch.elf && echo "ps5: beta kit (this version's own PS5 build)"; \
+		else echo "ps5: no beta kit (this build's PS5 eboot is the stable one, or isn't built)"; fi; \
+	elif [ -f build/ps5/app_modern/PPSA99961/eboot.bin ] && [ -f build/ps5/host/launch-PPSA99961.elf ]; then \
 		mkdir -p build/devices/ps5 && ditto build/ps5/app_modern/PPSA99961 build/devices/ps5/PPSA99961 && \
-		cp build/ps5/host/launch-PPSA99961.elf build/devices/ps5/launch.elf && echo "ps5: kit"; else echo "ps5: not built (make ps5-modern; tools/ps5/deploy.sh once makes the launch payload)"; fi
+		cp build/ps5/host/launch-PPSA99961.elf build/devices/ps5/launch.elf && echo "ps5: kit (no pinned stable kit in $(PS5_STABLE))"; \
+	else echo "ps5: not built (make ps5-modern; tools/ps5/deploy.sh once makes the launch payload)"; fi
 	@if [ -n "$(PUBLIC)" ]; then \
 		if [ "$(DEVICE_KITS_IOS)" = 1 ]; then echo "ios: a public build never carries a team-signed iPhone app (no DEVICE_KITS_IOS=1)"; exit 1; fi; \
 		$(call ios_ipa,build/ios/app_modern/BlitzRecompiled.app,build/devices/ios); \

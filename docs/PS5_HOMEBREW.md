@@ -95,7 +95,16 @@ Next, in order:
    the file, past the log pipe: the start-up steps, Save & Quit's and a resume's steps, `stall:` when the UI thread or
    the game's frames stop for 10 s mid-run, and `quit: ...` lines. A quit that hasn't closed the title 8 s after the
    game was told to stop is closed through the system shell anyway (platform_ps5.cpp `ps5_watch`).
-6. **Save & Quit's resume guard** (savestate.cpp, every platform): `savestates/quit.resuming` is on the disk while
+6. **Driving it from the Mac (1.0.2):** put an empty `/data/blitzrecomp/live.txt` there before the title starts, and
+   lines appended to it over FTP (`APPE`) are dev_input.cpp's live commands (presses, `QUITPROMPT`, `KEY Return`,
+   `REPLAY open`, `CONFIG ...`), read from the file's end each run. Fake phones (the websocket protocol in
+   phone_pads.cpp) play as controllers. Delete live.txt afterwards: without it nothing is read.
+7. **Seeing the screen with no capture:** the live command `DUMP` writes the game's RAM to
+   `Blitz2026Recompiled/dumps/rdram_<t>.bin` (8 MB; the log line names the display list), and
+   `tools/gbi_dump.py <dump> <dlist> --render out.png` draws that frame on the Mac (the game's picture only, not the app's
+   menus over it). Delete the dump afterwards. **Never abort an FTP download part way:** on 2026-11-17 etaHEN's FTP
+   stopped answering for good soon after one was cut off, and only hands at the console bring it back.
+8. **Save & Quit's resume guard** (savestate.cpp, every platform): `savestates/quit.resuming` is on the disk while
    "Pick up your game?" is first up and while a Resume runs, until the game's frames show. A start that finds it moves
    quit.state aside as `quit.state.failed` (and `quit.txt.failed`) and doesn't offer it. 2026-11-15: a Save & Quit on
    the console froze, and every start after it hung until quit.state was moved aside by hand.

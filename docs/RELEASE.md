@@ -107,3 +107,22 @@ SDL's asserts, so run them again before a release.
 - ~~**RecompFrontend has no license file.**~~ Settled 2026-11-13: upstream now carries `COPYING` (GPL-3.0; GitHub's licence API for N64Recomp/RecompFrontend). Since 2026-11-14 the pin is upstream main (2ddbfc8), which has it: `lib/RecompFrontend/COPYING`.
 - **The full BLITZ 2027 logo includes the NFL wordmark.** Decide whether the public apps ship the BLITZ '27 lockup (no NFL mark) instead.
 - ~~**Getting a Modern Blitz ROM.**~~ Settled 2026-10-19: Modern plays the plain USA v1.1 ROM, the same one as Classic.
+
+## The PS5: one stable build, then betas (2026-11-16)
+
+The team's PS5 went back to stock after the last 1.0.2 test (2026-11-17), so no later PS5 build can be run on a PS5 by us.
+
+- **Stable:** the build that passed on the console, pinned in `build/ps5_stable/current` (a link to e.g.
+  `1.0.2-build805/`: `PPSA99961/`, `launch.elf`, and `STABLE.txt` = its version and build, its eboot's sha256, the commit
+  and where the test is written up). `make device-kits` puts it in every Mac app as `devices/ps5`, and Blitz Builder's
+  PS5 step sends it ("Sends New Blitz 1.0.2 (build 805), the PS5 build tested on a PS5").
+- **Beta:** a later version's own PS5 build goes in as `devices/ps5-beta`; the Builder offers **Send Beta (untested)**
+  and the live command `SEND ps5-beta <address>`. A version whose stable kit is its own (1.0.2: `STABLE.txt`'s first
+  word is `VERSION`) has no beta: its release rebuild would only be an untested copy.
+- **The release refuses** a Mac app whose stable kit is missing or whose eboot no longer matches `STABLE.txt`'s sha256.
+- **A stable kit must be a release build** (`make ps5-modern BLITZ_CONTENT=public RELEASE=1 VERSION=x.y.z`, as `make
+  release` builds it): a dev build carries this Mac's paths and fails `tools/release_scan.sh`. `make_release.sh` checks
+  the pinned eboot for them before building (2026-11-17: 803 and 789 were dev builds; 805 is 803's code built for release).
+- **Keep the stable build working:** later Mac apps still send it its first setup (rules, season, general settings) and
+  the season server still serves it rosters. Change those formats only in ways an older build reads (add fields, never
+  rename or remove), and keep `paks/catalog.json` and the rosters manifest readable by it.

@@ -118,6 +118,8 @@ void blitz_e32_credits(uint8_t* rdram, recomp_context* ctx);  // engine32.cpp: t
 void blitz_league_menu(uint8_t* rdram, recomp_context* ctx, int32_t where);  // league paks (content_pack_tp.cpp)
 void blitz_uniform_picker(uint8_t* rdram, recomp_context* ctx);  // uniform_picker.cpp
 void blitz_uniform_kickoff(recomp_context* ctx);
+// Season's pre-game screen (src/game/season_pregame.cpp; engine32 only): 1 = PLAY waits for it (the handler returns).
+int blitz_season_pregame(uint8_t* rdram, recomp_context* ctx);
 #endif
 
 // Season standings / seeding by host code (src/game/season_tiebreak.cpp): 1 = done, skip the game's.

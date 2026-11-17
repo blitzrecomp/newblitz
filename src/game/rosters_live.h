@@ -41,8 +41,8 @@ namespace blitz {
     // The club's players (active, out, reserve lists; no practice squad), in the file's order. Empty without a player file.
     std::vector<RosterPlayer> roster_of(const std::string& franchise);
     std::optional<RosterPlayer> roster_player(const std::string& id);
-    // The club's 15 slots in the lineup the Lineups setting plays (outside Advanced), as ESPN ids ("" = the pack's).
-    std::array<std::string, 15> lineup_ids(const std::string& franchise);
+    // The club's 15 slots in the lineup lineup_now(adv_week) plays, as ESPN ids ("" = the pack's).
+    std::array<std::string, 15> lineup_ids(const std::string& franchise, int adv_week = -1);
     // The club's full-strength lineup (injuries ignored), as ESPN ids.
     std::array<std::string, 15> full_ids(const std::string& franchise);
 

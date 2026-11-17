@@ -32,6 +32,16 @@ STAGE=build/release/stage
 mkdir -p "$LOGS"
 say() { printf '\n== %s\n' "$*"; }
 
+# The pinned stable PS5 kit goes out as built, so it must be a RELEASE=1 build: a dev build carries this machine's paths
+# and fails release_scan.sh after the long build (2026-11-17: 803, and 789 before it). Checked first.
+STABLE_EBOOT="${PS5_STABLE:-build/ps5_stable/current}/PPSA99961/eboot.bin"
+if [ -f "$STABLE_EBOOT" ]; then
+    me=$(id -un)
+    if strings -a "$STABLE_EBOOT" | grep -q -F -e "/Users/$me" -e "/home/$me" -e "${HOME%/}"; then
+        echo "the pinned stable PS5 eboot ($STABLE_EBOOT) has this machine's build paths: pin a RELEASE=1 build"; exit 1
+    fi
+fi
+
 if [ -z "${RELEASE_SKIP_BUILD:-}" ]; then
     # One make: the game's code is generated once for all of them. Device kits first: the Mac app takes them in.
     say "building (log: $LOGS/build.log)"
@@ -46,11 +56,17 @@ fi
 [ "$(cat build/devices/content.txt 2>/dev/null)" = public ] || { echo "build/devices isn't the public kits (make device-kits BLITZ_CONTENT=public)"; exit 1; }
 # RELEASE_NO_ANDROID=1 leaves the Android kit out of every download (2026-11-15: a release key to remake; the Builder
 # then says "This build has no Android kit").
-KITS="ps5/PPSA99961/eboot.bin ps5/launch.elf android/NewBlitz.apk ios/NewBlitz.ipa"
-[ -n "${RELEASE_NO_ANDROID:-}" ] && KITS="ps5/PPSA99961/eboot.bin ps5/launch.elf ios/NewBlitz.ipa"
+KITS="ps5/PPSA99961/eboot.bin ps5/launch.elf ps5/STABLE.txt android/NewBlitz.apk ios/NewBlitz.ipa"
+[ -n "${RELEASE_NO_ANDROID:-}" ] && KITS="ps5/PPSA99961/eboot.bin ps5/launch.elf ps5/STABLE.txt ios/NewBlitz.ipa"
 for k in $KITS; do
     [ -f "build/devices/$k" ] || { echo "missing device kit: build/devices/$k"; exit 1; }
 done
+# The PS5 kit a release sends by default is the pinned stable one (build/ps5_stable/current, tested on a PS5; 2026-11-16:
+# the team has no PS5 after that): its STABLE.txt names it, and its eboot must still be the one that passed.
+want=$(sed -n 's/^sha256: //p' build/devices/ps5/STABLE.txt)
+have=$(shasum -a 256 build/devices/ps5/PPSA99961/eboot.bin | cut -d' ' -f1)
+[ -n "$want" ] && [ "$want" = "$have" ] || { echo "the stable PS5 kit isn't the eboot that passed on a PS5 (STABLE.txt sha256: ${want:-none})"; exit 1; }
+echo "PS5 stable: $(head -1 build/devices/ps5/STABLE.txt)$([ -d build/devices/ps5-beta ] && echo ", plus this version's beta")"
 [ ! -e build/devices/ios/NewBlitz.app.zip ] || { echo "build/devices has a team-signed iPhone app: never in a release"; exit 1; }
 
 rm -rf "$STAGE" "$OUT"

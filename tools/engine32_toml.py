@@ -32,6 +32,9 @@ HOOKS = [
     # sequence's New Features screen (engine32.cpp).
     ("ovl_b_func_802F0614", 0x802F0650, "ctx->r4 = blitz_e32_screen_image((int32_t)ctx->r4);"),
     ("ovl_b_func_802F02C4", 0x802F02C4, "blitz_e32_credits(rdram, ctx);"),
+    # Season → PLAY WEEK → PLAY (main func_802636AC, the dialog's handler, before its frame): the pre-game screen
+    # (season_pregame.cpp) first. True: the handler ends at once and the dialog is back on PLAY / SIMULATE.
+    ("func_802636AC", 0x802636AC, "if (blitz_season_pregame(rdram, ctx)) return;"),
 ]
 # Plain instruction changes: (function, address, the game's word, ours).
 WORDS = [

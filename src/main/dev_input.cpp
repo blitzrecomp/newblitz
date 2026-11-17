@@ -13,7 +13,10 @@
 // More live commands: "GFX key=value ..." changes a graphics option for this session only
 // (ar=Original|Expand, hr=Original|Clamp16x9|Full, rr=Original|Display|Manual, rr_manual=N),
 // "DUMP" writes an RDRAM dump (see BLITZ_DUMP_RDRAM_AT), "PAD -2" / "PAD +2" unplugs / plugs in
-// virtual controller 2 (BLITZ_VIRTUAL_PADS), and "RESTART" does what Settings → Restart does.
+// virtual controller 2 (BLITZ_VIRTUAL_PADS), "RESTART" does what Settings → Restart does, and "HANG [seconds]" stops the
+// game's thread at its next controller read, for good or for that long (the freeze rescue's tests, savestate.cpp).
+// On a PS5 the live file is /data/blitzrecomp/live.txt, if it's there when the title starts (lines appended over FTP).
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #ifdef __ANDROID__
@@ -51,7 +54,7 @@ namespace blitz {
     void replay_open();                         // replay_screen.cpp (the live command REPLAY)
     void replay_close();
     void replay_save();
-    void send_to_ps5(const std::string& ip);  // device_send.cpp (the live command SEND)
+    void send_to_ps5(const std::string& ip, bool beta);  // device_send.cpp (the live command SEND)
     void send_to_iphone();
     void send_to_android();
     void save_iphone_ipa();
@@ -86,9 +89,26 @@ namespace {
     std::once_flag parsed;
     std::chrono::steady_clock::time_point game_start = std::chrono::steady_clock::now();
     bool started = false;
+    // The live file: BLITZ_INPUT_LIVE, or on a PS5 (a title has no environment) /data/blitzrecomp/live.txt when it's
+    // there at start: copied there over FTP for a remote test, read from its end, and absent (nothing read) otherwise.
+#if defined(__PROSPERO__)
+    constexpr const char* ps5_live_file = "/data/blitzrecomp/live.txt";
+#endif
+    const char* live_path() {
+        static const char* path = []() -> const char* {
+            if (const char* e = getenv("BLITZ_INPUT_LIVE")) return e;
+#if defined(__PROSPERO__)
+            std::error_code ec;
+            if (std::filesystem::is_regular_file(ps5_live_file, ec)) return ps5_live_file;
+#endif
+            return nullptr;
+        }();
+        return path;
+    }
+
     // live.sh (BLITZ_INPUT_LIVE): presses as they're typed, from launch, so the virtual pads can drive the launcher
     // and its prompts (Blitz Builder) too; a script's times stay relative to the game's start.
-    const bool live_mode = getenv("BLITZ_INPUT_LIVE") != nullptr;
+    const bool live_mode = live_path() != nullptr;
 
     uint16_t button_mask(const std::string& name) {
         static const std::pair<const char*, uint16_t> table[] = {
@@ -105,6 +125,19 @@ namespace {
         }
         fprintf(stderr, "[input] unknown button '%s'\n", name.c_str());
         return 0;
+    }
+
+    // The live command HANG (tests only): the game's thread held at its next controller read (0: not asked, -1: for good).
+    std::atomic<int64_t> hang_until_ms{0};
+    int64_t steady_ms() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+    void dev_hang() {
+        const int64_t until = hang_until_ms.exchange(0);
+        if (until == 0) return;
+        fprintf(stderr, "[dev] HANG: the game's thread stops at this controller read%s\n", until < 0 ? ", for good" : "");
+        while (until < 0 || steady_ms() < until) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        fprintf(stderr, "[dev] HANG over: the game's thread runs again\n");
     }
 
     double seconds_since_start() {
@@ -178,6 +211,12 @@ namespace {
         }
         if (word == "DUMP") {
             blitz::dev_dump_rdram();
+            return true;
+        }
+        if (word == "HANG") {  // "HANG": the game's thread stops at its next controller read, for good; "HANG 8": for 8 s (the freeze rescue)
+            double secs = 0;
+            ss >> secs;
+            hang_until_ms = secs > 0 ? steady_ms() + (int64_t)(secs * 1000) : -1;
             return true;
         }
         if (word == "KEY") {  // "KEY Return", "KEY Down", "KEY Backspace": an app menu's key (SDL's names), as a remote can't touch
@@ -347,7 +386,8 @@ namespace {
         if (word == "SEND") {  // "SEND ps5 192.168.0.90", "SEND iphone", "SEND android", "SEND ipa": Blitz Builder's device send
             std::string what, arg;
             ss >> what >> arg;
-            if (what == "ps5") blitz::send_to_ps5(arg);
+            if (what == "ps5") blitz::send_to_ps5(arg, false);
+            else if (what == "ps5-beta") blitz::send_to_ps5(arg, true);
             else if (what == "iphone") blitz::send_to_iphone();
             else if (what == "android") blitz::send_to_android();
             else if (what == "ipa") blitz::save_iphone_ipa();  // Save the iPhone app (.ipa)
@@ -380,7 +420,11 @@ namespace {
     // Poll the live input file for appended lines and press each one now.
     void watch_live_file(std::string path) {
         std::streamoff offset = 0;
-        if (getenv("BLITZ_INPUT_LIVE_FROM_END") != nullptr) {  // a restarted copy: skip what the old one read
+        bool from_end = getenv("BLITZ_INPUT_LIVE_FROM_END") != nullptr;  // a restarted copy: skip what the old one read
+#if defined(__PROSPERO__)
+        from_end = true;  // the console's file outlives each run
+#endif
+        if (from_end) {
             std::ifstream f{path, std::ios::binary | std::ios::ate};
             if (f) offset = f.tellg();
         }
@@ -422,7 +466,7 @@ namespace {
     }
 
     void parse() {
-        if (const char* live = getenv("BLITZ_INPUT_LIVE")) {
+        if (const char* live = live_path()) {
             std::thread(watch_live_file, std::string{live}).detach();
             fprintf(stderr, "[input] live input from %s\n", live);
         }
@@ -454,7 +498,7 @@ namespace blitz {
     // The launcher's and first run's screens (main.cpp, at start): the live file's commands (KEY Return, KEY Down ...)
     // are read from the start, not only once the game polls its controllers. Presses still wait for the game.
     void dev_input_early() {
-        if (getenv("BLITZ_INPUT_LIVE") != nullptr) std::call_once(parsed, parse);
+        if (live_path() != nullptr) std::call_once(parsed, parse);
     }
 
     bool port_input(int port, uint16_t* buttons, float* x, float* y);  // controllers.cpp
@@ -486,12 +530,14 @@ namespace blitz {
         injected[port] = {buttons, std::chrono::steady_clock::now() + std::chrono::milliseconds(ms)};
     }
 
+    void pregame_input_filter(int port, uint16_t* buttons);  // season_pregame.cpp
+
     // Returning false makes the runtime report "no response" for the port, as for an empty one.
     void receiver_targets_filter(int port, uint16_t* buttons, float* x, float* y);  // receiver_targets.cpp
 
     // Scripted presses for player 1 (BLITZ_INPUT, live.sh), added to the controller's own.
     void add_scripted(uint16_t* buttons, float* x, float* y) {
-        static const bool active = getenv("BLITZ_INPUT") != nullptr || getenv("BLITZ_INPUT_LIVE") != nullptr;
+        static const bool active = getenv("BLITZ_INPUT") != nullptr || live_path() != nullptr;
         if (!active || !started) return;
         double now = seconds_since_start();
         std::lock_guard lock{events_mutex};
@@ -513,6 +559,8 @@ namespace blitz {
             return false;
         }
         std::call_once(parsed, parse);
+        if (live_mode) dev_hang();
+        pregame_input_filter(controller_num, buttons);  // season_pregame.cpp: what closed that screen stays its own
         if (controller_num >= 0 && controller_num < 4) {
             std::lock_guard lock{inject_mutex};
             if (injected[controller_num].buttons && std::chrono::steady_clock::now() < injected[controller_num].until) {

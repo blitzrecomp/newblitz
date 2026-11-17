@@ -1037,6 +1037,15 @@ extern "C" void blitz_league_bank(uint8_t* rdram) {
 
 namespace {
     constexpr uint32_t adv_rec_week = 0x802EF6F1;  // the season record's week (main bss; adv_season.cpp)
+}
+
+namespace blitz {
+    // The week whose lineup the game lays (lineup_now's argument): with Advanced on, the season record's week, in every
+    // mode; else -1. Pick Your Crew shows the same lineup (crew.cpp), so a row left alone is the player who plays.
+    int game_lineup_week(uint8_t* rdram) { return blitz::advanced_mode() ? (int)rd8(rdram, adv_rec_week) : -1; }
+}
+
+namespace {
 
     // The weekly lineup (rosters_live.cpp) over the Blitz 2026 pack's 15 slots per team, then each team's saved crew
     // (Roster Room, Pick Your Crew: crew.cpp) over that: name, number, body and skin shade (where one's been
@@ -1074,7 +1083,7 @@ namespace {
 
     void lineup_overlay(uint8_t* rdram) {
         if (!active || active->id != "blitz2026" || active->league || franchise_by_slot.empty()) return;
-        auto lineup = blitz::lineup_now(blitz::advanced_mode() ? (int)rd8(rdram, adv_rec_week) : -1);
+        auto lineup = blitz::lineup_now(blitz::game_lineup_week(rdram));
         static std::string logged;
         std::string label = lineup ? lineup->label : "as packed";
         if (logged != label) {

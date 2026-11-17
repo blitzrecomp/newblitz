@@ -67,7 +67,9 @@ namespace blitz {
     void save_iphone_ipa();
     void save_android_apk();
     std::string ps5_last_address();
-    void send_to_ps5(const std::string& ip);
+    void send_to_ps5(const std::string& ip, bool beta);
+    std::string ps5_stable_label();  // device_send.cpp: "1.0.2 (build 789)", the build tested on a PS5
+    bool ps5_beta_available();
     void send_to_iphone();
     void send_to_android();
     void send_to_android_replacing();      // the device's New Blitz removed first (another signature)
@@ -140,6 +142,7 @@ namespace {
         bool rosters = true, reports = false;  // D's boxes, kept while going back and forth
         bool updates_read = false;             // ... read from the settings the first time D shows
         std::string ps5_ip;
+        bool ps5_beta = false;  // Send Beta: this version's PS5 build, untested on a PS5
         std::string send_result;
         std::string send_progress;  // the progress line on the Sending screen now
         std::string send_problem;   // an Android send's problem (device_send_problem), for its way forward
@@ -527,7 +530,7 @@ namespace {
 
     void start_send() {
         log("send start target=%s%s", send_target().c_str(), st.phone == AndroidUsb && st.android_replace ? " replace=1" : "");
-        if (st.where == Ps5Target) blitz::send_to_ps5(st.ps5_ip);
+        if (st.where == Ps5Target) blitz::send_to_ps5(st.ps5_ip, st.ps5_beta);
         else if (st.phone == AndroidUsb && st.android_replace) blitz::send_to_android_replacing();
         else if (st.phone == AndroidUsb) blitz::send_to_android();
         else if (st.phone == AndroidFile) blitz::save_android_apk();
@@ -880,8 +883,14 @@ namespace {
             }
             case Ps5: {
                 if (st.ps5_ip.empty()) st.ps5_ip = blitz::ps5_last_address();
-                s = base("Send to your PS5", "On the PS5: etaHEN running, same network. Settings \xE2\x86\x92 Network shows the "
-                                             "address.\n\nThe PS5's address: " + st.ps5_ip);
+                {
+                    std::string stable = blitz::ps5_stable_label();
+                    std::string which = stable.empty() ? "" : "\n\nSends New Blitz " + stable + ", the PS5 build tested on a PS5.";
+                    if (blitz::ps5_beta_available())
+                        which += " Send Beta sends this version's PS5 build instead: newer, but never run on a PS5.";
+                    s = base("Send to your PS5", "On the PS5: etaHEN running, same network. Settings \xE2\x86\x92 Network shows the "
+                                                 "address.\n\nThe PS5's address: " + st.ps5_ip + which);
+                }
                 // Send and Start can't restart a copy that's already open (the launch payload leaves it running).
                 s.note = "If New Blitz is already open on the PS5, close it first.";
                 s.actions = {
@@ -893,6 +902,7 @@ namespace {
                             blitz::post_status("That doesn't look like an address (like 192.168.1.20)");
                             return;
                         }
+                        st.ps5_beta = false;
                         start_send();
                     }),
                     act("Change Address", "change-address", [] {
@@ -902,6 +912,17 @@ namespace {
                         });
                     }),
                 };
+                if (blitz::ps5_beta_available())
+                    s.actions.push_back(act("Send Beta (untested)", "send-beta", [] {
+                        int a, b, c, d;
+                        char extra;
+                        if (sscanf(st.ps5_ip.c_str(), "%d.%d.%d.%d%c", &a, &b, &c, &d, &extra) != 4 || a > 255 || b > 255 || c > 255 || d > 255) {
+                            blitz::post_status("That doesn't look like an address (like 192.168.1.20)");
+                            return;
+                        }
+                        st.ps5_beta = true;
+                        start_send();
+                    }));
                 break;
             }
             case Sent:

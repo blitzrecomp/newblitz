@@ -183,9 +183,10 @@ namespace {
         int overlay_segment = -1, overlay_stadium = -1;
         std::vector<std::pair<std::string, blitz::StateBlob>> modules;  // blitz_savestate.h
         int slot = 0;  // which slot it came from or went to (not stored in the file)
+        std::time_t taken = 0;  // when it was made (not stored in the file): the freeze rescue against a Save & Quit
     };
 
-    std::mutex threads_mutex;  // live, sleepers, pending_resume
+    std::timed_mutex threads_mutex;  // live, sleepers, pending_resume (timed: the freeze rescue mustn't wait on a stuck game)
     std::unordered_map<int32_t, LiveThread> live;
     std::unordered_map<int32_t, Sleeper> sleepers;
     std::unordered_map<int32_t, ThreadImage> pending_resume;  // recreated threads, applied as they start
@@ -384,6 +385,7 @@ namespace {
 
     Snapshot make_snapshot(uint8_t* rdram, recomp_context* ctx, int32_t self) {
         Snapshot s;
+        s.taken = std::time(nullptr);
         s.rdram.assign(rdram, rdram + rdram_size);
         s.dispatcher = image_thread(self, ctx, StackImage{});
         auto procs = processes(rdram);
@@ -683,12 +685,11 @@ namespace {
         return (bool)f.read((char*)v.data(), sizeof(T) * n);
     }
 
-    bool write_file(const Snapshot& s, int slot) {
+    bool write_file_to(const Snapshot& s, const std::filesystem::path& path) {
         // One writer at a time: two quick saves to a slot must not interleave in its temp file.
         static std::mutex write_mutex;
         std::lock_guard write_lock{write_mutex};
         std::error_code ec;
-        std::filesystem::path path = state_file(slot);
         std::filesystem::create_directories(path.parent_path(), ec);
         std::filesystem::path tmp = path;
         tmp += ".tmp";
@@ -722,6 +723,7 @@ namespace {
         if (ec) return failed();
         return true;
     }
+    bool write_file(const Snapshot& s, int slot) { return write_file_to(s, state_file(slot)); }
 
     // A loaded file's call chains index the site table and its threads go into game memory: anything out of
     // range means the file is damaged.
@@ -910,8 +912,229 @@ extern "C" void blitz_thread_created(uint8_t* rdram, recomp_context* ctx) {
     throw ultramodern::thread_terminated{};
 }
 
+// ---- The freeze rescue ----
+// (the team's iPhone, 2026-11-16: the game froze on the last play of a Season game; his save state loads and the Auto slot on
+// going to the background all waited on the stuck game thread, and the game was lost.) The VI thread runs on when the game's
+// thread is stuck, and fps_counter.cpp calls rescue_watch on every VI. Mid-game, with no new game frame for 5 s, the newest
+// Redo Play snapshot (the top of the play being run: whole before it went into the ring, and copied under the ring's lock)
+// is written as savestates/rescue.state with rescue.txt, from a thread of its own, and the player is told once to close the
+// app and open it again. The next start makes it quit.state, which "Pick up your game?" offers (with its resume guard).
+// The game's frames coming again for 10 s, the next play or the game's end clear it, so it can't bring an old game back.
+// A Save & Quit save made after the snapshot is kept instead; an older one (put off at its prompt) goes aside as
+// quit.state.older when the rescue takes its place at the next start.
+static std::atomic_bool in_background{false};  // the app is in the background (blitz_app_background)
+namespace blitz {
+    extern std::atomic_bool background_hold;  // replay.cpp: the game holds at its dispatcher
+    bool replay_is_open();                    // replay_screen.cpp: the game's stopped under a replay
+}
+// RT64 presents only for the game's frames: with none coming, the toast and the quit prompt would never show. Instant Replay
+// has the same need (rt64_blitz_replay.cpp: a present every VI while it's set).
+extern "C" { extern volatile int blitz_replay_keep_presenting; }
+namespace {
+    enum class Rescue { none, writing, kept };
+    std::atomic<Rescue> rescue{Rescue::none};
+    std::atomic<uint64_t> rescue_gen{0};    // each clear: a write that began before it keeps nothing
+    std::mutex rescue_files_mutex;          // rescue.state's writing and removal (never held while waiting on threads_mutex)
+    std::atomic<double> frames_away{0.0};   // the latest rescue_watch: going to the background reads it
+    std::atomic<bool> rescue_toast{false};  // the held toast up is the rescue's
+
+    std::filesystem::path rescue_file() { return state_file(0).parent_path() / "rescue.state"; }
+    std::filesystem::path rescue_txt() { return state_file(0).parent_path() / "rescue.txt"; }
+    std::filesystem::path quit_txt() { return std::filesystem::path(state_file(0)).replace_extension(".txt"); }
+
+    double rescue_after_s() {
+        static const double s = [] { const char* e = getenv("BLITZ_RESCUE_AFTER"); const double v = e ? atof(e) : 0; return v > 0 ? v : 5.0; }();
+        return s;
+    }
+
+    std::time_t file_time(const std::filesystem::path& p) {
+        std::error_code ec;
+        auto ft = std::filesystem::last_write_time(p, ec);
+        if (ec) return 0;
+        auto sys = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+            ft - std::filesystem::file_time_type::clock::now() + std::chrono::system_clock::now());
+        return std::chrono::system_clock::to_time_t(sys);
+    }
+
+    std::string rescue_message(const std::string& where) {
+#if defined(__ANDROID__) || defined(BLITZ_IOS) || defined(__PROSPERO__)
+        const char* how = "Close New Blitz and open it again";  // a phone or handheld: swipe it away
+#else
+        const char* how = "Quit New Blitz and open it again";
+#endif
+        return std::string("The game stopped responding. ") + how + (where.empty() ? " to pick up your game." : " to pick up from " + where + ".");
+    }
+
+    // On its own thread (or the one going to the background): the newest Redo Play snapshot to rescue.state.
+    void rescue_write() {
+        const uint64_t gen = rescue_gen.load();
+        Snapshot copy;
+        {
+            std::unique_lock lock{threads_mutex, std::defer_lock};
+            if (!lock.try_lock_for(std::chrono::seconds(2))) {  // stuck holding it: a snapshot might be half made
+                fprintf(stderr, "[rescue] the game stopped with its snapshots locked: nothing kept\n");
+                rescue = Rescue::none;
+                return;
+            }
+            if (redo_ring.empty()) {
+                fprintf(stderr, "[rescue] the game stopped, with no Redo Play snapshot to keep\n");
+                rescue = Rescue::none;
+                return;
+            }
+            copy = redo_ring.back();
+        }
+        const std::string where = describe_play(copy);
+        std::lock_guard files{rescue_files_mutex};
+        if (gen != rescue_gen.load()) {
+            fprintf(stderr, "[rescue] not kept: the game runs again\n");
+            return;
+        }
+        std::error_code ec;
+        if (std::filesystem::exists(state_file(0), ec) && file_time(state_file(0)) >= copy.taken) {
+            std::string saved;
+            std::getline(std::ifstream(quit_txt()), saved);
+            fprintf(stderr, "[rescue] game stopped at %s: the Save & Quit save made after it is kept for the next start instead\n", where.c_str());
+            rescue = Rescue::kept;  // nothing of the rescue's own on the disk
+            rescue_toast = true;
+            blitz::post_status_held(rescue_message(saved));
+            return;
+        }
+        if (!write_file_to(copy, rescue_file())) {
+            fprintf(stderr, "[rescue] game stopped at %s: rescue.state couldn't be written\n", where.c_str());
+            rescue = Rescue::none;
+            return;
+        }
+        {
+            std::ofstream t(rescue_txt(), std::ios::trunc);
+            t << describe_game(copy) << "\nrescue " << (long long)copy.taken << "\n";  // line 2: the prompt's wording, and which is newer
+        }
+        blitz::sync_file(rescue_txt());
+        rescue = Rescue::kept;
+        fprintf(stderr, "[rescue] game stopped at %s: kept for the next start\n", where.c_str());
+        rescue_toast = true;
+        blitz::post_status_held(rescue_message(where));
+    }
+
+    // The game runs again (or ended): rescue.state goes, and the toast with it.
+    void rescue_clear(const char* why) {
+        if (rescue.load() == Rescue::none) return;
+        std::lock_guard files{rescue_files_mutex};
+        rescue_gen++;
+        std::error_code ec;
+        std::filesystem::remove(rescue_file(), ec);
+        std::filesystem::remove(rescue_txt(), ec);
+        if (rescue.exchange(Rescue::none) == Rescue::none) return;
+        fprintf(stderr, "[rescue] cleared (%s)\n", why);
+        if (rescue_toast.exchange(false)) blitz::release_status();
+    }
+
+    // Now, on this thread (going to the background, stuck): one already going gets 3 s to finish.
+    void rescue_now() {
+        Rescue expected = Rescue::none;
+        if (rescue.compare_exchange_strong(expected, Rescue::writing)) {
+            rescue_write();
+            return;
+        }
+        for (int i = 0; i < 30 && rescue.load() == Rescue::writing; i++) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    // Once, at a start's first UI tick (after the resume guard): the last start's rescue becomes the game to pick up.
+    void rescue_startup() {
+        std::error_code ec;
+        if (!std::filesystem::exists(rescue_file(), ec)) {
+            std::filesystem::remove(rescue_txt(), ec);
+            return;
+        }
+        std::string what, tag;
+        {
+            std::ifstream t(rescue_txt());
+            std::getline(t, what);
+            std::getline(t, tag);
+        }
+        std::time_t taken = tag.rfind("rescue ", 0) == 0 ? (std::time_t)atoll(tag.c_str() + 7) : 0;
+        if (taken == 0) taken = file_time(rescue_file());
+        const std::filesystem::path quit = state_file(0);
+        if (std::filesystem::exists(quit, ec) && file_time(quit) >= taken) {
+            std::filesystem::remove(rescue_file(), ec);
+            std::filesystem::remove(rescue_txt(), ec);
+            fprintf(stderr, "[rescue] the last start's stopped game is older than its Save & Quit save: that one is offered\n");
+            return;
+        }
+        if (std::filesystem::exists(quit, ec)) {
+            for (const std::filesystem::path& from : {quit, quit_txt()}) {
+                const std::filesystem::path older = with_suffix(from, ".older");
+                std::filesystem::remove(older, ec);
+                std::filesystem::rename(from, older, ec);
+            }
+            fprintf(stderr, "[rescue] an older Save & Quit save goes aside as quit.state.older\n");
+        }
+        std::filesystem::rename(rescue_file(), quit, ec);
+        if (ec) {
+            fprintf(stderr, "[rescue] rescue.state couldn't become quit.state: %s\n", ec.message().c_str());
+            std::filesystem::remove(rescue_file(), ec);
+            std::filesystem::remove(rescue_txt(), ec);
+            return;
+        }
+        std::filesystem::remove(quit_txt(), ec);
+        std::filesystem::rename(rescue_txt(), quit_txt(), ec);
+        fprintf(stderr, "[rescue] the last start's stopped game is the game to pick up: %s\n", what.c_str());
+    }
+}
+
+namespace blitz {
+    // VI thread, every VI: how long the game's frames have been away (0 before the game starts).
+    void rescue_watch(double away) {
+        using C = std::chrono::steady_clock;
+        static bool this_stall = false;   // this stall was looked at
+        static C::time_point flowing{};   // the frames have come steadily since
+        static bool presenting = false;   // blitz_replay_keep_presenting is set for the rescue's toast
+        frames_away = away;
+        // Instant Replay stops the game while it's open: that stall is the replay's, not a freeze, up to the game's
+        // next frame (the VI after the replay closes still sees it; PS5 2026-11-17: a 7 s replay posted the rescue).
+        if (blitz::replay_is_open()) this_stall = true;
+        if (away >= rescue_after_s()) {
+            flowing = {};
+            if (rescue.load() != Rescue::none && !blitz::replay_is_open()) {  // again each VI: a replay that couldn't open clears it
+                blitz_replay_keep_presenting = 1;
+                presenting = true;
+            }
+            if (this_stall || !in_game.load() || in_background.load() || blitz::background_hold.load() || blitz::replay_is_open()) return;
+            this_stall = true;
+            Rescue expected = Rescue::none;
+            if (!rescue.compare_exchange_strong(expected, Rescue::writing)) return;
+            fprintf(stderr, "[rescue] no game frame for %.0f s mid-game: keeping the newest Redo Play snapshot\n", away);
+            try {
+                std::thread(rescue_write).detach();
+            } catch (...) {
+                rescue = Rescue::none;
+            }
+            return;
+        }
+        if (away >= 0.5) {  // a late frame: the steady count starts again
+            flowing = {};
+            return;
+        }
+        this_stall = blitz::replay_is_open();
+        if (presenting) {  // the game's own frames present again
+            presenting = false;
+            if (!blitz::replay_is_open()) blitz_replay_keep_presenting = 0;
+        }
+        if (rescue.load() != Rescue::kept) {
+            flowing = {};
+            return;
+        }
+        const C::time_point now = C::now();
+        if (flowing == C::time_point{}) flowing = now;
+        else if (now - flowing >= std::chrono::seconds(10)) {
+            flowing = {};
+            rescue_clear("frames again");
+        }
+    }
+}
+
 // Redo Play hooks: the top of every play (checkpoint.cpp), the end of a play (play_log.cpp), game over.
 extern "C" void blitz_redo_play_top(uint8_t* rdram) {
+    rescue_clear("next play");  // the game got past a stall
     if (MEM_W(0, (gpr)(int32_t)0x802EA420) != 2 || !blitz::redo_play_enabled()) return;  // real games only
     redo_capture = true;
 }
@@ -922,6 +1145,7 @@ extern "C" void blitz_redo_play_ended(uint8_t* rdram) {
 }
 
 extern "C" void blitz_redo_clear() {
+    rescue_clear("the game ended");
     redo_capture = false;
     std::lock_guard lock{threads_mutex};
     redo_ring.clear();
@@ -999,6 +1223,24 @@ namespace blitz {
 
     bool savestate_quit_prompt() {
         if (!in_game.load() || !ultramodern::is_game_started()) return false;
+        if (rescue.load() == Rescue::kept && frames_away.load() >= rescue_after_s()) {  // stuck: a Save & Quit can't happen
+            recompui::open_choice_prompt(
+                "Quit New Blitz?", "The game stopped responding. Next time, New Blitz offers to pick up from the start of that play.",
+                "Quit", "Keep Waiting",
+                [] {
+                    ultramodern::quit();
+                    // The quit waits for the game's thread, which never comes back: the app closes after 3 s anyway
+                    // (rescue.state is on the disk already).
+                    std::thread([] {
+                        std::this_thread::sleep_for(std::chrono::seconds(3));
+                        fprintf(stderr, "[rescue] the stuck game holds up the quit: closing the app\n");
+                        fflush(stderr);
+                        std::_Exit(0);
+                    }).detach();
+                },
+                [] {}, recompui::ButtonStyle::Success, recompui::ButtonStyle::Tertiary, false);  // Quit first: nothing else helps
+            return true;
+        }
         replay_close();  // Save & Quit needs the game running: it saves at the dispatcher's next turn
         std::string summary;  // as of the last play select (Redo Play's latest snapshot)
         {
@@ -1047,6 +1289,7 @@ namespace blitz {
         if (!guard_checked) {
             guard_checked = true;
             guard_notice = guard_startup();
+            rescue_startup();  // the last start's stopped game, if any, becomes quit.state
         }
         guard_tick();
         static bool asked = false;
@@ -1077,15 +1320,22 @@ namespace blitz {
             blitz::post_status("The game saved on quitting is from another version of the app and can't be picked up");
             return;
         }
-        std::string what;
-        std::getline(std::ifstream(state_file(0).replace_extension(".txt")), what);
+        std::string what, tag;
+        {
+            std::ifstream t(quit_txt());
+            std::getline(t, what);
+            std::getline(t, tag);  // "rescue <time>": kept by the freeze rescue, not by Save & Quit
+        }
+        const bool rescued = tag.rfind("rescue", 0) == 0;
         guard_arm(Guard::offer);
         ps5_crumb("resume: offering quit.state");
         fprintf(stderr, "[savestate] offering the game saved on quitting: %s\n", what.c_str());
+        if (rescued) fprintf(stderr, "[rescue] offered: %s\n", what.c_str());
         blitz::ui_step("savestate prompt: open_choice_prompt");
         recompui::open_choice_prompt(
             "Pick up your game?",
-            what.empty() ? "You saved a game when you last quit." : "You saved this game when you last quit.",
+            rescued ? "The game stopped responding last time. Resume picks it up from the start of that play."
+                    : what.empty() ? "You saved a game when you last quit." : "You saved this game when you last quit.",
             "Resume", "Discard",
             [] {
                 guard_arm(Guard::resume);
@@ -1164,7 +1414,6 @@ namespace blitz {
 }
 static std::atomic_bool hold_after_save{false};  // the Auto slot first, then the hold (blitz_savestate_tick)
 static std::atomic_int pause_then_save{0};       // ticks waited for the pause menu before the Auto slot (0: not waiting)
-static std::atomic_bool in_background{false};
 
 // The app going to the background (a clamshell closed, an app left on a phone). Mid-play: Start, so the game's paused when
 // it's back (team), then the Auto slot once the pause menu's up (or 1.5 s on), then the game holds until it's back, so no
@@ -1175,6 +1424,13 @@ extern "C" void blitz_app_background(void) {
     if (!in_game.load()) {
         blitz::background_hold = true;
         fprintf(stderr, "[background] in the menus: the game holds\n");
+        return;
+    }
+    // The game stuck (no frame for 2 s): the Auto slot would wait on its thread for ever, so the freeze rescue instead, here
+    // and now, before the app is suspended (the team's iPhone, 2026-11-16).
+    if (frames_away.load() >= 2.0 && !blitz::replay_is_open()) {
+        fprintf(stderr, "[background] mid-game, the game stuck (no frame for %.0f s): the freeze rescue instead of the Auto slot\n", frames_away.load());
+        rescue_now();
         return;
     }
     if (blitz_play_mode() == 2 && !blitz::replay_pause_menu.load()) blitz::ds_press(0x1000, 6);  // Start: the pause menu
@@ -1466,6 +1722,7 @@ extern "C" int blitz_touch_port(void) { return 0; }
 namespace blitz {
     bool savestate_quit_prompt() { return false; }
     void savestate_startup_prompt() {}
+    void rescue_watch(double) {}  // no snapshots, no freeze rescue
     bool savestate_save_then(std::function<void(bool)>) { return false; }
 }
 extern "C" void blitz_savestate_tick(uint8_t*, recomp_context*) {}

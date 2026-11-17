@@ -411,6 +411,11 @@ namespace {
             int mb = SDL_GetSystemRAM();
             int t = mb <= 0 ? 1 : mb < 2500 ? 0 : mb < 5000 ? 1 : mb < 12000 ? 2 : 3;
             if (blitz::platform::touch_controls) t = std::min(t, 2);  // a phone's GPU memory is everyone's
+#if defined(BLITZ_PLATFORM_PS5)
+            // SDL counts only part of a PS5's memory (2185 MB on the team's, 2026-11-15), which picked "small", the 1-2 GB
+            // handhelds' tier: a 320x180 replay that looked rough on a TV. The console has far more: "large" at least.
+            t = std::max(t, 2);
+#endif
             if (const char* e = getenv("BLITZ_REPLAY_TIER")) t = std::clamp(atoi(e), 0, 3);
             const Tier& tier = tiers[t];
             blitz_replay_width = tier.width;

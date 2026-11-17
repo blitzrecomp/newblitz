@@ -296,28 +296,34 @@ namespace {
                 blitz::net::close_socket(fd);
                 return;
             }
-            static std::mutex choose_mutex;
-            std::lock_guard choose{choose_mutex};
             Phone* slot = nullptr;
-            if (!token.empty()) {  // this phone's own slot, even if its old connection looks open
-                for (Phone& p : phones) {
-                    std::lock_guard t{p.token_mutex};
-                    if (p.token == token) { slot = &p; break; }
-                }
-            }
-            if (slot == nullptr) {  // a free slot, preferring one no phone has used; never one a locked phone is coming back to
-                for (int pass = 0; pass < 2 && slot == nullptr; pass++) {
+            int gen = 0;
+            {
+                // Held only while a slot is chosen. It used to be held for the whole connection (serve_controller below), so
+                // with one phone playing every other phone, and a phone coming back, waited at its handshake (PS5, 2026-11-16).
+                static std::mutex choose_mutex;
+                std::lock_guard choose{choose_mutex};
+                if (!token.empty()) {  // this phone's own slot, even if its old connection looks open
                     for (Phone& p : phones) {
                         std::lock_guard t{p.token_mutex};
-                        bool lingering = p.left_at != 0 && SDL_GetTicks() - p.left_at < linger_ms;
-                        if (!p.connected && !lingering && (pass == 1 || p.token.empty())) { slot = &p; break; }
+                        if (p.token == token) { slot = &p; break; }
                     }
                 }
-            }
-            if (slot != nullptr) {
-                std::lock_guard t{slot->token_mutex};
-                slot->token = token;
-                slot->connected = true;
+                if (slot == nullptr) {  // a free slot, preferring one no phone has used; never one a locked phone is coming back to
+                    for (int pass = 0; pass < 2 && slot == nullptr; pass++) {
+                        for (Phone& p : phones) {
+                            std::lock_guard t{p.token_mutex};
+                            bool lingering = p.left_at != 0 && SDL_GetTicks() - p.left_at < linger_ms;
+                            if (!p.connected && !lingering && (pass == 1 || p.token.empty())) { slot = &p; break; }
+                        }
+                    }
+                }
+                if (slot != nullptr) {
+                    std::lock_guard t{slot->token_mutex};
+                    slot->token = token;
+                    slot->connected = true;
+                    gen = ++slot->generation;  // an older connection to this slot stops serving it
+                }
             }
             if (slot == nullptr) {
                 send_all(fd, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n");
@@ -326,7 +332,7 @@ namespace {
             }
             std::string accept = base64(sha1(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"));
             send_all(fd, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + accept + "\r\n\r\n");
-            serve_controller(fd, *slot, ++slot->generation);
+            serve_controller(fd, *slot, gen);
         }
 #if BLITZ_MODERN
         else if (req.rfind("GET /logo.png", 0) == 0) {

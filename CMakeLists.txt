@@ -436,6 +436,7 @@ target_sources(BlitzRecompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/src/game/checkpoint.cpp
     ${CMAKE_SOURCE_DIR}/src/game/opponent_select.cpp
     ${CMAKE_SOURCE_DIR}/src/game/crew.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/season_pregame.cpp
     ${CMAKE_SOURCE_DIR}/src/game/roster_room.cpp
     ${CMAKE_SOURCE_DIR}/src/game/mixed_uniforms.cpp
     ${CMAKE_SOURCE_DIR}/src/game/tournament.cpp

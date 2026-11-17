@@ -523,6 +523,41 @@ namespace blitz {
     }
 }
 
+namespace blitz {
+    // Season's pre-game screen (season_pregame.cpp): a side's choices for a team (a game slot) in the order △ cycles
+    // them at team select: -1 game decides, 0 home, 1 away, 2 + k the team's extra sets (not the 2026 home and away,
+    // which Home and Away already are at Unpicked Uniforms 2026). Each with its name.
+    std::vector<std::pair<int, std::string>> uniform_choices(int slot) {
+        std::vector<std::pair<int, std::string>> out = {{-1, "Game decides"}, {0, set_name(slot, 0)}, {1, set_name(slot, 1)}};
+        if (const auto* sets = sets_of(slot)) {
+            for (size_t k = 0; k < sets->size(); k++) {
+                if (unpicked_mode() == 1 && is_base_2026((*sets)[k])) continue;
+                out.push_back({2 + (int)k, (*sets)[k].name});
+            }
+        }
+        return out;
+    }
+    // The set a side wears for this team now (-1 when nothing's picked for it).
+    int uniform_current(int side, int slot) {
+        if (side < 0 || side > 1 || g.team[side] != slot) return -1;
+        return g.set[side];
+    }
+    bool uniform_picker_on() { return enabled(); }
+    // Game thread, before the game: the side's pick for this team, as △ at team select would leave it. An extra set isn't
+    // lent to the team's block (ovl_b reloads before the game): the kickoff puts it in this game's copy of the team.
+    void uniform_season_pick(uint8_t* rdram, int side, int slot, int set) {
+        if (side < 0 || side > 1) return;
+        return_slots(rdram, side);
+        const auto* sets = sets_of(slot);
+        if (set >= 2 && (!sets || set - 2 >= (int)sets->size())) set = -1;
+        g.team[side] = slot;
+        g.set[side] = set;
+        g.redress[side] = 0;
+        if (set >= 2) g.dark[side] = (*sets)[(size_t)(set - 2)].dark ? 1 : 0;
+        fprintf(stderr, "[uniform] season pick: side %d team %d: %s\n", side, slot, set_name(slot, set).c_str());
+    }
+}
+
 namespace {
     std::atomic<int64_t> picker_listening_ms{0};  // the selection loop's last frame with the picker on (game thread)
 }
@@ -744,6 +779,12 @@ extern "C" {
                 const auto* sets = sets_of(team[s]);
                 if (pick[s] >= 2 && sets && pick[s] - 2 < (int)sets->size()) wear[s] = &(*sets)[(size_t)(pick[s] - 2)];
             }
+        }
+        // An extra set picked on Season's pre-game screen isn't lent to the team's block: this game's copy wears it.
+        for (int s = 0; s < 2; s++) {
+            if (!picked[s] || set[s] < 2 || g.lent_team[s] == team[s]) continue;
+            const auto* sets = sets_of(team[s]);
+            if (sets && set[s] - 2 < (int)sets->size()) wear[s] = &(*sets)[(size_t)(set[s] - 2)];
         }
         // A set for an unpicked side goes into this game's copy of the team (ovl_b's confirm copy, which the game
         // dresses from now; each new game copies afresh), worn as "away".

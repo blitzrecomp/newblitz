@@ -550,8 +550,14 @@ namespace {
 
     blitz::ps5::Progress ps5_progress;
 
+    // The PS5 kits (2026-11-16): devices/ps5 is the stable build, the one tested on a PS5 (its STABLE.txt says which:
+    // "1.0.2 (build 789)"), and the only one the Builder sends by default; devices/ps5-beta, when a Mac app carries it, is
+    // this version's own PS5 build, never run on a PS5 (the team's console is gone), sent only when the player asks.
+    std::atomic<bool> ps5_send_beta{false};
+    fs::path ps5_kit() { return kits() / (ps5_send_beta ? "ps5-beta" : "ps5"); }
+
     bool send_ps5(const std::string& ip) {
-        fs::path title = kits() / "ps5" / "PPSA99961", launch = kits() / "ps5" / "launch.elf";
+        fs::path title = ps5_kit() / "PPSA99961", launch = ps5_kit() / "launch.elf";
         std::error_code ec;
         if (!fs::is_directory(title, ec) || !fs::is_regular_file(launch, ec)) {
             say("This build has no PS5 kit (make device-kits)");
@@ -667,9 +673,23 @@ namespace blitz {
         return a.empty() ? "192.168.0." : a;
     }
 
-    void send_to_ps5(const std::string& ip) {
+    void send_to_ps5(const std::string& ip, bool beta) {
         std::ofstream(ps5_address_file()) << ip;
+        ps5_send_beta = beta;
+        fprintf(stderr, "[ps5] sending the %s build\n", beta ? "beta (untested on a PS5)" : "stable");
         in_background([ip] { return send_ps5(ip); });
+    }
+    void send_to_ps5(const std::string& ip) { send_to_ps5(ip, false); }
+    // "1.0.2 (build 789)" from devices/ps5/STABLE.txt; empty when the kit has none (a dev build's own PS5 kit).
+    std::string ps5_stable_label() {
+        std::string a = read_all(kits() / "ps5" / "STABLE.txt");  // its first line; then "sha256: ..." (the release checks it)
+        a = a.substr(0, a.find('\n'));
+        while (!a.empty() && std::isspace((unsigned char)a.back())) a.pop_back();
+        return a;
+    }
+    bool ps5_beta_available() {
+        std::error_code ec;
+        return fs::is_regular_file(kits() / "ps5-beta" / "PPSA99961" / "eboot.bin", ec);
     }
     void send_to_iphone() { in_background(send_iphone); }
     void save_iphone_ipa() { in_background(save_ipa); }
@@ -695,6 +715,9 @@ namespace blitz {
     std::filesystem::path device_send_folder() { return {}; }
     std::string ps5_last_address() { return {}; }
     void send_to_ps5(const std::string&) {}
+    void send_to_ps5(const std::string&, bool) {}
+    std::string ps5_stable_label() { return {}; }
+    bool ps5_beta_available() { return false; }
     void send_to_iphone() {}
     void send_to_android() {}
     void send_to_android_replacing() {}

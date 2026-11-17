@@ -298,6 +298,7 @@ namespace blitz {
     void paks_at_launch();             // season_pak.cpp
     void rosters_update();
     void crew_update();                // crew.cpp (Modern)
+    void season_pregame_update();      // season_pregame.cpp (Modern)
     void party_tab_refresh();  // tournament.cpp
     bool checkpoint_quit_prompt();
     void ui_tick();                    // fps_counter.cpp
@@ -332,6 +333,7 @@ void update_gfx(void*) {
 #if BLITZ_MODERN
             blitz::rosters_update();
             blitz::crew_update();
+            blitz::season_pregame_update();
 #endif
         }
     }

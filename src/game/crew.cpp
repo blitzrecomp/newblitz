@@ -65,6 +65,8 @@ namespace blitz {
     std::vector<std::string> team_franchises();  // content_pack_tp.cpp: the store's teams, by team index
     std::string team_display_name(const std::string& franchise);  // content_pack_tp.cpp
     int team_of_slot(int slot);                         // content_pack_tp.cpp: the team in a game slot
+    int game_lineup_week(uint8_t* rdram);               // content_pack_tp.cpp: the week whose lineup the game lays
+    uint8_t* monitor_rdram();                           // dev_monitor.cpp
     std::string active_pack_id();
     bool probowl_on(int side);  // uniform_picker.cpp: R at team select
     bool redo_play_enabled();   // config.cpp: Settings → General → Redo Play (the menu steps too)
@@ -262,12 +264,17 @@ namespace {
         save_crews();
     }
 
+    // The week whose lineup the game plays (content_pack_tp.cpp game_lineup_week), from team select. A row nobody
+    // changes isn't saved and plays the game's lineup, so the panel must show that one: with Advanced on it showed the
+    // latest week's instead (the Rams' two tight ends) while the game laid full strength (Puka Nacua; the team, 1.0.1).
+    std::atomic<int> lineup_week{-1};
+
     TeamCrew make_team(const std::string& f) {
         TeamCrew t;
         t.f = f;
         t.roster = blitz::roster_of(f);
         std::stable_sort(t.roster.begin(), t.roster.end(), [](const auto& a, const auto& b) { return rank(a) < rank(b); });
-        t.base = blitz::lineup_ids(f);
+        t.base = blitz::lineup_ids(f, lineup_week.load());
         t.full = blitz::full_ids(f);
         auto saved = saved_crew(f);
         for (int r = 0; r < RowCount; r++) {
@@ -281,6 +288,19 @@ namespace {
         }
         for (int r = 0; r < RowCount; r++) t.top_up(r);
         return t;
+    }
+
+    // The offense a team's panel opens with, for the log (a console run can't show the panel): "QB #9 Stafford, ...".
+    std::string offense_text(const TeamCrew& t) {
+        std::string out;
+        for (int r = QB; r <= FLEX; r++) {
+            for (const std::string& id : t.picks[r]) {
+                const blitz::RosterPlayer* p = t.find(id);
+                if (!out.empty()) out += ", ";
+                out += std::string(rows[r].label) + " #" + (p ? std::to_string(p->number) + " " + p->last : "? " + id);
+            }
+        }
+        return out;
     }
 
     // --- Pro Bowl crews -------------------------------------------------------------------------------------------
@@ -677,6 +697,7 @@ namespace {
         std::map<int, TeamCrew> crews;  // by side
     } flow;
     std::mutex flow_mutex;  // the request (game thread) and the flow (main thread)
+    std::atomic<bool> pregame{false};  // the panel is Season's pre-game screen's (season_pregame.cpp), not team select's
 
     // --- The panel ------------------------------------------------------------------------------------------------
 
@@ -979,8 +1000,12 @@ namespace {
     void build_page() {
         using namespace recompui;
         const Page page = flow.stack.back();
-        if (!flow.crews.count(page.side))
+        if (!flow.crews.count(page.side)) {
             flow.crews[page.side] = flow.pro[page.side] ? make_pro(pro_key(page.side), false) : make_team(flow.team[page.side]);
+            if (!flow.pro[page.side])
+                fprintf(stderr, "[crew] panel: %s (lineup week %d): %s\n", flow.team[page.side].c_str(), lineup_week.load(),
+                        offense_text(flow.crews[page.side]).c_str());
+        }
         TeamCrew& t = flow.crews[page.side];
         pv.cards.clear();
         pv.blank.clear();
@@ -1276,6 +1301,12 @@ namespace {
         if (flow.stack.size() > 1) {
             flow.stack.pop_back();
             pv.rebuild_page = true;
+            return;
+        }
+        if (pregame) {  // Season's pre-game screen: back to it (Go Play there plays); once, as a held key repeats
+            if (wait_state != Open) return;
+            finish();
+            wait_state = Cancelled;
             return;
         }
         // The first page: back to team select, as □ there (team, 2026-10-29: no way back, and none at all by touch).
@@ -1751,10 +1782,14 @@ namespace blitz {
             pv.rebuild_page = false;
             pv.rebuild_rows.clear();
         }
-        // Start moves on, without hunting for the button.
+        // Start moves on, without hunting for the button: any player's. Player 1's only left a phone that joined after a
+        // pad (as player 2) with a START that did nothing here (team, 1.0.1, every device).
         static bool start_was_down = false;
-        SDL_GameController* pad = blitz::pad_on_port(0);
-        bool start_down = pad != nullptr && SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_START) != 0;
+        bool start_down = false;
+        for (int port = 0; port < 4 && !start_down; port++) {
+            SDL_GameController* pad = blitz::pad_on_port(port);
+            start_down = pad != nullptr && SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_START) != 0;
+        }
         if (start_down && !start_was_down && pv.start_action && !recompui::is_keyboard_open() && !recompui::is_prompt_open()) {
             start_was_down = true;
             std::function<void()> go = pv.start_action;
@@ -1794,6 +1829,34 @@ namespace blitz {
             fprintf(stderr, "[crew] panel faces: %zu card(s), %zu not on hand when the page opened, all showing after %ld ms\n",
                     pv.faces_cards, pv.faces_blank, ms);
         }
+    }
+
+    // Season's pre-game screen (season_pregame.cpp): the panel for the player's team and the CPU's, outside team select
+    // (picks are saved as they're made; the kickoff writes them in). False when Pick Your Crew can't open.
+    bool crew_pregame_start(const std::string& mine, const std::string& cpu) {
+        if (!enabled() || wait_state != Idle || mine.empty() || blitz::roster_of(mine).empty()) return false;
+        // The week the game will lay, as team select reads it: a season's later week has no team select of its own, so
+        // the panel showed the last team select's (or, after a restart, the latest) week's lineup with Advanced on.
+        if (uint8_t* rdram = blitz::monitor_rdram()) lineup_week = blitz::game_lineup_week(rdram);
+        std::lock_guard lock{flow_mutex};
+        flow = Flow{};
+        flow.team[0] = mine;
+        flow.human[0] = true;
+        flow.team[1] = cpu;
+        flow.stack.push_back({0, Offense});
+        pregame = true;
+        requested_at = Clock::now();
+        wait_state = Requested;
+        return true;
+    }
+    // 1 while it's up; once it closes, 2 for Go Play, 0 for Back (and the panel is free again).
+    int crew_pregame_state() {
+        if (!pregame) return 0;
+        int st = wait_state.load();
+        if (st == Requested || st == Open) return 1;
+        wait_state = Idle;
+        pregame = false;
+        return st == Done ? 2 : 0;
     }
 
     // Settings → Rules (house_rules.cpp).
@@ -1850,6 +1913,7 @@ extern "C" {
         if ((!enabled() && !any_pro) || MEM_W(0, (gpr)(int32_t)phase) == 7 || blitz::active_pack_id() != "blitz2026") return 0;
         const auto& franchises = blitz::team_franchises();
         uint32_t h = (uint32_t)MEM_W(0, (gpr)(int32_t)humans);
+        lineup_week = blitz::game_lineup_week(rdram);
         std::lock_guard lock{flow_mutex};
         flow = Flow{};
         for (int s = 0; s < 2; s++) {

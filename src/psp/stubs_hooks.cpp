@@ -40,6 +40,8 @@ extern "C" int blitz_force_color_clear(void) { return 0; }
 
 // ---- crew.cpp: Classic has no player file ----
 extern "C" int blitz_crew_wait(uint8_t*) { return 0; }
+// ---- season_pregame.cpp: no pre-game screen (no settings UI); PLAY plays at once ----
+extern "C" int blitz_season_pregame(uint8_t*, recomp_context*) { return 0; }
 
 // ---- ds_view.cpp: no drive summary ----
 extern "C" void blitz_ds_play(const char*, const char*, int, const char*, int, int, int, int, int, int, int) {}

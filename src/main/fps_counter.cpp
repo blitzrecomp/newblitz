@@ -57,6 +57,7 @@ extern "C" int plume_narrow_barriers_on();
 #endif
 
 namespace blitz { bool replay_is_open(); }  // replay_screen.cpp
+namespace blitz { void rescue_watch(double frames_away_s); }  // savestate.cpp: the freeze rescue
 using blitz::replay_is_open;
 
 namespace {
@@ -436,6 +437,9 @@ namespace blitz {
             log_frames++;
             swaps_total.fetch_add(1, std::memory_order_relaxed);
         }
+        // The freeze rescue (savestate.cpp): how long the game's frames have been away, every VI (the VI thread runs on when
+        // the game's thread is stuck: the team's iPhone, 2026-11-16).
+        blitz::rescue_watch(ultramodern::is_game_started() && last_frame != Clock::time_point{} ? std::chrono::duration<double>(now - last_frame).count() : 0.0);
         if (now - window_start >= std::chrono::seconds(1)) {
             shown_fps = frames;
             shown_worst_tenths = (int)(worst_ms * 10.0);

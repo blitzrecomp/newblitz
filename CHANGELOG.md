@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.0.2 (2026-11-17)
+
+- **A frozen game can be picked up again.** If the game stops responding mid-game, New Blitz keeps the start of the
+  play it stopped on and says so ("Close New Blitz and open it again to pick up from ..."); the next start offers it
+  through "Pick up your game?". Before, a freeze lost the game: save states and the background Auto slot waited on
+  the stuck game. A stall that passes changes nothing, and a newer Save & Quit save is kept over it.
+- **Season: a pre-game screen.** PLAY WEEK → PLAY now opens a screen with both teams already set: pick each team's
+  uniform from the sets the 2026 Season has for it, or Pick Your Crew, then Play (or Start). □ goes back to PLAY WEEK.
+  A week without a game for you (a bye, out of the playoffs) plays as before.
+- **PS5: tested on a PS5.** Blitz Builder sends 1.0.2's PS5 build (build 805), which was played on a PS5 before
+  release, and says so. Later versions keep sending it as the tested build, with their own as **Send Beta (untested)**.
+- **PS5:** Instant Replay records at 640x360 and 25 fps (was 320x180 at 15 fps, the small handhelds' size): the
+  console reported only part of its memory.
+- **Phone controllers:** a second, third or fourth phone can join while one is playing, and a phone that drops can
+  come straight back. Before, every other phone waited at "connecting" until the first one left.
+- **Pick Your Crew:** any player's Start moves on, a phone controller's too. Before, only player 1's did, so a phone
+  that joined after a gamepad (as player 2) pressed START for nothing.
+- **Pick Your Crew** shows the lineup the game will play. With the Advanced season switched on it showed the latest
+  week's lineup while the game played another (full strength), so a row you left alone wasn't who took the field:
+  the Rams' two tight ends on the panel, Puka Nacua in the game.
+
 ## 1.0.1 (2026-11-15)
 
 - **On-screen keyboard:** Up and Down from the bottom row (Shift, Space, Delete, Done) go to the key straight above

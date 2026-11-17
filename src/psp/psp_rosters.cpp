@@ -351,9 +351,9 @@ namespace blitz {
         return it->second;
     }
 
-    std::array<std::string, 15> lineup_ids(const std::string& franchise) {
+    std::array<std::string, 15> lineup_ids(const std::string& franchise, int adv_week) {
         std::array<std::string, 15> out{};
-        auto lineup = lineup_now(-1);
+        auto lineup = lineup_now(adv_week);
         if (lineup) {
             auto it = lineup->ids.find(franchise);
             if (it != lineup->ids.end()) out = it->second;
