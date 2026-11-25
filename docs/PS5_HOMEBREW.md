@@ -105,7 +105,7 @@ Next, in order:
    menus over it). Delete the dump afterwards. **Never abort an FTP download part way:** on 2026-11-17 etaHEN's FTP
    stopped answering for good soon after one was cut off, and only hands at the console bring it back.
 8. **Save & Quit's resume guard** (savestate.cpp, every platform): `savestates/quit.resuming` is on the disk while
-   "Pick up your game?" is first up and while a Resume runs, until the game's frames show. A start that finds it moves
+   the "Pick up your last game?" toast is first up and while a Resume runs, until the game's frames show. A start that finds it moves
    quit.state aside as `quit.state.failed` (and `quit.txt.failed`) and doesn't offer it. 2026-11-15: a Save & Quit on
    the console froze, and every start after it hung until quit.state was moved aside by hand.
 

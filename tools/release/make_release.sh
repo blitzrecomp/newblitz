@@ -42,6 +42,14 @@ if [ -f "$STABLE_EBOOT" ]; then
     fi
 fi
 
+# The Android kit must be signed with the release key, or Android won't update a copy installed from an earlier release
+# (2026-11-24: 1.0.3's first run was a plain `make release` and its APK came out with this Mac's debug key). Checked
+# before the long build. RELEASE_NO_ANDROID=1 leaves Android out instead.
+if [ -z "${RELEASE_NO_ANDROID:-}" ] && { [ -z "${BLITZ_ANDROID_KEYSTORE:-}" ] || [ -z "${BLITZ_ANDROID_KEYSTORE_PASS:-}" ]; }; then
+    echo "no Android release key: run the read -rs line in docs/RELEASE.md (it sets BLITZ_ANDROID_KEYSTORE and its password)"
+    echo "and make release from it, or RELEASE_NO_ANDROID=1 to leave Android out"; exit 1
+fi
+
 if [ -z "${RELEASE_SKIP_BUILD:-}" ]; then
     # One make: the game's code is generated once for all of them. Device kits first: the Mac app takes them in.
     say "building (log: $LOGS/build.log)"

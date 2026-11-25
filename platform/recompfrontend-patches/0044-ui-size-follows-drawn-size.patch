@@ -1,0 +1,23 @@
+diff --git a/recompui/src/base/ui_state.cpp b/recompui/src/base/ui_state.cpp
+--- a/recompui/src/base/ui_state.cpp
++++ b/recompui/src/base/ui_state.cpp
+@@ -1052,14 +1052,13 @@
+ 
+         ui_state->render_interface.start(command_list, width, height);
+ 
+-        static int prev_width = 0;
+-        static int prev_height = 0;
+-
+-        if (prev_width != width || prev_height != height) {
++        // BlitzRecomp: match the drawn size every frame, not only when it changes. With a menu open, a window resize event
++        // also reaches RmlUi's SDL handler, which sets the context to the event's size in points. Back from the iPhone's
++        // app switcher (portrait, then landscape again a millisecond later) the drawn size never changed, so the menus
++        // stayed laid out in points, a third of the screen in its top-left corner (team, 2026-11-24).
++        if (ui_state->context->GetDimensions() != Rml::Vector2i{ width, height }) {
+             ui_state->context->SetDimensions({ width, height });
+         }
+-        prev_width = width;
+-        prev_height = height;
+ 
+         if (panel_first) {  // under anything else that's up
+             ds_context->SetDensityIndependentPixelRatio(height / 1080.0f);

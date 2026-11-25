@@ -449,6 +449,14 @@ namespace {
 }
 
 namespace blitz {
+    // A hint token's first piece ("CLEFT": player 1's C-left button, as the hints draw it) for other cards (toast.cpp's
+    // offer): its text, and whether it's a PromptFont glyph (false: fallback words, e.g. no binding). Main thread.
+    std::string hint_token_glyph(const std::string& token, bool& glyph) {
+        std::vector<Piece> p = resolve(token);
+        glyph = !p.empty() && p[0].glyph;
+        return p.empty() ? token : p[0].text;
+    }
+
     // A tap at (x, y), in the UI's pixels (touch_controls.cpp, phones): on the card, the hint goes away now (it stays
     // seen). True if it was on it.
     bool hints_tap(float x, float y) {

@@ -240,8 +240,7 @@ namespace {
     int step_wait = 0;
     std::atomic_int request{0};            // op (1 save, 2 load) | slot << 4; slot 0 is quit.state
     std::atomic_bool in_game{false};       // a game is being played (phase 2), for the quit prompt
-    std::atomic_bool confirm_quit{false};
-    std::atomic_bool quit_now{false};      // Save & Quit finished: quit on the UI thread  // Don't Save was chosen: ask once more (savestate_startup_prompt)
+    std::atomic_bool quit_now{false};      // the quit's save finished: quit on the UI thread (savestate_startup_prompt)
     std::atomic_int offense_side{0};       // side with the ball (0 left team, 1 right), for phone controllers
     std::atomic_int port_side[4] = {-1, -1, -1, -1};  // each controller's team (0 left, 1 right, -1 none)
     std::mutex done_mutex;
@@ -260,7 +259,11 @@ namespace {
     }
     int waited = 0;  // dispatcher ticks, one per retrace (about 60 a second, whatever the frame rate)
     std::map<std::string, int> wait_tally;  // what each refused tick was waiting on
-    std::atomic<bool> ask_resume_again{false};  // a Resume gave up: offer "Pick up your game?" again
+    std::atomic<bool> ask_resume_again{false};  // a Resume gave up: offer the pick-up toast again
+    std::atomic<bool> offer_open{false};     // the pick-up toast is up (UI thread sets; the game's input reads)
+    std::atomic<bool> offer_pressed{false};  // C-left pressed while it was (game's input; the UI thread takes it)
+    std::atomic<bool> offer_dismiss{false};  // A in the menus, □ or Start while it was: the player's doing something else
+    std::atomic<bool> offer_taken{false};    // Resume chosen from it: the toast going isn't a "no"
 
     // A load waits up to about 60 s for a moment it can restore at (BLITZ_SS_LOAD_WAIT ticks): on an RG DS that moment can come
     // only once the attract demo has loaded, past the 10 s a save gets.
@@ -564,7 +567,7 @@ namespace {
     // ---- The resume guard: a saved game that hangs or crashes the app is offered once, not at every start ----
     // (the team's PS5, 2026-11-15: after a Save & Quit that froze, every start hung right after the game came up, with
     // quit.state there, until it was moved aside by hand over FTP.) savestates/quit.resuming is written before the
-    // "Pick up your game?" prompt opens and again before a Resume, and removed once this start has shown the game's
+    // "Pick up your last game?" toast opens and again before a Resume, and removed once this start has shown the game's
     // frames afterwards with the UI thread still answering (resume_guard_tick). Found at a start, the last start never
     // got that far: quit.state goes aside as quit.state.failed (with quit.txt.failed) and isn't offered again.
     // A resumed quit.state waits as quit.state.resuming until the frames come, so a resume that hangs leaves it for a look.
@@ -918,7 +921,7 @@ extern "C" void blitz_thread_created(uint8_t* rdram, recomp_context* ctx) {
 // thread is stuck, and fps_counter.cpp calls rescue_watch on every VI. Mid-game, with no new game frame for 5 s, the newest
 // Redo Play snapshot (the top of the play being run: whole before it went into the ring, and copied under the ring's lock)
 // is written as savestates/rescue.state with rescue.txt, from a thread of its own, and the player is told once to close the
-// app and open it again. The next start makes it quit.state, which "Pick up your game?" offers (with its resume guard).
+// app and open it again. The next start makes it quit.state, which the pick-up toast offers (with its resume guard).
 // The game's frames coming again for 10 s, the next play or the game's end clear it, so it can't bring an old game back.
 // A Save & Quit save made after the snapshot is kept instead; an older one (put off at its prompt) goes aside as
 // quit.state.older when the rescue takes its place at the next start.
@@ -1168,16 +1171,31 @@ extern "C" void blitz_team_select_frame() {
 // The game thread, each controller read (dev_input.cpp get_input, last): in the menus, an A press waits for its
 // screen's snapshot (at most ~20 reads), then goes through as a press of a few reads. At team select □ goes back a
 // step as everywhere else (team, 2026-10-28: "I'm at team select and I can't go back"), not a second ✕.
+// While the pick-up toast is up, C-left (△ by position) is its button: it loads the game saved on quitting and stays away
+// from the game until let go; an A press in the menus, □ or Start (team, 2026-11-24) means the player's started something
+// else, and the toast goes (they go on to the game as usual).
 extern "C" void blitz_menu_step_input(int port, uint16_t* buttons) {
-    constexpr uint16_t A = 0x8000, B = 0x4000;
+    constexpr uint16_t A = 0x8000, B = 0x4000, START = 0x1000, C_LEFT = 0x0002;
     static uint16_t prev[4];
     static int waiting[4], releasing[4];
     static bool eat_b[4];  // □ went back: it stays away from the game until let go (else it backs out again)
+    static bool eat_cl[4];  // C-left took the pick-up toast: away from the game until let go
     if (port < 0 || port > 3) return;
     uint16_t raw = *buttons;
     bool edge = (raw & A) && !(prev[port] & A);
     bool b_edge = (raw & B) && !(prev[port] & B);
+    bool cl_edge = (raw & C_LEFT) && !(prev[port] & C_LEFT);
+    bool start_edge = (raw & START) && !(prev[port] & START);
     prev[port] = raw;
+    if (!(raw & C_LEFT)) eat_cl[port] = false;
+    if (offer_open.load()) {
+        if (cl_edge) {
+            eat_cl[port] = true;
+            offer_pressed = true;
+        }
+        else if ((edge && in_menus.load()) || b_edge || start_edge) offer_dismiss = true;
+    }
+    if (eat_cl[port]) *buttons &= (uint16_t)~C_LEFT;
     if (!(raw & B)) eat_b[port] = false;
     if (b_edge && in_menus.load() && menu_steps_on() && now_ms() - team_select_ms.load() < 250) {
         eat_b[port] = true;
@@ -1205,8 +1223,6 @@ extern "C" void blitz_menu_step_input(int port, uint16_t* buttons) {
 }
 
 namespace blitz {
-    // The quit prompt (RecompFrontend's override): during a game, offer to save it first. True when
-    // this prompt was shown instead of the usual one.
     // Settings → Main Menu's Save and Leave (firstrun.cpp): a save to the quit slot, as Save & Quit makes, then done(ok)
     // (on the game's thread). False when there's no game being played to save (the menus): nothing to keep.
     bool savestate_save_then(std::function<void(bool)> done) {
@@ -1220,6 +1236,64 @@ namespace blitz {
         request = 1;  // slot 0: the next start offers to pick it up
         return true;
     }
+}
+
+namespace {
+    // Quitting during a game saves it (1.0.3, the team: no more "Save this game?" / "Quit without saving?"): Quit Blitz?'s Quit
+    // makes the Save & Quit save to quit.state (slot 0), then the app quits once it's on the disk. A save that can't happen
+    // (no moment the game can be saved at within its wait, or the game stuck with no rescue to keep) asks Quit Anyway or
+    // Keep Playing, so nobody is held in the game.
+    std::atomic<bool> quit_saving{false};        // Quit chosen: the save to quit.state is on its way
+    std::atomic<uint64_t> quit_saving_ms{0};     // ... since (guard_now_ms)
+    std::atomic<bool> quit_save_failed{false};  // ... and it didn't happen: ask (UI thread, savestate_startup_prompt)
+    constexpr uint64_t quit_save_timeout_ms = 15000;  // past the save's own wait (600 ticks, ~10 s): the game isn't ticking
+
+    void quit_save_start() {
+        ps5_crumb("save & quit: chosen");
+        {
+            std::lock_guard lock{done_mutex};
+            on_done_slot = 0;
+            on_done = [](bool ok) {
+                if (ok) quit_now = true;  // quit from the UI thread (savestate_startup_prompt)
+                else quit_save_failed = true;
+            };
+        }
+        quit_saving_ms = guard_now_ms();
+        quit_saving = true;
+        request = 1;  // slot 0
+        blitz::post_status_held("Saving your game: a moment...");
+    }
+
+    // Quit Anyway: as "Quit without saving?" did. A stuck game holds up the quit (it waits for the game's thread): the app
+    // closes after 3 s anyway, as the freeze rescue's Quit does.
+    void quit_unsaved() {
+        fprintf(stderr, "[savestate] quitting without saving the game\n");
+        blitz::checkpoint_discard_on_quit();
+        const bool stuck = frames_away.load() >= 2.0;
+        ultramodern::quit();
+        if (stuck) {
+            std::thread([] {
+                std::this_thread::sleep_for(std::chrono::seconds(3));
+                fprintf(stderr, "[savestate] the stuck game holds up the quit: closing the app\n");
+                fflush(stderr);
+                std::_Exit(0);
+            }).detach();
+        }
+    }
+
+    // The next start's "Pick up your last game?" toast (toast.cpp's offer): △ (C-left, by position on every pad) loads
+    // the game, read from the game's input so the game doesn't get it (blitz_menu_step_input); a click or tap on the
+    // toast too. It goes after offer_seconds, or once the player picks something in the menus or a game starts; the save
+    // stays for the next start until it's picked up or a new Save & Quit replaces it.
+    constexpr int offer_seconds = 12;  // offer_open and the rest: with ask_resume_again, at the top
+}
+
+namespace blitz {
+    void toast_offer(const std::string& top, const std::string& main, const std::string& detail, const std::string& note,
+                     const std::string& action, const std::string& token, int seconds, std::function<void()> on_accept);  // toast.cpp
+    bool toast_offer_up();
+    bool toast_offer_accept();
+    void toast_offer_close();
 
     bool savestate_quit_prompt() {
         if (!in_game.load() || !ultramodern::is_game_started()) return false;
@@ -1241,36 +1315,30 @@ namespace blitz {
                 [] {}, recompui::ButtonStyle::Success, recompui::ButtonStyle::Tertiary, false);  // Quit first: nothing else helps
             return true;
         }
-        replay_close();  // Save & Quit needs the game running: it saves at the dispatcher's next turn
+        if (quit_saving.load()) {  // Quit again while the save's on its way: it quits once it's done
+            blitz::post_status_held("Saving your game: a moment...");
+            return true;
+        }
+        replay_close();  // the save needs the game running: it saves at the dispatcher's next turn
         std::string summary;  // as of the last play select (Redo Play's latest snapshot)
         {
             std::lock_guard lock{threads_mutex};
             if (!redo_ring.empty()) summary = describe_game(redo_ring.back());
         }
+        // One question, so a window closed by accident doesn't end a game; Quit saves it.
         recompui::open_choice_prompt(
-            "Save this game?",
-            "Save & Quit keeps it exactly as it is. Next time, Blitz offers to pick up from here.",
-            "Save & Quit", "Don't Save",
-            [] {
-                {
-                    std::lock_guard lock{done_mutex};
-                    on_done_slot = 0;
-                    ps5_crumb("save & quit: chosen");
-                    on_done = [](bool ok) {
-                        if (ok) quit_now = true;  // quit from the UI thread (savestate_startup_prompt)
-                        else blitz::post_status("Couldn't save the game here; quit again to leave without saving");
-                    };
-                }
-                request = 1;  // slot 0
-            },
-            [] { confirm_quit = true; },  // asked on the next UI tick: this prompt closes after its action runs
+            "Quit Blitz?",
+            "Your game is saved. Next time, pick up right where you left off.",
+            "Quit", "Keep Playing",
+            [] { quit_save_start(); },
+            [] {},
             recompui::ButtonStyle::Success, recompui::ButtonStyle::Tertiary, false);
         recompui::set_prompt_scoreline(summary);
         return true;
     }
 
-    // UI thread, every tick: the second quit question, and once the game runs, a game saved on quitting
-    // asks to be picked up again.
+    // UI thread, every tick: quitting once the game's saved (or asking when it couldn't be), and once the game runs, a
+    // game saved on quitting offered to be picked up again.
     void savestate_startup_prompt() {
         if (quit_now.exchange(false)) {
             ps5_crumb("save & quit: saved, quitting");
@@ -1278,10 +1346,33 @@ namespace blitz {
             ultramodern::quit();
             return;
         }
-        if (confirm_quit.exchange(false)) {
+        if (quit_saving.load() && !quit_save_failed.load() && guard_now_ms() - quit_saving_ms.load() > quit_save_timeout_ms) {
+            bool gave_up = false;
+            {
+                std::lock_guard lock{done_mutex};
+                if (on_done_slot == 0) {  // still waiting: a save done later quits nothing (it's still kept for next start)
+                    on_done = nullptr;
+                    on_done_slot = -1;
+                    gave_up = true;
+                }
+            }
+            if (gave_up) {
+                int expected = 1;  // slot 0's save, if the dispatcher never took it
+                request.compare_exchange_strong(expected, 0);
+                fprintf(stderr, "[savestate] quit: no save after %llu s (the game isn't ticking?)\n",
+                        (unsigned long long)(quit_save_timeout_ms / 1000));
+                quit_save_failed = true;
+            }
+        }
+        if (quit_save_failed.exchange(false)) {
+            quit_saving = false;
+            blitz::release_status();
+            ps5_crumb("save & quit: couldn't save");
             recompui::open_choice_prompt(
-                "Quit without saving?", "This game will be lost.", "Quit", "Keep Playing",
-                [] { blitz::checkpoint_discard_on_quit(); ultramodern::quit(); }, [] {}, recompui::ButtonStyle::Danger, recompui::ButtonStyle::Tertiary, true);
+                "Couldn't save this game",
+                "New Blitz couldn't save at this moment. Keep playing and quit again in a moment, or quit now without saving.",
+                "Quit Anyway", "Keep Playing",
+                [] { quit_unsaved(); }, [] {}, recompui::ButtonStyle::Danger, recompui::ButtonStyle::Tertiary, true);
         }
         // The last start's resume guard, before anything else touches quit.state (its notice once the game shows).
         static bool guard_checked = false;
@@ -1292,6 +1383,27 @@ namespace blitz {
             rescue_startup();  // the last start's stopped game, if any, becomes quit.state
         }
         guard_tick();
+        // The pick-up toast: its button (from the game's input), the player moving on, or its time gone.
+        if (offer_open.load()) {
+            if (!blitz::toast_offer_up()) {
+                offer_open = false;
+                if (!offer_taken.load()) {
+                    // Offered once, on the first start after the quit (team, 2026-11-24): left or put away, the save goes
+                    // aside (kept, not offered again). The next quit mid-game makes a new one.
+                    std::error_code ec;
+                    std::filesystem::path aside = state_file(0);
+                    aside.replace_extension(".declined.state");
+                    std::filesystem::rename(state_file(0), aside, ec);
+                    std::filesystem::path txt_aside = quit_txt();
+                    txt_aside.replace_extension(".declined.txt");
+                    std::filesystem::rename(quit_txt(), txt_aside, ec);
+                    guard_disarm("the pick-up toast went unused");
+                    fprintf(stderr, "[savestate] the pick-up toast went unused: quit.state set aside, not offered again\n");
+                }
+            }
+            else if (offer_pressed.exchange(false)) blitz::toast_offer_accept();  // offer_open goes on the next tick
+            else if (offer_dismiss.exchange(false) || in_game.load()) blitz::toast_offer_close();
+        }
         static bool asked = false;
         if (ask_resume_again.exchange(false)) asked = false;
         if (asked || !ultramodern::is_game_started()) return;
@@ -1331,29 +1443,28 @@ namespace blitz {
         ps5_crumb("resume: offering quit.state");
         fprintf(stderr, "[savestate] offering the game saved on quitting: %s\n", what.c_str());
         if (rescued) fprintf(stderr, "[rescue] offered: %s\n", what.c_str());
-        blitz::ui_step("savestate prompt: open_choice_prompt");
-        recompui::open_choice_prompt(
-            "Pick up your game?",
-            rescued ? "The game stopped responding last time. Resume picks it up from the start of that play."
-                    : what.empty() ? "You saved a game when you last quit." : "You saved this game when you last quit.",
-            "Resume", "Discard",
+        blitz::ui_step("savestate prompt: toast");
+        // "ARI 7 - 0 CHI, 2nd & 7 at the 35, Q2 1:23" (describe_game): the score as the title, the moment under it.
+        const size_t comma = what.find(", ");
+        const std::string score = what.empty() ? std::string("Your last game") : what.substr(0, comma);
+        const std::string moment = comma == std::string::npos ? std::string() : what.substr(comma + 2);
+        offer_pressed = false;
+        offer_dismiss = false;
+        offer_taken = false;
+        blitz::toast_offer(
+            "Pick up your last game?", score, moment,
+            rescued ? "The game stopped responding last time: it picks up from the start of that play." : "",
+            "Resume", "CLEFT", offer_seconds,
             [] {
+                offer_taken = true;
                 guard_arm(Guard::resume);
                 ps5_crumb("resume: Resume chosen");
                 request = 2;  // slot 0
                 blitz::post_status_held("Resuming your game: a few seconds...");
-            },
-            [] {
-                std::error_code e;
-                std::filesystem::remove(state_file(0), e);
-                std::filesystem::remove(state_file(0).replace_extension(".txt"), e);
-                guard_disarm("discarded");
-            },
-            recompui::ButtonStyle::Success, recompui::ButtonStyle::Danger, false);
-        blitz::ui_step("savestate prompt: set_prompt_scoreline");
-        recompui::set_prompt_scoreline(what);  // ○ is "later": the save stays and this asks again next start
+            });
+        offer_open = true;
         blitz::ui_step("savestate prompt");
-        ps5_crumb("resume: prompt open");
+        ps5_crumb("resume: toast up");
     }
 }
 

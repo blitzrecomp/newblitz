@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.3 (2026-11-24)
+
+- **Quitting no longer crashes.** On Windows most quits mid-game ended in a crash, and a Mac or Linux quit could too:
+  the app let go of the game's memory while part of the game was still running. 13 crash reports from players pointed
+  at it; thank you for sending them.
+- **Phones and handhelds: the menus keep their size.** Coming back to New Blitz from the app switcher (or the
+  screenshot sheet) could leave every menu squeezed into the top-left corner, with taps missing it. Seen on iPhone;
+  the fix is in every version, so no phone or handheld should see it.
+- **Quitting saves your game.** Quitting during a game (Cmd+Q, the window's close button, Settings → Quit) asks one
+  thing, **Quit Blitz?**, so a window closed by accident doesn't end a game; **Quit** saves the game and closes. No
+  more "Save this game?" and "Quit without saving?". If the game can't be saved at that moment, it says so and offers
+  **Quit Anyway** or **Keep Playing**.
+- **Picking it up is one button.** The next start no longer stops on "Pick up your game?": a note with the score
+  (bottom right, or the top of a phone's screen) says **Pick up your last game?** for about 12 seconds. **△** (the
+  button it shows), a click or a tap loads it. **□** or **Start** (or a pick in the menus) puts it away. It's offered
+  once, on the first start after quitting: leave it and that game isn't offered again. A game kept by the freeze
+  rescue is offered the same way.
+
 ## 1.0.2 (2026-11-17)
 
 - **A frozen game can be picked up again.** If the game stops responding mid-game, New Blitz keeps the start of the

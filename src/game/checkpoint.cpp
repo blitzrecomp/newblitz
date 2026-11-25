@@ -391,19 +391,20 @@ namespace blitz {
         recompui::set_prompt_scoreline(describe(cp));
     }
 
-    // The app's quit prompt (RecompFrontend patch 0004): while a game is being played, ask whether to
-    // keep it. True when this prompt was shown instead of the usual one.
+    // The app's quit prompt (RecompFrontend patch 0004): while a game is being played, quitting keeps it (as
+    // savestate.cpp's does, 1.0.3: one question, no "Save this game?"). True when this prompt was shown instead of the
+    // usual one.
     bool checkpoint_quit_prompt() {
         if (!enabled() || !in_progress) return false;
         Checkpoint cp;
         bool known = read_checkpoint(cp);
         recompui::open_choice_prompt(
-            "Save this game?",
-            "Quit and keep this game to pick up later: start an Arcade game with the same team. "
-            "To quit without saving, end the game from its pause menu first. (Experimental)",
-            "Save & Quit", "Cancel",
+            "Quit Blitz?",
+            "Your game is saved. Next time, start an Arcade game with the same team to pick up where you left off. "
+            "(Experimental)",
+            "Quit", "Keep Playing",
             [] { mark_saved(); ultramodern::quit(); }, [] {},
-            recompui::ButtonStyle::Success, recompui::ButtonStyle::Tertiary, true);
+            recompui::ButtonStyle::Success, recompui::ButtonStyle::Tertiary, false);
         recompui::set_prompt_scoreline(known ? describe(cp) : std::string());
         return true;
     }

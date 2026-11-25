@@ -1277,6 +1277,18 @@ int main(int argc, char** argv) {
     auto texture_pack_content_type_id = recomp::mods::register_mod_content_type(texture_pack_content_type);
     recomp::mods::register_mod_container_type("rtz", std::vector{ texture_pack_content_type_id }, false);
 
+    // Tests only (2026-11-24): BLITZ_TEST_QUIT_AFTER=<seconds> quits the way the Quit prompt's button does, that long after
+    // the game starts, so a quit can be tested on a machine nobody is sitting at (the Windows quit crash, 1.0.3).
+    if (const char* q = getenv("BLITZ_TEST_QUIT_AFTER"); q != nullptr && atof(q) > 0) {
+        const double secs = atof(q);
+        std::thread([secs] {
+            while (!ultramodern::is_game_started()) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(secs * 1000)));
+            printf("[test] BLITZ_TEST_QUIT_AFTER: quitting as the Quit button does\n");
+            ultramodern::quit();
+        }).detach();
+    }
+
     BOOT_CRUMB("recomp::start (launcher next)");
     recomp::start(
         project_version,

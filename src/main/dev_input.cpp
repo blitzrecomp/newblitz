@@ -316,7 +316,7 @@ namespace {
             blitz::dev_set_option(tab, option, value);
             return true;
         }
-        if (word == "QUITPROMPT") {  // as Cmd+Q does: the quit prompt (with Save & Quit during a game)
+        if (word == "QUITPROMPT") {  // as Cmd+Q does: the quit prompt (Quit Blitz?, which saves a game in progress)
             recompui::open_quit_game_prompt();
             return true;
         }

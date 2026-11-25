@@ -1,0 +1,27 @@
+diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
+--- a/librecomp/src/recomp.cpp
++++ b/librecomp/src/recomp.cpp
+@@ -1082,8 +1082,10 @@
+ #if defined(RECOMP_SMALL_RDRAM)
+     free_failed = false;  // the platform's block, never freed
+ #elif defined(_WIN32)
+-    // VirtualFree returns zero on failure.
+-    free_failed = (VirtualFree(rdram, 0, MEM_RELEASE) == 0);
++    // BlitzRecomp: never freed on the desktop either (2026-11-24). Only the threads above were joined: the game's pad poll
++    // still yields every millisecond and reads RDRAM in check_running_queue, so a VirtualFree here crashed most Windows quits
++    // (New Blitz.exe+0x5a3a89, 13 player crash reports on 1.0.2). The process ends next and the memory goes with it.
++    free_failed = false;
+ #elif defined(__PROSPERO__)
+     free_failed = false;  // the process ends next; the direct memory goes with it
+ #elif defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IPHONE)
+@@ -1093,8 +1095,8 @@
+     // An iPhone quit from Settings did the same (2026-11-02): its process ends after this too.
+     free_failed = false;
+ #else
+-    // munmap returns -1 on failure.
+-    free_failed = (munmap(rdram, allocation_size) == -1);
++    // BlitzRecomp: the Mac and Linux too, for the same reason as Windows above (a Mac quit crashed the same way, 2026-11-15).
++    free_failed = false;
+ #endif
+ 
+     if (free_failed) {
