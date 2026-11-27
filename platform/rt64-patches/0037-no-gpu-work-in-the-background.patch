@@ -1,0 +1,200 @@
+diff --git a/src/common/rt64_blitz_watch.h b/src/common/rt64_blitz_watch.h
+--- a/src/common/rt64_blitz_watch.h
++++ b/src/common/rt64_blitz_watch.h
+@@ -72,3 +72,29 @@
+         }
+     }
+ }
++
++// iOS refuses GPU work from an app in the background, and what a refused command buffer should have drawn or uploaded is
++// left undefined (magenta on Metal); a run of refusals can also get the app's next submissions ignored for a while after it's
++// back (the team's iPhone, 2026-11-26: the menus' panels magenta for the rest of the session after the app switcher).
++// blitz_rt64_gpu_away (rt64_present_queue.cpp; the app calls it from SDL's did-enter-background and did-become-active events)
++// sets blitz_gpu_away, and every RT64 thread that submits GPU work waits at its next submission until the app is back. Never
++// set on other platforms. The thread that set it (the main thread) never waits.
++extern "C" {
++    extern volatile int blitz_gpu_away;
++    void blitz_rt64_gpu_away(int away);
++}
++
++namespace RT64 {
++    void blitzGpuAwayPark(int thread, bool (*running)(const void *), const void *context);
++
++    // Returns at once unless the app is away; then once it's back or running() turns false. thread: a BlitzWatchThread whose
++    // phase reads "background" meanwhile, or -1.
++    template <typename Running>
++    inline void blitzGpuAwayWait(int thread, const Running &running) {
++        if (blitz_gpu_away == 0) {
++            return;
++        }
++
++        blitzGpuAwayPark(thread, [](const void *context) { return bool((*static_cast<const Running *>(context))()); }, &running);
++    }
++}
+diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
+--- a/src/hle/rt64_present_queue.cpp
++++ b/src/hle/rt64_present_queue.cpp
+@@ -11,10 +11,14 @@
+ #include "rt64_workload_queue.h"
+ #include "rt64_blitz_replay.h"
+ 
++#include <atomic>
+ #include <chrono>
+ #include <condition_variable>
++#include <cstdio>
+ #include <cstdlib>
++#include <cstring>
+ #include <mutex>
++#include <thread>
+ 
+ // BLITZ DS (the game's src/game/ds_view.cpp, docs/BLITZ_DS.md): a second screen, drawn by this thread right after the
+ // first and presented right after it. Each gets its own submit and wait, in turn, since the emulator's Android stalls
+@@ -82,7 +86,70 @@
+     }
+ }
+ 
++// The app in the background on iOS: no GPU work (rt64_blitz_watch.h).
++static std::atomic<std::thread::id> blitzGpuAwaySetter{};
++extern "C" {
++    volatile int blitz_gpu_away = 0;
++
++    void blitz_rt64_gpu_away(int away) {
++        if (away == 0) {
++            if (blitz_gpu_away != 0) {
++                blitz_gpu_away = 0;
++                fprintf(stderr, "[gpu] back: RT64's GPU work goes on\n");
++            }
++            return;
++        }
++
++        if (blitz_gpu_away != 0) {
++            return;
++        }
++
++        blitzGpuAwaySetter = std::this_thread::get_id();
++        blitz_gpu_away = 1;
++
++        // Give a submission already under way a moment to finish (iOS wants the GPU work done before the app's suspended):
++        // the present, workload and texture threads each back at their wait, or parked.
++        const auto start = std::chrono::steady_clock::now();
++        auto settled = [](RT64::BlitzWatchThread thread) {
++            const char *phase = RT64::blitzPhaseNow(thread);
++            return (phase == nullptr) || (strcmp(phase, "idle") == 0) || (strcmp(phase, "background") == 0);
++        };
++
++        bool allSettled = false;
++        while (std::chrono::steady_clock::now() - start < std::chrono::milliseconds(300)) {
++            allSettled = settled(RT64::BlitzWatchPresent) && settled(RT64::BlitzWatchWorkload) && settled(RT64::BlitzWatchTexture);
++            if (allSettled) {
++                break;
++            }
++
++            std::this_thread::sleep_for(std::chrono::milliseconds(2));
++        }
++
++        const long long ms = (long long)(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count());
++        fprintf(stderr, "[gpu] background: RT64 holds its GPU work until the app is back (%s after %lld ms)\n", allSettled ? "settled" : "still busy", ms);
++    }
++}
++
+ namespace RT64 {
++    void blitzGpuAwayPark(int thread, bool (*running)(const void *), const void *context) {
++        if ((blitz_gpu_away == 0) || (std::this_thread::get_id() == blitzGpuAwaySetter.load())) {
++            return;
++        }
++
++        const char *previous = (thread >= 0) ? blitzPhaseNow(BlitzWatchThread(thread)) : nullptr;
++        if (thread >= 0) {
++            blitzPhase(BlitzWatchThread(thread), "background");
++        }
++
++        while ((blitz_gpu_away != 0) && running(context)) {
++            std::this_thread::sleep_for(std::chrono::milliseconds(5));
++        }
++
++        if (thread >= 0) {
++            blitzPhase(BlitzWatchThread(thread), (previous != nullptr) ? previous : "idle");
++        }
++    }
++
+     static uint64_t blitzUsSince(std::chrono::steady_clock::time_point start) {
+         return uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
+     }
+@@ -964,6 +1031,8 @@
+             }
+ 
+             if (processCursor >= 0) {
++                // The app in the background (iOS): this present, its UI and any texture the UI uploads wait until it's back.
++                blitzGpuAwayWait(BlitzWatchPresent, [this]() { return presentThreadRunning.load(); });
+                 statPresentPicks.fetch_add(1, std::memory_order_relaxed);
+                 std::atomic<uint64_t> &newerAtPick = (newerPresents <= 0) ? statPresentNewer0 : ((newerPresents == 1) ? statPresentNewer1 : statPresentNewer2);
+                 newerAtPick.fetch_add(1, std::memory_order_relaxed);
+diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
+--- a/src/hle/rt64_workload_queue.cpp
++++ b/src/hle/rt64_workload_queue.cpp
+@@ -963,6 +963,8 @@
+             }
+ 
+             if (processCursor >= 0) {
++                // The app in the background (iOS): the game's frame waits until it's back (rt64_blitz_watch.h).
++                blitzGpuAwayWait(BlitzWatchWorkload, [this]() { return threadsRunning.load(); });
+                 blitzPhase(BlitzWatchWorkload, "lock");
+                 std::unique_lock<std::mutex> threadLock(threadMutex);
+                 Workload &workload = workloads[processCursor];
+@@ -1275,6 +1277,12 @@
+             static const bool noIdleWork = getenv("BLITZ_LEAN") != nullptr;
+             if (noIdleWork) {
+                 Thread::sleepMilliseconds(100);
++                continue;
++            }
++
++            // The app in the background (iOS): this work would be refused, up to a thousand times a second.
++            if (blitz_gpu_away != 0) {
++                Thread::sleepMilliseconds(20);
+                 continue;
+             }
+ 
+diff --git a/src/render/rt64_texture_cache.cpp b/src/render/rt64_texture_cache.cpp
+--- a/src/render/rt64_texture_cache.cpp
++++ b/src/render/rt64_texture_cache.cpp
+@@ -478,6 +478,7 @@
+ 
+                     // Only execute the command list and wait if the texture was loaded successfully.
+                     if (texture != nullptr) {
++                        blitzGpuAwayWait(-1, [this]() { return threadRunning.load(); });  // iOS: not from the background
+                         worker->execute();
+                         worker->wait();
+                         textureCache->uploadQueueMutex.lock();
+@@ -1049,7 +1050,10 @@
+                     streamResultQueue.clear();
+                 }
+             }
+-            
++
++            // The app in the background (iOS): these uploads wait until it's back (rt64_blitz_watch.h).
++            blitzGpuAwayWait(BlitzWatchTexture, [this]() { return uploadThreadRunning.load(); });
++
+             if (!streamResultQueueCopy.empty()) {
+                 {
+                     // Add the textures to the replacement pool as a loaded texture.
+diff --git a/src/render/rt64_render_worker.cpp b/src/render/rt64_render_worker.cpp
+--- a/src/render/rt64_render_worker.cpp
++++ b/src/render/rt64_render_worker.cpp
+@@ -4,6 +4,8 @@
+ 
+ #include "rt64_render_worker.h"
+ 
++#include "common/rt64_blitz_watch.h"
++
+ namespace RT64 {
+     // RenderWorker
+ 
+@@ -21,6 +23,8 @@
+     RenderWorker::~RenderWorker() { }
+ 
+     void RenderWorker::execute() {
++        // The app in the background (iOS): the work waits until it's back, on any thread but the one that said so (rt64_blitz_watch.h).
++        blitzGpuAwayWait(-1, []() { return true; });
+         commandQueue->executeCommandLists(commandList.get(), commandFence.get());
+     }
+ 

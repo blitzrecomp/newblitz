@@ -128,7 +128,7 @@ second in, it closes the app and goes back to its menu, before the app hears of 
 - There are three slots, and a fourth, **Auto**, which the app fills itself when it goes to the background in the middle of a
   game (a clamshell closed, another app opened on a phone). **F6** (**Shift+F6** goes back, or **hotkey + ○ / □**) picks one, and the note shows whether it's empty or when it was saved. Saving replaces what's in the current slot. Settings → General → Save State Buttons turns the controller buttons off.
 - A state only loads in the same version of the app that saved it. After an update, save a new one.
-- Loading puts everything the game keeps in memory back as it was, including its copy of your records and season. If the game saves to the Controller Pak after you load an old state, it saves that older copy.
+- Loading puts everything the game keeps in memory back as it was, including its copy of your records and season. If the game saves to the Controller Pak after you load an old state, it saves that older copy. A 2026 Season you saved stays on the pak whatever the game writes, unless you save over that slot yourself, and Controller Pak Backups (below) has the pak from before any write.
 - At a few moments a state can't be taken, for example while the game is talking to the Controller Pak. The app waits up to ten seconds, then says so in a note.
 
 ## Redo Play (experimental)
@@ -143,8 +143,21 @@ Botched a kickoff, or want a do-over at a party? Hold the hotkey, **R3** (the ri
   Each press undoes one confirm (✕), back to the main menu if need be, with the cursor where it was. On a phone it's
   the UNDO button at the top right. The game's own □ BACK still works where it did, and at team select (where the game took □ as a pick) □ goes back a step too.
 
+## Controller Pak backups
+
+New Blitz keeps a dated copy of your Controller Pak (your seasons and records) each time it changes, and each time the
+app opens: the last 20 changes, plus one a day for the last two weeks. They're in `pak_history`, next to the pak in
+`saves`.
+
+To put one back: Settings → General → **Controller Pak Backups**. Each copy shows when it was made and what it holds,
+for example **Nov 26, 1:53 PM · LAR, week 6** for a 2026 Season, newest first (**Older** pages back). Pick one, then
+**Restore**. The pak you have now is kept as a copy first, so you can go back to it the same way. From the main menu
+it's done at once; during a game New Blitz restarts to do it (a phone or console closes: open it again).
+
 ## If something goes wrong
 
+- **A season or your records are gone from Load:** Settings → General → **Controller Pak Backups** (above) has the pak as
+  it was before.
 - **The app closed by itself:** Settings → General → **Save Logs** zips `blitz.log` (what happened), the run before's, any crash reports and your settings into one file: in Downloads on a computer, in the app's folder on a phone (the Files app), in `/data/blitzrecomp` on the PS5. Please send it along with what you were doing.
 - **Something looks wrong on screen (flicker, garbage, a frozen picture):** press **Ctrl+Shift+F12** while it's happening. It saves three frames and a memory snapshot in the app folder's `dumps` folder; send them with `blitz.log`.
 - **No sound:** check Settings → Sound. The app also picks up a new output device (for example headphones) by itself.

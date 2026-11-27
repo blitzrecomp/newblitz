@@ -363,9 +363,11 @@ namespace blitz {
 
     void phone_pads_enable(bool on);  // phone_pads.cpp
     void firstrun_settings_row(int which);  // firstrun.cpp: 1 Blitz Builder, 2 Main Menu, 3 What Crash Reports Send,
-                                            // 4 Change ROM, 5 Switch Game, 8 Reset Data, 9 Restore a Backup
+                                            // 4 Change ROM, 5 Switch Game, 8 Reset Data, 9 Restore a Backup,
+                                            // 10 Controller Pak Backups
     void firstrun_builder_done_seen();      // firstrun.cpp
     bool reset_backups_exist();             // reset_data.cpp
+    bool pak_backups_exist();               // controller_pak.cpp
     bool other_engine_available();          // experience.cpp
     const char* other_engine_title();
     void create_party_tab();          // tournament.cpp
@@ -798,7 +800,16 @@ void blitz::init_config() {
                             "Puts back a backup Reset Data made: your settings, saves and setup as they were then. Your ROM stays.",
                             false, !blitz::reset_backups_exist());
     recompui::config::set_option_action("general", "restore_backup", "Restore");
-    for (const auto& [id, which] : {std::pair<const char*, int>{"reset_data", 8}, std::pair<const char*, int>{"restore_backup", 9}}) {
+    // Controller Pak Backups (pak_backups.cpp): the dated copies of the pak controller_pak.cpp keeps, one put back.
+    general.add_bool_option("pak_backups", "Controller Pak Backups",
+                            "Your Controller Pak is copied each time it changes. Pick a copy to put your seasons and records back "
+                            "as they were then.",
+                            // Always shown (team, 2026-11-26: "didn't see" it): Settings is built before the game first opens the pak,
+                            // so the first run's copy didn't exist yet. With none to choose, Restore says so in a toast.
+                            false, false);
+    recompui::config::set_option_action("general", "pak_backups", "Restore");
+    for (const auto& [id, which] : {std::pair<const char*, int>{"reset_data", 8}, std::pair<const char*, int>{"restore_backup", 9},
+                                    std::pair<const char*, int>{"pak_backups", 10}}) {
         std::string option = id;
         int w = which;
         general.add_option_change_callback(id, [option, w](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant,

@@ -16,4 +16,6 @@ namespace blitz {
     extern std::atomic_int replay_phase;          // the game's phase (2: a game), as of its last frame
     extern std::atomic_bool replay_pause_menu;    // the game's own pause menu is up
     extern std::atomic_bool replay_input_held;    // the game gets no buttons (until they've been let go)
+    extern std::atomic_bool replay_play_live;     // a play's on: from the snap (or a kickoff's kick) to the whistle
+    extern std::atomic_uint replay_snaps;         // how many times a play has gone live
 }

@@ -45,6 +45,7 @@ and for anyone who'd rather unpack than install.
 | `NewBlitz-v<v>-x86_64.AppImage` | the Linux folder, with Debian 12's SDL2 and FreeType and what they need that a desktop may lack (libpng, brotli, libsamplerate, libdecor, libXss) in `usr/lib`, found through the executable's RUNPATH. Vulkan, glibc, X11/Wayland, ALSA/PulseAudio and Mesa come from the system. **Untested on Linux** | `chmod +x`, run |
 | `NewBlitz-v<v>-Android.apk` | the Android device kit, as the build signed it (the release key when `BLITZ_ANDROID_KEYSTORE` is set: the script checks the APK's certificate against it). None with `RELEASE_NO_ANDROID=1` | Open it on the device, allow installs from that source, open New Blitz, pick your ROM |
 | `NewBlitz-v<v>-iPhone.ipa` | the iPhone device kit, **unsigned** (the script refuses one with a provisioning profile or a team) | Sideload with AltStore, SideStore or Sideloadly, open New Blitz, pick your ROM |
+| `PPSA99961.zip` | the PS5 title folder for ProsperoStore (docs/PROSPEROSTORE.md; tools/release/make_ps5_store_zip.sh): the kit Blitz Builder sends by default (`build/devices/ps5`, the pinned stable one), `PPSA99961/` at the top, never `launch.elf` or `STABLE.txt`, `sce_sys/param.json`'s `contentVersion` set from the version (1.0.4 -> `01.000.004`). The same name every release; never replace it on a published release (the catalog pins its sha256) | Unzip, FTP `PPSA99961/` to `/data/homebrew`; the ROM by Blitz Builder → PS5, or FTP to `/data/blitzrecomp` |
 
 Tools for these, all from Homebrew: `brew install makensis squashfs patchelf p7zip` (p7zip is for the scan). Set
 `HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 HOMEBREW_NO_INSTALL_CLEANUP=1` when installing them: on 2026-11-15 a plain
@@ -79,6 +80,14 @@ read -rs "BLITZ_ANDROID_KEYSTORE_PASS?Keystore password: " && echo && export BLI
 
 Keep the `-r`: without it zsh's `read` eats backslashes, and a password with a `\` then fails ("keystore password was
 incorrect").
+
+**Publishing.** Nothing is uploaded by the script; its last lines print the command, with every download,
+`PPSA99961.zip` and `SHA256SUMS`:
+
+```
+gh release create v<v> --repo blitzrecomp/newblitz --title "New Blitz <v>" --notes-file build/release/<v>/RELEASE_NOTES.md \
+  build/release/<v>/NewBlitz-* build/release/<v>/PPSA99961.zip build/release/<v>/SHA256SUMS
+```
 
 Last, **tools/release_scan.sh** unpacks every download (the `.dmg` attached read-only and detached, the AppImage's
 squashfs read with `unsquashfs` at the runtime's end, the installer extracted with `7z`, and the `.apk`/`.ipa` inside
@@ -123,6 +132,9 @@ The team's PS5 went back to stock after the last 1.0.2 test (2026-11-17), so no 
 - **A stable kit must be a release build** (`make ps5-modern BLITZ_CONTENT=public RELEASE=1 VERSION=x.y.z`, as `make
   release` builds it): a dev build carries this Mac's paths and fails `tools/release_scan.sh`. `make_release.sh` checks
   the pinned eboot for them before building (2026-11-17: 803 and 789 were dev builds; 805 is 803's code built for release).
+- **An untested default (2026-11-26, the team's call):** from 1.0.4 the pinned kit is that version's own PS5 release build,
+  never run on a PS5, because players need its fixes. Its STABLE.txt says `tested: no (...)`, and the Builder then says
+  only "Sends New Blitz 1.0.4 (build N)." (not "tested on a PS5"). 1.0.2 build 805 stays in build/ps5_stable to go back to.
 - **Keep the stable build working:** later Mac apps still send it its first setup (rules, season, general settings) and
   the season server still serves it rosters. Change those formats only in ways an older build reads (add fields, never
   rename or remove), and keep `paks/catalog.json` and the rosters manifest readable by it.

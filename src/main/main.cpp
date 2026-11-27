@@ -39,6 +39,8 @@ extern "C" void blitz_ps5_crumb(const char* step);  // platform_ps5.cpp: /data/b
 #endif
 #ifdef BLITZ_IOS
 namespace blitz { void ios_keep_landscape(); }  // platform_ios.mm
+extern "C" void blitz_rt64_gpu_away(int away);  // RT64 (platform/rt64-patches/0037): no GPU work while it's set
+namespace blitz { extern std::atomic_bool background_hold; }  // replay.cpp: the game holds at its dispatcher
 #endif
 #if BLITZ_HAS_FILE_DIALOG_NFD
 #include "nfd.h"  // the desktop file dialog (phones use the system's document picker, the PS5 none)
@@ -176,6 +178,47 @@ ultramodern::gfx_callbacks_t::gfx_data_t create_gfx() {
 #endif
         return 0;
     }, nullptr);
+#ifdef BLITZ_IOS
+    // iOS refuses GPU work from an app in the background, and leaves what a refused command buffer should have drawn or
+    // uploaded undefined: magenta. Back from the app switcher mid-game, the menus' panels stayed magenta for the rest of the
+    // session (the team's iPhone, 1.0.3 build 818, 2026-11-26; docs/notes/PINK_AFTER_BACKGROUND.md). So: in the background, RT64
+    // holds all its GPU work (the game's frames, presents, the UI, texture uploads, its idle work); back and active, the UI's
+    // textures are dropped and uploaded again as they're next drawn, in case one was left undefined on the way. SDL sends
+    // these from UIKit's notifications on the main thread, before iOS goes on: DIDENTERBACKGROUND from didEnterBackground,
+    // WILLENTERBACKGROUND from willResignActive (the app switcher, Control Center: still allowed the GPU), DIDENTERFOREGROUND
+    // from didBecomeActive.
+    SDL_AddEventWatch([](void*, SDL_Event* e) {
+        static bool resigned = false;
+        switch (e->type) {
+            case SDL_APP_WILLENTERBACKGROUND:
+                resigned = true;
+                fprintf(stderr, "[app] inactive at %u ms\n", SDL_GetTicks());
+                break;
+            case SDL_APP_DIDENTERBACKGROUND: {
+                // Mid-game the game first draws its pause menu and saves the Auto slot, then holds (savestate.cpp, from
+                // willResignActive): its frames go on until then, up to 2 s (iOS allows about 5 here). Not yet started: no wait.
+                const Uint32 t0 = SDL_GetTicks();
+                while (ultramodern::is_game_started() && !blitz::background_hold.load() && SDL_GetTicks() - t0 < 2000) SDL_Delay(10);
+                fprintf(stderr, "[app] in the background at %u ms (the game %s after %u ms)\n", t0,
+                        blitz::background_hold.load() ? "holds" : "still not holding", SDL_GetTicks() - t0);
+                blitz_rt64_gpu_away(1);
+                break;
+            }
+            case SDL_APP_WILLENTERFOREGROUND:
+                fprintf(stderr, "[app] coming back at %u ms\n", SDL_GetTicks());
+                break;
+            case SDL_APP_DIDENTERFOREGROUND:
+                fprintf(stderr, "[app] active at %u ms\n", SDL_GetTicks());
+                if (resigned) recompui::renew_textures();  // before the GPU's let go: the first present back draws them anew
+                resigned = false;
+                blitz_rt64_gpu_away(0);
+                break;
+            default:
+                break;
+        }
+        return 0;
+    }, nullptr);
+#endif
     return {};
 }
 

@@ -376,6 +376,8 @@ namespace {
         {"full", 960, 540, 300, 33},    // 622 MB, 10 s at 30 fps: computers with room
     };
 
+    constexpr Uint32 after_whistle_ms = 2000;  // kept past the whistle: the hit after it, the ball carrier getting up
+
     bool setting_on() {
         return std::get<bool>(recompui::config::get_general_config().get_option_value("instant_replay"));
     }
@@ -434,14 +436,25 @@ namespace {
         // 800 MB, none. Too slow still turns it down, then off (hold_frame_rate).
         on = setting_on() && SDL_GetSystemRAM() >= 800;
         const bool in_game = blitz::replay_phase.load() == 2;
-        if (in_game) left_game_at = now;
+        // Between quarters (and at halftime) the game's phase is 3 for ~12 s: the ring stays, so the quarter's last play is
+        // still there at the next line-up. It was freed 5 s into the break before 1.0.4.
+        if (in_game || blitz::replay_phase.load() == 3) left_game_at = now;
         // Its memory goes a moment after a game ends, so the walk from the end of one to its stats doesn't drop it.
         const bool keep = on && too_slow_steps < 2 && (in_game || now - left_game_at < 5000);
-        static bool was_select = false;
+        // Kept: from the snap to a moment after the whistle (late hits), nothing between. The play just run stays whole in
+        // the ring through play select and the next play's lining up, until the ball's snapped (team, 1.0.3 on an iPhone: a
+        // replay opened at the line showed the next play's line-up, which the end of play select used to start).
+        static unsigned seen_snaps = 0;
+        static Uint32 live_until = 0;
+        const unsigned snaps = blitz::replay_snaps.load();
+        if (snaps != seen_snaps) {
+            seen_snaps = snaps;
+            blitz_replay_mark_next = 1;  // the snap: the next frame kept starts a play
+        }
+        if (in_game && blitz::replay_play_live.load()) live_until = now + after_whistle_ms;
+        const bool in_play = in_game && (int32_t)(live_until - now) > 0;
         const bool select = blitz_play_select_on_screen() != 0;
-        if (was_select && !select) blitz_replay_mark_next = 1;  // the snap's coming: this is where the next play starts
-        was_select = select;
-        const bool capture = keep && in_game && !select && !blitz::replay_pause_menu.load() && screen == Screen::Closed;
+        const bool capture = keep && in_play && !select && !blitz::replay_pause_menu.load() && screen == Screen::Closed;
         blitz_replay_enabled = keep ? 1 : 0;
         blitz_replay_capture_on = capture ? 1 : 0;
         hold_frame_rate(capture);
@@ -581,8 +594,10 @@ namespace {
         // The last play, unless it's only just started (under a second and a half: the one before).
         int start = 0;
         for (auto it = marks.rbegin(); it != marks.rend(); ++it) {
-            start = *it;
-            if (frames.back().ms - frames[(size_t)start].ms >= 1500) break;
+            if (frames.back().ms - frames[(size_t)*it].ms >= 1500) {
+                start = *it;
+                break;
+            }
         }
         play_from = start;
         playhead = frames.empty() ? 0.0 : frames[(size_t)start].ms;
@@ -625,6 +640,11 @@ namespace {
         blitz::audio::set_mute(true);
         recompui::show_context(context, "");
         fprintf(stderr, "[replay] open: %zu frames, %zu plays, from frame %d\n", frames.size(), marks.size() + 1, start);
+        if (getenv("BLITZ_REPLAY_TRACE")) {
+            std::string list;
+            for (int m : marks) list += " " + std::to_string(m) + "@" + std::to_string(frames[(size_t)m].ms);
+            fprintf(stderr, "[replay] plays start at frames:%s; the last frame at %d ms\n", list.c_str(), frames.empty() ? 0 : frames.back().ms);
+        }
     }
 
     void end() {

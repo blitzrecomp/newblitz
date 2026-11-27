@@ -687,6 +687,12 @@ namespace blitz {
         while (!a.empty() && std::isspace((unsigned char)a.back())) a.pop_back();
         return a;
     }
+    // False when STABLE.txt says "tested: no" (2026-11-26: the team shipped 1.0.4's own PS5 build as the default unrun, for
+    // its fixes; the team has no PS5 to run it on). The Builder then doesn't call it tested.
+    bool ps5_stable_tested() {
+        std::string a = read_all(kits() / "ps5" / "STABLE.txt");
+        return a.find("\ntested: no") == std::string::npos;
+    }
     bool ps5_beta_available() {
         std::error_code ec;
         return fs::is_regular_file(kits() / "ps5-beta" / "PPSA99961" / "eboot.bin", ec);
@@ -717,6 +723,7 @@ namespace blitz {
     void send_to_ps5(const std::string&) {}
     void send_to_ps5(const std::string&, bool) {}
     std::string ps5_stable_label() { return {}; }
+    bool ps5_stable_tested() { return false; }
     bool ps5_beta_available() { return false; }
     void send_to_iphone() {}
     void send_to_android() {}

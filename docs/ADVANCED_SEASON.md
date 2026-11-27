@@ -348,6 +348,86 @@ Alternatively, HL1/HS1/HS2 can be entry hooks inside `func_80263D74` / `func_802
   - **Advanced** sidecars record the franchise of each team index, so the load can remap every team index (results, seeds, stats rows, user team) or refuse. That is a real gain over the pak format.
 - **Classic or Modern with an Advanced pak:** only if the user copies files between folders. They then see empty slots and can't crash on Advanced data. If they save over a stub slot, HL1 reports the sidecar as an orphan.
 
+### 3.6 The stub guard and the pak history (1.0.4, after 2026-11-26)
+
+**What happened.** On the team's iPhone (1.0.3, Original engine, `saves/original/advanced/blitz2026/`) the stub of season
+`0EE109E6D63E3BF3` gen 5 in slot 0 (pak 0x1400) was cleared in one session (13:53-13:59): the slot became an empty
+one (0xFF 0xFF then zeros), the season vanished from Load, and its `.adv` files (gens 4 and 5) were untouched. It was
+recovered from `.bak2`. What the evidence shows:
+
+- **Not a season Save.** There's no gen 6 file, no `[adv] saved` line and no notice, and the one game function that
+  writes the slots (`func_80263E40`) is only called between the two write hooks.
+- **Not the record and option writers** (`func_80263FF8`, `802640E4`, `802641F0`, `80264340`, `80264590`): each
+  reads the note fresh, patches its own area (all outside 0xF00-0x2CD0) and writes it back.
+- **Every note write sends 0x7B00 bytes from a 0x7AB8 buffer** (`pak_read_write_a` rounds to pages), so pak
+  0x7FB8-0x7FFF is the 0x48 bytes of heap after the game's buffer at that moment. The wiped image's tail matches the
+  next session's ordinary pre-kickoff write exactly, and the heap of save state slot 1 (Nov 14, an exhibition game;
+  free block 0x800CDB90), not the heap of slot 3 (the Nov 23 season state, its note buffer at 0x800D59B0). So the bad
+  write most likely came after the team loaded slot 1, in the front end, not after "resumed week 3 game 7".
+- **The written note is exactly a freshly created Blitz note** for this pak (`func_80263C90`: header and slots
+  0xFF 0xFF, the rest zero; the team has no user records). A create can't overwrite an existing note (`osPfsAllocateFile`
+  answers EXIST), so the note was deleted first and made again in the same directory entry and pages, which leaves
+  the directory and inode pages as they were.
+
+**Root cause (confirmed, 2026-11-26): the save state's copy of the pak's page table.** libultra keeps the last page
+table it read or wrote (the inode cache of `__osPfsRWInode`: bank 0x8002CDD4, port 0x8002CDD0, 256 bytes at
+0x8005E850) and reads it instead of the pak when the bank and port match. libultra's `__osPfsGetStatus`, the first
+thing `osPfsInitPak` does, empties it (bank = 250), but ours (`blitz_PfsGetStatus`, `controller_pak.cpp`) replaced
+it and didn't. Within a session that never mattered; a save state brings the copy back.
+
+- In slots 1, 2 (Nov 14) and the Auto slot (taken after loading slot 1), the copy is the page table of this pak (same
+  ID) from before it had a Blitz note: every page free (0x0003). In slot 3 (Nov 23) it equals the pak's.
+- The game's "pak ready" flag (0x8002B080) is 0 in all of them, so after a load the game's next pak screen runs
+  `osPfsInitPak` → `osPfsChecker`. The checker walked the Blitz note's chain through the stale copy: page 5 → 0x0003,
+  not EOF, so it took the note for broken, zeroed its directory entry and wrote the copy (all pages free) back as the
+  page table: the note was deleted.
+- The game's pak screen then got PFS_ERR_INVALID and its dialog (`func_80268F38` case 5) showed **BLITZ NOTE NOT
+  FOUND!** CREATE / ABORT. CREATE ran `func_80263C90`: `osPfsAllocateFile` took the first free entry (0) and the first
+  free pages (5-127, in order), exactly the old note's, and wrote the empty note.
+- The 1.0.4 stub guard wouldn't have stopped it: the checker's directory write deletes the note, which releases its
+  stubs, so the new empty note goes through.
+
+**The fix** (1.0.4): `blitz_PfsGetStatus` empties the cache as libultra does, and every restore (slots, Resume, Redo
+Play, menu steps) calls `blitz::pak_state_restored`, which empties it and clears the "pak ready" flags, so the game
+reopens the pak as it is now before its next use (docs/SAVE_STATES.md, "The Controller Pak's view"). Each restore
+logs `[savestate] pak view refreshed: ...`, naming a stale copy when there was one.
+
+**Reproduced on the Mac** (2026-11-26, dev build and app folder, the team's `.bak2` pak). The team's slot 1 loads there, but
+quitting its game ran out of heap at the main menu with or without the fix (that state and the Mac's content
+differ), so the test state was a Mac attract-mode state with slot 1's 256-byte page table copy (and its bank and
+port) written in. With `BLITZ_PAK_STALE=1` (the old behaviour): leaving the title screen deleted the note (`[pak]
+season 0EE109E6D63E3BF3 gen 5: its note was deleted`; directory entry zero, every page free), Season → Load said
+BLITZ NOTE NOT FOUND!, and CREATE left an image byte for byte the same as the team's wiped one apart from the 0x48 heap
+bytes at 0x7FB8. With the fix: `pak view refreshed: its page table copy was stale (0 pages in use then, 123 now)`, no
+pak write at all, and Load lists LOS ANGELES RAMS IN WEEK 6. A state made with another pak reopens that pak cleanly
+(no new-pak dialog, no write), and a note can still be created and saved.
+
+The guard and the history below stay, for anything else that writes a stub by mistake; their `[pak] kept the season
+stub` line says when and in which block.
+
+**The guard** (`src/game/pak_guard.cpp`, used by `controller_pak.cpp`'s block write, Advanced paks only):
+
+- the notes are found through the directory and inode table, and a stub is "0xFF 0xFF, BZ26ADV" at a slot's file
+  offset (0xF00 + k·0x774; slot 2's crosses a page);
+- a block write that would change any of a stub's 32 bytes gets those bytes back as they are on disk, unless
+  `adv_save.cpp` has said a Save to that slot is being written (`pak_season_save_begin` once its sidecar is on disk,
+  `pak_season_save_end` in the after-write hook); the rest of the write goes through;
+- a stub whose note is deleted (its directory entry cleared, as the Controller Pak manager does) is released for the
+  session, so a new note made in its place starts empty;
+- Classic and Modern paks aren't guarded: they hold no stubs, and an emulator-style save over a slot that holds one
+  must go through. The `.mpk` stays a plain pak image either way (only bytes already on disk are kept).
+
+**The history:** `pak_history/<pak>-YYYYMMDD-HHMMSS.mpk` beside each pak: at each launch and before each burst of
+changing writes (one copy, not one per block: a burst ends after 3 s without a write), skipping a copy equal to the
+newest. The newest 20 are kept, plus the newest of each of the last 14 days (about 1 MB at most). `.bak`/`.bak2`
+stay as they were. Pruning a season (after a Save) keeps every generation a stub in the pak, `.bak`, `.bak2` or any
+history copy points at. Settings → General → **Controller Pak Backups** (`src/main/pak_backups.cpp`) lists the
+copies (the ones equal to the pak now left out) and restores one: at once if the game hasn't opened that pak this run,
+otherwise through `pak_restore` in the pak's folder and a restart, applied at the next start's first pak access. The
+pak as it was goes into the history first.
+
+Tests: `make test-pak` (synthetic paks; `PAK_GOOD=... PAK_WIPED=...` replays a real wipe block by block).
+
 ---
 
 ## 4. What is hard-wired, and how each item can change

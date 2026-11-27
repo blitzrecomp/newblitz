@@ -13,7 +13,10 @@ set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "Minimum macOS version")
 # The build number is the commit count, and the commit hash goes into Copy Debug Info (both at configure time).
 # `make release VERSION=x.y.z` passes -DBLITZ_VERSION for the release's builds (and -U it otherwise, so a release's
 # number never lingers in a build folder's cache).
-if (NOT BLITZ_VERSION)
+if (BLITZ_VERSION)
+    set(BLITZ_VERSION_GIVEN ON)   # a release's (the PS5's contentVersion follows it: platform/ps5/ps5_stage.cmake)
+else()
+    set(BLITZ_VERSION_GIVEN OFF)
     set(BLITZ_VERSION "0.9.0")
 endif()
 execute_process(COMMAND git rev-list --count HEAD WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} OUTPUT_VARIABLE BLITZ_BUILD OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
@@ -384,6 +387,7 @@ target_sources(BlitzRecompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/src/main/firstrun_screen.cpp
     ${CMAKE_SOURCE_DIR}/src/main/crash_report.cpp
     ${CMAKE_SOURCE_DIR}/src/main/reset_data.cpp
+    ${CMAKE_SOURCE_DIR}/src/main/pak_backups.cpp
     ${CMAKE_SOURCE_DIR}/src/main/device_send.cpp
     ${CMAKE_SOURCE_DIR}/src/main/capture.cpp
     ${CMAKE_SOURCE_DIR}/src/main/toast.cpp
@@ -413,6 +417,7 @@ target_sources(BlitzRecompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/src/game/savestate.cpp
     ${CMAKE_SOURCE_DIR}/src/game/debug_print.cpp
     ${CMAKE_SOURCE_DIR}/src/game/controller_pak.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/pak_guard.cpp
     ${CMAKE_SOURCE_DIR}/src/game/ai.cpp
     ${CMAKE_SOURCE_DIR}/src/game/widescreen.cpp
     ${CMAKE_SOURCE_DIR}/src/game/tall_view.cpp

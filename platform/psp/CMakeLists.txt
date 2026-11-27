@@ -167,7 +167,7 @@ target_compile_options(librecomp PRIVATE -Wno-unused-parameter)
 # ---- The app: Tier 0 game code (both flavours), Classic's own, Tier 2 that compiles against recompui-lite, the PSP layer ----
 set(GAME_TIER0
   ${GAME}/threads.cpp ${GAME}/overlays.cpp ${GAME}/game_init.cpp ${GAME}/ai.cpp
-  ${GAME}/controller_pak.cpp ${GAME}/debug_print.cpp ${GAME}/notices.cpp
+  ${GAME}/controller_pak.cpp ${GAME}/pak_guard.cpp ${GAME}/debug_print.cpp ${GAME}/notices.cpp
   ${MAIN}/register_overlays.cpp ${MAIN}/dev_monitor.cpp
   ${GAME}/play_log.cpp)
 # ultra_extras.cpp's two clocks are psp_main.cpp's (they have a lockstep path).

@@ -9,14 +9,40 @@
 // Each pak is a standard 32 KB .mpk image in <app folder>/saves/, interchangeable with emulators.
 // Writes are checked and synced per block; a failed write is undone in memory and reported to the
 // game. A file that exists but isn't a 32 KB image is moved aside, never overwritten, and the
-// image as of each launch is kept as <name>.mpk.bak.
+// image as of each launch is kept as <name>.mpk.bak (and the one before as .bak2).
 // Blank paks are formatted like mupen64plus's format_mempak (GPL-3.0).
+//
+// Since 1.0.4 (an Advanced season's stub vanished from the team's pak on 2026-11-26, docs/ADVANCED_SEASON.md §3.6):
+//   - the stub guard (pak_guard.h): in Advanced, a block write that would clear or change a season stub keeps the
+//     stub as it is on disk, unless it's the player's own Save to that slot (adv_save.cpp brackets the game's write
+//     with pak_season_save_begin/end) or the note itself was deleted. Each kept stub prints a [pak] line;
+//   - the history: pak_history/<name>-YYYYMMDD-HHMMSS.mpk beside the pak, a copy at each launch and before each
+//     write that changes the image (one per burst of writes), skipping one the same as the newest. The newest 20
+//     stay, and the newest of each of the last 14 days;
+//   - Settings → General → Controller Pak Backups (src/main/pak_backups.cpp) lists them and puts one back. With the
+//     game running that goes through pak_restore (a mark in the pak's folder) and a restart: the pak is replaced
+//     here, at the next start's first pak access, before the game reads it.
+//
+// The root cause of that wipe (2026-11-26, docs/ADVANCED_SEASON.md §3.6): libultra keeps a copy of the pak's page table
+// (the inode cache, __osPfsRWInode) in RDRAM, so a save state brings back the copy from when it was taken. The real
+// __osPfsGetStatus empties it at every osPfsInitPak; ours didn't. A Nov 14 state held the page table of a pak with no
+// note yet, so osPfsChecker, run by the next osPfsInitPak, took the Blitz note's pages for free ones and deleted the
+// note; the game said BLITZ NOTE NOT FOUND!, and CREATE made a new empty note in its place. Now blitz_PfsGetStatus
+// empties the cache as libultra does, and pak_state_restored (savestate.cpp, after each restore) empties it too and
+// clears the game's "pak ready" flags, so the game opens the pak afresh, as it is on disk now, before it uses it again.
+#include <algorithm>
 #include <array>
 #include <cerrno>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <atomic>
+#include <chrono>
 #include <filesystem>
+#include <fstream>
+#include <map>
 #include <mutex>
+#include <set>
 #include <random>
 #include <string>
 #include "../main/platform_compat.h"
@@ -27,6 +53,8 @@
 #include "recomp.h"
 #include "librecomp/game.hpp"
 #include "ultramodern/ultra64.h"
+#include "pak_guard.h"
+#include "blitz_pak_backups.h"
 
 namespace blitz {
     void post_notice(const std::string& msg);  // notices.cpp
@@ -62,8 +90,49 @@ namespace {
     std::array<Pak, 4> paks;
     std::mutex paks_mutex;
 
+    // The stub guard (pak_guard.h): on for Advanced's paks only (Classic and Modern have no stubs, and must be free
+    // to save over a slot that holds one, as an emulator would).
+    bool guard_on = false;
+    std::atomic<int> season_save_slot{-1};                  // adv_save.cpp: a season Save is writing this slot
+    std::set<std::pair<uint64_t, uint32_t>> released;       // stubs whose note was deleted this session
+    // The history: the newest copy's bytes (to skip a copy that's the same), and when the last changing write was
+    // (a write of the whole note is about a thousand blocks: one copy before them, not one per block).
+    std::map<std::string, std::vector<uint8_t>> history_newest;  // by pak path
+    std::chrono::steady_clock::time_point last_change{};
+    bool any_change = false;
+    constexpr auto burst_gap = std::chrono::seconds(3);
+    constexpr const char* restore_mark = "pak_restore";     // in the pak's folder: the history file to put back
+
     void notify(const std::string& msg) {
         blitz::post_notice("Controller Pak: " + msg);
+    }
+
+    // The pak as the game and libultra remember it in RDRAM (boot segment: the same addresses in every flavour).
+    constexpr uint32_t inode_cache_channel = 0x8002CDD0;  // __osPfsInodeCacheChannel (s32)
+    constexpr uint32_t inode_cache_bank = 0x8002CDD4;     // __osPfsInodeCacheBank (u8)
+    constexpr uint32_t inode_cache = 0x8005E850;          // __osPfsInodeCache: the cached bank's page table, 256 bytes
+    constexpr uint8_t no_cached_bank = 250;               // what __osPfsGetStatus sets: no bank is cached
+    constexpr uint32_t pak_ready = 0x8002B080;            // the game's s8 per port: 1 once osPfsInitPak succeeded there
+    constexpr uint32_t game_pfs = 0x8005E390;             // the game's OSPfs for port 1 (0x68 per port): status +0, id +0xC
+    constexpr uint32_t pfs_id = 0xC;
+    constexpr uint32_t inode_page = 0x100;                // page 1: bank 0's page table on the pak
+    constexpr uint32_t first_data_page = 5, pages = 128;
+    constexpr uint16_t page_free = 0x0003;                // PFS_PAGE_NOT_USED
+
+    gpr ram(uint32_t vram) { return (gpr)(int32_t)vram; }
+
+    void drop_inode_cache(uint8_t* rdram) {
+        MEM_B(0, ram(inode_cache_bank)) = (int8_t)no_cached_bank;
+        MEM_W(0, ram(inode_cache_channel)) = -1;
+    }
+
+    // BLITZ_PAK_STALE=1 (tests only): keep the 1.0.3 behaviour, to show what a stale pak view does.
+    bool keep_stale_view() {
+        static const bool on = [] {
+            const char* v = getenv("BLITZ_PAK_STALE");
+            return v != nullptr && v[0] == '1';
+        }();
+        return on;
     }
 
     void store_be16(uint8_t* p, uint16_t v) { p[0] = v >> 8; p[1] = v & 0xFF; }
@@ -150,18 +219,10 @@ namespace {
         return buf;
     }
 
-    // Load the port's pak image. Only a missing file gets a fresh blank pak; an existing file that
-    // isn't a readable 32 KB image is moved aside (never overwritten) and the player is told.
-    Pak& load(int channel) {
-        Pak& pak = paks[channel];
-        if (pak.loaded) {
-            return pak;
-        }
-        pak.loaded = true;
-        std::error_code ec;
-        // Each content pack keeps its own paks, so a season saved under one roster is never read back
-        // under another; Classic uses saves/ itself. Advanced (2026) saves are a different format
-        // and live apart from all of them.
+    // Where this run's paks live. Each content pack keeps its own paks, so a season saved under one roster is never
+    // read back under another; Classic uses saves/ itself. Advanced (2026) saves are a different format and live
+    // apart from all of them.
+    std::filesystem::path pak_dir() {
         std::filesystem::path dir = recomp::get_config_path() / "saves";
 #if BLITZ_ENGINE_ORIGINAL
         dir /= "original";  // Modern on the original game: its own saves (the game's code differs from team+'s)
@@ -178,8 +239,98 @@ namespace {
             dir /= "packs";
             dir /= pack;
         }
+        return dir;
+    }
+
+    std::filesystem::path history_dir(const std::filesystem::path& pak_path) { return pak_path.parent_path() / "pak_history"; }
+
+    // The history's files for this pak, by name.
+    std::vector<std::string> history_names(const std::filesystem::path& pak_path) {
+        std::vector<std::string> out;
+        std::error_code ec;
+        std::string stem = pak_path.stem().string();
+        for (std::filesystem::directory_iterator it{history_dir(pak_path), ec}, end; !ec && it != end; it.increment(ec)) {
+            std::string n = it->path().filename().string();
+            if (blitz::pakimg::parse_time(n, stem) != 0) out.push_back(n);
+        }
+        std::sort(out.begin(), out.end());
+        return out;
+    }
+
+    // A dated copy of `data` in the history, unless the newest copy is the same; then the old ones pruned.
+    void save_history(const std::filesystem::path& pak_path, const std::vector<uint8_t>& data, const char* why) {
+        std::error_code ec;
+        std::filesystem::path dir = history_dir(pak_path);
+        std::string stem = pak_path.stem().string();
+        std::vector<std::string> names = history_names(pak_path);
+        std::vector<uint8_t>& newest = history_newest[pak_path.string()];
+        if (newest.empty() && !names.empty()) read_image(dir / names.back(), newest);
+        if (!newest.empty() && newest == data) return;
+        std::filesystem::create_directories(dir, ec);
+        std::string name = blitz::pakimg::history_name(stem, time(nullptr));
+        for (int n = 2; std::filesystem::exists(dir / name, ec) && n < 100; n++) {
+            name = blitz::pakimg::history_name(stem, time(nullptr));
+            name = name.substr(0, name.size() - 4) + "-" + std::to_string(n) + ".mpk";
+        }
+        if (!write_image(dir / name, data)) {
+            fprintf(stderr, "[pak] history: couldn't write %s\n", (dir / name).string().c_str());
+            return;
+        }
+        newest = data;
+        names.push_back(name);
+        int removed = 0;
+        for (const std::string& old : blitz::pakimg::history_prune(names, stem, time(nullptr))) {
+            if (old != name && std::filesystem::remove(dir / old, ec)) removed++;
+        }
+        fprintf(stderr, "[pak] history: %s (%s: %s)%s\n", name.c_str(), why, blitz::pakimg::describe_plain(data.data()).c_str(),
+                removed ? (", " + std::to_string(removed) + " old one(s) pruned").c_str() : "");
+    }
+
+    // A restore asked for in Settings (blitz::pak_restore): the chosen history copy replaces the pak, the pak as it
+    // is first going into the history. Before anything reads the pak, so the game never sees the swap.
+    void apply_restore_mark(const std::filesystem::path& pak_path) {
+        std::error_code ec;
+        std::filesystem::path mark = pak_path.parent_path() / restore_mark;
+        if (!std::filesystem::is_regular_file(mark, ec)) return;
+        std::string name;
+        {
+            std::ifstream in(mark);
+            std::getline(in, name);
+        }
+        std::filesystem::remove(mark, ec);
+        std::filesystem::path from = history_dir(pak_path) / std::filesystem::path(name).filename();
+        std::vector<uint8_t> chosen, current;
+        if (name.empty() || !read_image(from, chosen)) {
+            fprintf(stderr, "[pak] restore: couldn't read %s; the pak is as it was\n", from.string().c_str());
+            blitz::post_notice("Controller Pak: the backup to restore couldn't be read, so your pak is as it was.");
+            return;
+        }
+        if (read_image(pak_path, current)) save_history(pak_path, current, "before a restore");
+        if (!write_image(pak_path, chosen)) {
+            fprintf(stderr, "[pak] restore: couldn't write %s\n", pak_path.string().c_str());
+            blitz::post_notice("Controller Pak: couldn't restore the backup (the pak file couldn't be written).");
+            return;
+        }
+        fprintf(stderr, "[pak] restored %s from %s (%s)\n", pak_path.filename().string().c_str(), from.filename().string().c_str(),
+                blitz::pakimg::describe_plain(chosen.data()).c_str());
+    }
+
+    // Load the port's pak image. Only a missing file gets a fresh blank pak; an existing file that
+    // isn't a readable 32 KB image is moved aside (never overwritten) and the player is told.
+    Pak& load(int channel) {
+        Pak& pak = paks[channel];
+        if (pak.loaded) {
+            return pak;
+        }
+        pak.loaded = true;
+        std::error_code ec;
+        std::filesystem::path dir = pak_dir();
+#if BLITZ_MODERN
+        guard_on = blitz::advanced_mode();
+#endif
         std::filesystem::create_directories(dir, ec);
         pak.path = dir / ("blitz2000_pak" + std::to_string(channel + 1) + ".mpk");
+        apply_restore_mark(pak.path);
 
         bool exists = std::filesystem::exists(pak.path, ec);
         if (ec) {
@@ -202,7 +353,8 @@ namespace {
                         fprintf(stderr, "[pak] couldn't write backup %s\n", backup.string().c_str());
                     }
                 }
-                fprintf(stderr, "[pak] loaded %s\n", pak.path.string().c_str());
+                fprintf(stderr, "[pak] loaded %s (%s)\n", pak.path.string().c_str(), blitz::pakimg::describe_plain(pak.data.data()).c_str());
+                save_history(pak.path, pak.data, "launch");
                 return pak;
             }
             std::filesystem::path aside = pak.path;
@@ -292,10 +444,34 @@ extern "C" void blitz_ContRamWrite(uint8_t* rdram, recomp_context* ctx) {
         return;
     }
     uint8_t* block = pak.data.data() + address * 32;
-    uint8_t previous[32];
+    uint8_t previous[32], next[32];
     std::copy(block, block + 32, previous);
     for (int i = 0; i < 32; i++) {
-        block[i] = MEM_B(i, buffer);
+        next[i] = MEM_B(i, buffer);
+    }
+    // The stub guard: what's written never drops a season stub but the player's own Save (pak_guard.h).
+    if (guard_on) {
+        for (const blitz::pakimg::Stub& s : blitz::pakimg::guard_block(pak.data.data(), address, next, season_save_slot.load(), released)) {
+            fprintf(stderr, "[pak] kept the season stub in slot %d (season %016llX gen %u, week %d): a write that wasn't a Save of "
+                    "that slot would have changed it (block %u)\n", s.slot, (unsigned long long)s.id, s.gen, s.week + 1, address);
+        }
+    }
+    const bool changes = !std::equal(next, next + 32, previous);
+    if (changes) {
+        // The history: the image before this burst of writes.
+        auto now = std::chrono::steady_clock::now();
+        if (!any_change || now - last_change > burst_gap) save_history(pak.path, pak.data, "before a write");
+        any_change = true;
+        last_change = now;
+    }
+    std::vector<uint8_t> before;
+    if (guard_on && changes && address < blitz::pakimg::system_blocks) before = pak.data;  // the directory or inodes
+    std::copy(next, next + 32, block);
+    if (!before.empty()) {
+        for (const auto& r : blitz::pakimg::released_by(before.data(), pak.data.data())) {
+            fprintf(stderr, "[pak] season %016llX gen %u: its note was deleted\n", (unsigned long long)r.first, r.second);
+            released.insert(r);
+        }
     }
     std::string error;
     if (!persist_block(pak, address, error)) {
@@ -311,6 +487,9 @@ extern "C" void blitz_ContRamWrite(uint8_t* rdram, recomp_context* ctx) {
 
 // s32 __osPfsGetStatus(OSMesgQueue* mq, int channel)
 extern "C" void blitz_PfsGetStatus(uint8_t* rdram, recomp_context* ctx) {
+    // As libultra's own does first (its __osPfsInodeCacheBank = 250): osPfsInitPak then reads the page table from the
+    // pak, never from a copy left in RDRAM (a save state's: see the top of this file).
+    if (!keep_stale_view()) MEM_B(0, ram(inode_cache_bank)) = (int8_t)no_cached_bank;
     int channel = (int)ctx->r5;
     if (channel < 0 || channel > 3 || accessory(channel) != Accessory::ControllerPak) {
         ctx->r2 = PFS_ERR_NOPACK;
@@ -361,5 +540,194 @@ namespace blitz {
         MEM_W(0x8, (gpr)(int32_t)(0x8005E390 + 0x68 * port)) = port;
         MEM_B(0, state) = 5;
         fprintf(stderr, "[pads] player %d joined after the game looked at its ports: marked plugged in\n", port + 1);
+    }
+}
+
+namespace blitz {
+    // adv_save.cpp, around the game's write of a season Save (its sidecar is already on disk): that slot's stub may change.
+    void pak_season_save_begin(int slot) { season_save_slot = slot; }
+    void pak_season_save_end() { season_save_slot = -1; }
+
+    // savestate.cpp, after a state's RDRAM is back (slots, Resume, Redo Play, menu steps). The play stays as it was
+    // saved; only the pak's view is brought up to date: libultra's copy of the page table is dropped, and the game's
+    // "pak ready" flags are cleared, so its next pak use runs osPfsInitPak (and osPfsChecker) on the pak as it is now
+    // and rebuilds its OSPfs from it, as after plugging a pak in. No pak request can be in flight here: a state is
+    // only taken and restored with the controller thread waiting for its next request.
+    void pak_state_restored(uint8_t* rdram) {
+        auto byte = [&](uint32_t vram) { return (uint8_t)MEM_BU(0, ram(vram)); };
+        const uint8_t bank = byte(inode_cache_bank);
+        const int32_t channel = MEM_W(0, ram(inode_cache_channel));
+        int ready = 0;
+        for (uint32_t p = 0; p < 4; p++) ready += byte(pak_ready + p) != 0;
+        std::string cache_note, id_note;
+        {
+            std::lock_guard lock{paks_mutex};
+            const Pak& pak = paks[0];
+            const bool known = pak.loaded && pak.usable && pak.data.size() == pak_size;
+            if (bank == no_cached_bank) {
+                cache_note = "no page table cached";
+            }
+            else if (bank != 0 || channel != 0 || !known) {
+                cache_note = "page table cached (bank " + std::to_string(bank) + ", port " + std::to_string(channel + 1) + ")";
+            }
+            else {
+                int used_then = 0, used_now = 0;
+                bool same = true;
+                for (uint32_t i = 0; i < 0x100; i++) same = same && byte(inode_cache + i) == pak.data[inode_page + i];
+                for (uint32_t pg = first_data_page; pg < pages; pg++) {
+                    used_then += ((byte(inode_cache + 2 * pg) << 8) | byte(inode_cache + 2 * pg + 1)) != page_free;
+                    used_now += ((pak.data[inode_page + 2 * pg] << 8) | pak.data[inode_page + 2 * pg + 1]) != page_free;
+                }
+                cache_note = same ? "its page table copy matched the pak"
+                                  : "its page table copy was stale (" + std::to_string(used_then) + " pages in use then, " +
+                                        std::to_string(used_now) + " now)";
+            }
+            if (known && (MEM_W(0, ram(game_pfs)) & 1) != 0) {  // PFS_INITIALIZED: the state had opened the pak
+                bool same_id = true;
+                for (uint32_t i = 0; i < 0x20; i++) same_id = same_id && byte(game_pfs + pfs_id + i) == pak.data[0x20 + i];
+                id_note = same_id ? ", same pak" : ", made with another pak (its ID differs)";
+            }
+        }
+        if (keep_stale_view()) {
+            fprintf(stderr, "[savestate] pak view kept as the state had it (BLITZ_PAK_STALE=1): %s%s\n", cache_note.c_str(), id_note.c_str());
+            return;
+        }
+        drop_inode_cache(rdram);
+        for (uint32_t p = 0; p < 4; p++) MEM_B(0, ram(pak_ready + p)) = 0;
+        fprintf(stderr, "[savestate] pak view refreshed: %s%s; %s; the game reopens the pak at its next use\n", cache_note.c_str(),
+                id_note.c_str(), ready ? "its pak-ready flag cleared" : "its pak-ready flag was already clear");
+    }
+
+    // Every season generation a kept pak image points at: the pak, its .bak and .bak2 and the history. adv_save.cpp
+    // keeps those season files when it prunes, so each backup can still be loaded.
+    std::set<std::pair<uint64_t, uint32_t>> pak_kept_season_refs() {
+        std::set<std::pair<uint64_t, uint32_t>> out;
+        std::filesystem::path pak_path;
+        {
+            std::lock_guard lock{paks_mutex};
+            if (!paks[0].loaded || paks[0].path.empty()) return out;
+            pak_path = paks[0].path;
+            for (const auto& r : blitz::pakimg::stub_refs(paks[0].data.data())) out.insert(r);
+        }
+        std::vector<std::filesystem::path> files = {pak_path.string() + ".bak", pak_path.string() + ".bak2"};
+        for (const std::string& n : history_names(pak_path)) files.push_back(history_dir(pak_path) / n);
+        std::vector<uint8_t> img;
+        for (const auto& f : files) {
+            if (!read_image(f, img)) continue;
+            for (const auto& r : blitz::pakimg::stub_refs(img.data())) out.insert(r);
+        }
+        return out;
+    }
+}
+
+namespace {
+    // A stub's team, from its season file (the franchise of each team index is in its header): "LAR". "" without one.
+    std::string stub_team(const std::filesystem::path& pak_folder, uint64_t id, uint32_t gen, uint8_t team) {
+        if (pak_folder.parent_path().filename() != "advanced" || team >= 32) return "";
+        char hexid[17];
+        snprintf(hexid, sizeof(hexid), "%016llX", (unsigned long long)id);
+        std::filesystem::path f = recomp::get_config_path() / "saves" / "advanced" / pak_folder.filename() / "season" /
+                                  ("season-" + std::string(hexid) + "-" + std::to_string(gen) + ".adv");
+        std::ifstream in(f, std::ios::binary);
+        char head[44 + 32 * 4];
+        if (!in.read(head, sizeof head) || std::memcmp(head, "BLZADV1", 8) != 0) return "";
+        const char* name = head + 44 + 4 * team;
+        return std::string(name, strnlen(name, 4));
+    }
+
+    // What the player calls the folder a pak is in.
+    std::string folder_label(const std::filesystem::path& pak_folder) {
+        std::string up = pak_folder.parent_path().filename().string();
+        if (up == "advanced") return "Advanced";
+        if (up == "packs") return "Standard";
+        return "Original 1999";
+    }
+}
+
+namespace blitz {
+    std::vector<PakBackup> pak_backups() {
+        std::vector<PakBackup> out;
+        std::error_code ec;
+        std::filesystem::path saves = recomp::get_config_path() / "saves";
+        std::set<std::string> folders;
+        for (std::filesystem::recursive_directory_iterator it{saves, std::filesystem::directory_options::skip_permission_denied, ec}, end;
+             !ec && it != end; it.increment(ec)) {
+            if (it.depth() > 4) {
+                it.disable_recursion_pending();
+                continue;
+            }
+            std::error_code fec;
+            if (!it->is_directory(fec) || it->path().filename() != "pak_history") continue;
+            it.disable_recursion_pending();
+            std::filesystem::path folder = it->path().parent_path();
+            for (std::filesystem::directory_iterator f{it->path(), fec}, fend; !fec && f != fend; f.increment(fec)) {
+                std::string n = f->path().filename().string();
+                size_t dash = n.find('-');
+                if (dash == std::string::npos) continue;
+                std::string stem = n.substr(0, dash);
+                std::time_t when = blitz::pakimg::parse_time(n, stem);
+                std::vector<uint8_t> img, current;
+                if (when == 0 || !read_image(f->path(), img)) continue;
+                std::filesystem::path pak_path = folder / (stem + ".mpk");
+                // The same as the pak now: nothing to put back.
+                if (read_image(pak_path, current) && current == img) continue;
+                PakBackup b;
+                b.file = f->path();
+                b.pak = pak_path;
+                b.when = when;
+                b.folder = folder_label(folder);
+                b.what = blitz::pakimg::describe(img.data(), [&](uint64_t id, uint32_t gen, uint8_t team) { return stub_team(folder, id, gen, team); });
+                folders.insert(folder.string());
+                out.push_back(std::move(b));
+            }
+        }
+        if (folders.size() < 2) {
+            for (PakBackup& b : out) b.folder.clear();
+        }
+        std::sort(out.begin(), out.end(), [](const PakBackup& a, const PakBackup& b) {
+            return a.when != b.when ? a.when > b.when : a.file.filename() > b.file.filename();
+        });
+        return out;
+    }
+
+    bool pak_backups_exist() {
+        std::error_code ec;
+        std::filesystem::path saves = recomp::get_config_path() / "saves";
+        for (std::filesystem::recursive_directory_iterator it{saves, std::filesystem::directory_options::skip_permission_denied, ec}, end;
+             !ec && it != end; it.increment(ec)) {
+            if (it.depth() > 4) {
+                it.disable_recursion_pending();
+                continue;
+            }
+            if (it->path().filename() == "pak_history" && !std::filesystem::is_empty(it->path(), ec)) return true;
+        }
+        return false;
+    }
+
+    // Puts a backup back. When that pak hasn't been opened this run (the game hasn't touched it yet), at once;
+    // otherwise a mark for the next start, and the caller restarts the app (the game keeps the pak's file system in
+    // memory, so the file can't change under it). Returns "" when done or marked, else why not.
+    std::string pak_restore(const PakBackup& b, bool& needs_restart) {
+        needs_restart = false;
+        std::error_code ec;
+        std::vector<uint8_t> img;
+        if (!read_image(b.file, img)) return "That backup can't be read.";
+        std::lock_guard lock{paks_mutex};
+        bool open = false;
+        for (const Pak& p : paks) open = open || (p.loaded && p.path == b.pak);
+        std::filesystem::path mark = b.pak.parent_path() / restore_mark;
+        {
+            std::ofstream out(mark, std::ios::trunc);
+            out << b.file.filename().string() << "\n";
+            if (!out) return "Couldn't write in the saves folder.";
+        }
+        fprintf(stderr, "[pak] restore asked: %s from %s%s\n", b.pak.string().c_str(), b.file.filename().string().c_str(),
+                open ? " (at the next start)" : "");
+        if (open) {
+            needs_restart = true;
+            return "";
+        }
+        apply_restore_mark(b.pak);
+        return "";
     }
 }

@@ -85,6 +85,7 @@ namespace blitz {
 
     std::string active_pack_id();  // content_pack*.cpp: "" for none
     int fs_sync_ram_toc(uint8_t* rdram);  // art_dropin.cpp
+    void pak_state_restored(uint8_t* rdram);  // controller_pak.cpp: the pak's view as the pak is now, not as it was
 }
 
 namespace {
@@ -515,6 +516,9 @@ namespace {
             }
         }
         blitz::fs_sync_ram_toc(rdram);  // art_dropin.cpp: the file table's positions are this run's ROM image's
+        // The Controller Pak isn't in a state, but the game's and libultra's memory of it is: brought up to date, so the
+        // game never acts on the pak as it was when the state was taken (a stale page table deleted a note, 2026-11-26).
+        blitz::pak_state_restored(rdram);
         put_context(ctx, sn.dispatcher);  // f_odd points into ctx: re-pointed (another session's address)
         fprintf(stderr, "[savestate] restored: %zu processes\n", sn.processes.size());
     }
@@ -1091,6 +1095,19 @@ namespace blitz {
         static bool this_stall = false;   // this stall was looked at
         static C::time_point flowing{};   // the frames have come steadily since
         static bool presenting = false;   // blitz_replay_keep_presenting is set for the rescue's toast
+        static double held_for = 0.0;     // how much of this stall the app spent in the background or holding
+        // The background and its hold stop the game on purpose: that part of the stall isn't a freeze. Only the time since
+        // the app came back counts, so a game stuck after it's back is still rescued (5 s on), and one that simply hasn't
+        // drawn yet isn't. (the team's iPhone, 2026-11-26: blitz_app_foreground clears both at once, and the next VI saw 11 s
+        // with no frame and posted "The game stopped responding" over a game that was fine.)
+        if (in_background.load() || blitz::background_hold.load()) {
+            held_for = away;
+            frames_away = 0.0;
+            flowing = {};
+            return;
+        }
+        if (away < held_for) held_for = 0.0;  // a frame came: a new stall from here
+        away -= held_for;
         frames_away = away;
         // Instant Replay stops the game while it's open: that stall is the replay's, not a freeze, up to the game's
         // next frame (the VI after the replay closes still sees it; PS5 2026-11-17: a 7 s replay posted the rescue).

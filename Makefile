@@ -1,7 +1,7 @@
 PY ?= python3
 VENV := .venv
 
-.PHONY: psp-recomp regress ios-classic ios-modern win win-classic win-modern ps5-classic ps5-modern bundle bundle-classic bundle-teamplus recomp-modern houston team-art app-modern env venv test test-adv rom-scan rom-import rom-verify syms recomp n64recomp rsp patches app dist notarize rom2026 syms2026 recomp2026 app2026 dist2026 logo27
+.PHONY: psp-recomp regress ios-classic ios-modern win win-classic win-modern ps5-classic ps5-modern bundle bundle-classic bundle-teamplus recomp-modern houston team-art app-modern env venv test test-adv test-pak rom-scan rom-import rom-verify syms recomp n64recomp rsp patches app dist notarize rom2026 syms2026 recomp2026 app2026 dist2026 logo27
 
 env:            ## Check the toolchain
 	@./tools/check_env.sh
@@ -11,13 +11,18 @@ venv:           ## Python tools: ROM analysis (splat, spimdisasm), Pillow, dmgbu
 	$(VENV)/bin/pip install -q --upgrade pip
 	$(VENV)/bin/pip install -q -r requirements.txt
 
-test: test-adv
+test: test-adv test-pak
 	$(VENV)/bin/python -m unittest discover -s tests -v
 
 test-adv:       ## Unit tests for Advanced mode's league model (standings, tiebreakers, playoffs)
 	@mkdir -p build/tests
 	clang++ -std=c++20 -O1 -g -Wall -isystem lib/N64ModernRuntime/thirdparty tests/adv_league_test.cpp src/game/adv_league.cpp -o build/tests/adv_league_test
 	@if [ -f packs/blitz2026/pack.json ]; then build/tests/adv_league_test packs/blitz2026/pack.json; else echo "adv_league: skipped (no packs/blitz2026)"; fi
+
+test-pak:       ## Unit tests for the Controller Pak stub guard and history (src/game/pak_guard.cpp); PAK_GOOD=/PAK_WIPED= replay a real wipe
+	@mkdir -p build/tests
+	clang++ -std=c++20 -O1 -g -Wall tests/pak_guard_test.cpp src/game/pak_guard.cpp -o build/tests/pak_guard_test
+	build/tests/pak_guard_test $(PAK_GOOD) $(PAK_WIPED)
 
 test-ps5-send:  ## Send to PS5 without a console (src/main/ps5_send.h): connect timeout, progress, manifest, whole sends to a local FTP server (pyftpdlib in .venv)
 	@mkdir -p build/tests

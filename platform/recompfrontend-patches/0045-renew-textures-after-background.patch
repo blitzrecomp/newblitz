@@ -1,0 +1,103 @@
+diff --git a/recompui/include/recompui/recompui.h b/recompui/include/recompui/recompui.h
+--- a/recompui/include/recompui/recompui.h
++++ b/recompui/include/recompui/recompui.h
+@@ -141,6 +141,10 @@
+     void queue_image_from_bytes_rgba32(const std::string &src, const std::vector<char> &bytes, uint32_t width, uint32_t height);
+     void queue_image_from_bytes_file(const std::string &src, const std::vector<char> &bytes);
+     void release_image(const std::string &src);
++    // BlitzRecomp: every texture the UI has (images, font atlases, the 1x1 white) is dropped at the next draw and uploaded again
++    // as it's next drawn. Back from the background on iOS, where an upload the GPU refused left a texture undefined: magenta
++    // panels for the rest of the session (the team's iPhone, 2026-11-26). Any thread.
++    void renew_textures();
+ 
+     void drop_files(const std::list<std::filesystem::path> &file_list);
+ 
+diff --git a/recompui/src/base/ui_state.cpp b/recompui/src/base/ui_state.cpp
+--- a/recompui/src/base/ui_state.cpp
++++ b/recompui/src/base/ui_state.cpp
+@@ -4,7 +4,9 @@
+ #else
+ #include <SDL2/SDL_video.h>
+ #endif
++#include <atomic>
+ #include <chrono>
++#include <cstdio>
+ #include <cstdlib>
+ 
+ #include "rt64_render_hooks.h"
+@@ -693,6 +695,8 @@
+ extern "C" { volatile int blitz_ds_panel_first = 0; }
+ extern "C" int blitz_hotkey_held(void);  // BlitzRecomp controllers.cpp: L3 or R3 held, whose Select is a screenshot
+ namespace { Rml::Context* ds_context = nullptr; Rml::ElementDocument* ds_document = nullptr; }
++
++static std::atomic<bool> renew_textures_pending{ false };  // BlitzRecomp: recompui::renew_textures
+ 
+ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer* swap_chain_framebuffer) {
+ 
+@@ -710,6 +714,14 @@
+ 
+     std::lock_guard lock{ ui_state_mutex };
+ 
++    // BlitzRecomp: recompui::renew_textures. Here, under the lock and before anything's drawn this frame, so no draw still
++    // holds a handle; the last frame's command list is done with them (the present waits for it before recording again).
++    if (renew_textures_pending.exchange(false)) {
++        Rml::ReleaseTextures();
++        ui_state->render_interface.forget_reserved_textures();
++        fprintf(stderr, "[ui] textures dropped: each is uploaded again as it's drawn\n");
++    }
++
+     SDL_Event cur_event{};
+ 
+     bool mouse_moved = false;
+@@ -1295,6 +1307,11 @@
+ 
+ void recompui::release_image(const std::string &src) {
+     Rml::ReleaseTexture(src);
++}
++
++void recompui::renew_textures() {
++    renew_textures_pending = true;
++    blitz_ds_ui_wake();  // BLITZ DS (BLITZ_DS_UI_EVERY): the next present draws the UI
+ }
+ 
+ void recompui::drop_files(const std::list<std::filesystem::path> &file_list) {
+diff --git a/recompui/src/renderer/ui_renderer.cpp b/recompui/src/renderer/ui_renderer.cpp
+--- a/recompui/src/renderer/ui_renderer.cpp
++++ b/recompui/src/renderer/ui_renderer.cpp
+@@ -714,6 +714,11 @@
+         image_from_bytes_queue.enqueue(ImageFromBytes{ .type = ImageType::RGBA32, .width = width, .height = height, .name = src, .bytes = bytes });
+     }
+ 
++    void forget_reserved_textures() {
++        textures_.erase(0);
++        textures_.erase(1);
++    }
++
+     void flush_image_from_bytes_queue() {
+         ImageFromBytes image_from_bytes;
+         while (image_from_bytes_queue.try_dequeue(image_from_bytes)) {
+@@ -761,6 +766,12 @@
+     impl->queue_image_from_bytes_file(src, bytes);
+ }
+ 
++void recompui::RmlRenderInterface_RT64::forget_reserved_textures() {
++    if (impl) {
++        impl->forget_reserved_textures();
++    }
++}
++
+ void recompui::RmlRenderInterface_RT64::queue_image_from_bytes_rgba32(const std::string &src, const std::vector<char> &bytes, uint32_t width, uint32_t height) {
+     assert(static_cast<bool>(impl));
+ 
+diff --git a/recompui/src/renderer/ui_renderer.h b/recompui/src/renderer/ui_renderer.h
+--- a/recompui/src/renderer/ui_renderer.h
++++ b/recompui/src/renderer/ui_renderer.h
+@@ -32,6 +32,8 @@
+         void end(plume::RenderCommandList* list, plume::RenderFramebuffer* framebuffer);
+         void queue_image_from_bytes_file(const std::string &src, const std::vector<char> &bytes);
+         void queue_image_from_bytes_rgba32(const std::string &src, const std::vector<char> &bytes, uint32_t width, uint32_t height);
++        // BlitzRecomp: drops the 1x1 white and transparent textures, made again on their next use (recompui::renew_textures).
++        void forget_reserved_textures();
+     };
+ } // namespace recompui
+ 

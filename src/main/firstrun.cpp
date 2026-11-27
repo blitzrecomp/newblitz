@@ -70,6 +70,7 @@ namespace blitz {
     void send_to_ps5(const std::string& ip, bool beta);
     std::string ps5_stable_label();  // device_send.cpp: "1.0.2 (build 789)", the build tested on a PS5
     bool ps5_beta_available();
+    bool ps5_stable_tested();  // device_send.cpp: false when STABLE.txt says "tested: no"
     void send_to_iphone();
     void send_to_android();
     void send_to_android_replacing();      // the device's New Blitz removed first (another signature)
@@ -92,6 +93,8 @@ namespace blitz {
     void set_crash_reports(bool on);
     void reset_data_open(bool restore);  // reset_data.cpp: Settings → General → Reset Data, Restore a Backup
     void reset_data_update();
+    void pak_backups_open();    // pak_backups.cpp: Settings → General → Controller Pak Backups
+    void pak_backups_update();
     extern std::atomic<int> stored_rom_changes;  // known_roms.cpp
     std::string stored_rom_display_name();
 }
@@ -885,7 +888,8 @@ namespace {
                 if (st.ps5_ip.empty()) st.ps5_ip = blitz::ps5_last_address();
                 {
                     std::string stable = blitz::ps5_stable_label();
-                    std::string which = stable.empty() ? "" : "\n\nSends New Blitz " + stable + ", the PS5 build tested on a PS5.";
+                    std::string which = stable.empty() ? ""
+                        : "\n\nSends New Blitz " + stable + (blitz::ps5_stable_tested() ? ", the PS5 build tested on a PS5." : ".");
                     if (blitz::ps5_beta_available())
                         which += " Send Beta sends this version's PS5 build instead: newer, but never run on a PS5.";
                     s = base("Send to your PS5", "On the PS5: etaHEN running, same network. Settings \xE2\x86\x92 Network shows the "
@@ -1005,6 +1009,111 @@ namespace {
         s.back_button = false;  // Cancel is the on-screen way back
         blitz::firstrun_ui::show(s);
     }
+
+#if defined(BLITZ_PLATFORM_PS5)
+    // The PS5 with no ROM (2026-11-26, for ProsperoStore: a store-installed copy arrives without one, and the PS5 never
+    // shows setup). One screen over the launcher says how to add it: Blitz Builder from a computer, or the ROM copied
+    // to /data/blitzrecomp over FTP. Every 2 s (and on Check Again) that folder is looked at again, as main.cpp does
+    // at startup, so a ROM copied in is taken without a restart; then the screen goes and the launcher (Play) is back.
+    // Untested on a PS5 (none to run it on): it only reads the folder and calls store_rom, as the startup import does.
+    namespace ps5_no_rom {
+        int state = 0;                   // 0 not shown yet, 1 up, 2 done (a ROM is stored)
+        Uint32 next_look = 0;
+        std::atomic<bool> look_now{false};
+        std::vector<std::string> tried;  // "name|size|time" of files that weren't the ROM, so each is tried once
+        std::string problem;             // the last refused file, for the note
+
+        void show() {
+            blitz::firstrun_ui::Screen s;
+            // BRANDING: app name, the setup tool's name, PS5 app folder /data/blitzrecomp
+            s.title = "Add your NFL Blitz 2000 ROM";
+            s.body = "New Blitz needs your own copy of NFL Blitz 2000 for the N64: the USA cartridge, v1.1. No game files "
+                     "come with it.\n\n"
+                     "From a computer: open New Blitz on your Mac, Windows or Linux computer \xE2\x86\x92 Blitz Builder "
+                     "\xE2\x86\x92 PS5. It sends your ROM and your setup. Close New Blitz here first: it starts again "
+                     "when the send is done.\n\n"
+                     "Or copy the ROM (.z64, .n64, .v64 or a .zip) to /data/blitzrecomp on this PS5 over FTP. New Blitz "
+                     "finds it in a few seconds. If it doesn't, start New Blitz again.";
+            s.note = problem;
+            s.actions = {{"Check Again", [] { look_now = true; }}};
+            s.back_button = false;
+            blitz::firstrun_ui::show(s);
+        }
+
+        // A file in the drop folder that could be the ROM, not tried yet and not still being copied: stored if it's
+        // the one. True once a ROM is stored.
+        bool look() {
+            const fs::path folder = blitz::rom_drop_folder();
+            const fs::path stored = stored_rom_path();
+            std::vector<fs::path> roms, zips;
+            std::error_code ec;
+            for (const auto& entry : fs::directory_iterator(folder, ec)) {
+                std::string name = entry.path().filename().string();
+                if (name.rfind("._", 0) == 0 || !entry.is_regular_file(ec) || entry.path() == stored) continue;
+                std::string ext = entry.path().extension().string();
+                for (char& c : ext) c = (char)std::tolower((unsigned char)c);
+                if (ext == ".z64" || ext == ".n64" || ext == ".v64") roms.push_back(entry.path());
+                else if (ext == ".zip") zips.push_back(entry.path());
+            }
+            std::sort(roms.begin(), roms.end());
+            std::sort(zips.begin(), zips.end());
+            for (const auto* list : {&roms, &zips}) {
+                for (const fs::path& rom : *list) {
+                    std::error_code fe;
+                    auto size = fs::file_size(rom, fe);
+                    auto when = fs::last_write_time(rom, fe);
+                    if (fe) continue;
+                    // Changed in the last 3 s: an FTP copy still going. The next look takes it.
+                    if (fs::file_time_type::clock::now() - when < std::chrono::seconds(3)) continue;
+                    std::string key = rom.filename().string() + "|" + std::to_string((unsigned long long)size) + "|" +
+                                      std::to_string((long long)when.time_since_epoch().count());
+                    if (std::find(tried.begin(), tried.end(), key) != tried.end()) continue;
+                    tried.push_back(key);
+                    int kind = 0;
+                    std::string message;
+                    bool ok = blitz::store_rom(rom, kind, message);
+                    log("ps5 no-rom: %s %s", rom.filename().string().c_str(), ok ? "stored" : "not the ROM");
+                    if (ok) return true;
+                    problem = rom.filename().string() + ": " + message;
+                    if (state == 1) show();  // the note changes
+                }
+            }
+            return false;
+        }
+
+        // Every UI tick (builder_update), once the launcher is up (the startup import has had its go by then).
+        void tick() {
+            if (state == 2 || launcher_ready_at == 0 || ultramodern::is_game_started()) return;
+            Uint32 now = SDL_GetTicks();
+            if (now - launcher_ready_at < 1000) return;
+            if (!look_now.exchange(false) && now < next_look) return;
+            next_look = now + 2000;
+            bool ready = rom_valid();
+            if (!ready && look()) {
+                ready = true;
+                blitz::stored_rom_changes++;  // the launcher's ROM line
+            }
+            if (ready) {
+                if (state == 1) {
+                    blitz::firstrun_ui::hide();
+                    launcher_visible(true);
+                    std::string name = blitz::stored_rom_display_name();
+                    blitz::post_status(name.empty() ? std::string("ROM saved") : name + " saved");
+                    log("ps5 no-rom: ROM ready, screen closed");
+                }
+                state = 2;
+                return;
+            }
+            if (state == 0) {
+                if (blitz::firstrun_ui::shown()) return;  // another screen is up: after it
+                log("ps5 no-rom: no ROM in %s, showing how to add one", blitz::rom_drop_folder().string().c_str());
+                launcher_visible(false);  // it takes the D-pad otherwise
+                state = 1;
+                show();
+            }
+        }
+    }
+#endif
 }
 
 namespace blitz {
@@ -1128,6 +1237,10 @@ namespace blitz {
     // Every UI tick (main.cpp).
     void builder_update() {
         blitz::reset_data_update();  // Reset Data and Restore a Backup's screens (reset_data.cpp)
+        blitz::pak_backups_update();  // Controller Pak Backups' screens (pak_backups.cpp)
+#if defined(BLITZ_PLATFORM_PS5)
+        ps5_no_rom::tick();  // no ROM yet: how to add one
+#endif
 #if defined(BLITZ_IOS)
         // A ROM opened into the app from another (Files' Share → New Blitz): setup's ROM screen takes it as if Load ROM
         // had picked it and goes on; anywhere else it's stored as Settings → Change ROM would, with a toast.
@@ -1178,6 +1291,14 @@ namespace blitz {
             recompui::config::close();
             if (r == 1) {
                 if (blitz::platform::desktop) firstrun_start("settings-row");
+            }
+            else if (r == 10) {
+                if (running()) {
+                    log("abandoned at=%s for %s", step_names[st.step], "pak-backups");
+                    st = State{};
+                    abandoned = true;
+                }
+                blitz::pak_backups_open();
             }
             else if (r == 8 || r == 9) {
                 // Reset Data or Restore from Settings during setup (Customize has Settings open): setup steps aside, as

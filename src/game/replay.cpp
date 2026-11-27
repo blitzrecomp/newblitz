@@ -10,8 +10,10 @@
 // running (the host output is muted, blitz::audio::set_mute): stopping it would need quiescence the game doesn't offer
 // mid-sound, and it can't change anything but where the music has got to. Save states wait: their tick is after this.
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 
 #include "recomp.h"
@@ -26,6 +28,8 @@ namespace blitz {
     std::atomic_int replay_phase{0};
     std::atomic_bool replay_pause_menu{false};
     std::atomic_bool replay_input_held{false};
+    std::atomic_bool replay_play_live{false};
+    std::atomic_uint replay_snaps{0};
     // The app in the background (a clamshell closed, an app left on a phone; savestate.cpp sets it once the Auto slot is
     // saved): the game holds at the dispatcher, as for a replay, until it's back. It played on with the lid shut before.
     std::atomic_bool background_hold{false};
@@ -34,6 +38,9 @@ namespace blitz {
 namespace {
     constexpr int32_t phase_addr = (int32_t)0x802EA420;       // 2: a game (savestate.cpp)
     constexpr int32_t pause_up_addr = (int32_t)0x8028BFC0;    // func_80262D90 sets it on the way in, clears it on the way out
+    // The play's phase (receiver_targets.cpp): 1 at the line (a kickoff's run-up too), 2 live, 5 a kickoff in the air, 3 after
+    // the whistle, 6 the coin toss.
+    constexpr int32_t play_phase_addr = (int32_t)0x802EA4A8;
     constexpr int32_t retrace_queue = (int32_t)0x8005DF20;    // what the dispatcher's own osRecvMesg reads
 }
 
@@ -41,6 +48,26 @@ namespace {
 extern "C" void blitz_replay_gate(uint8_t* rdram) {
     blitz::replay_phase = MEM_W(0, (gpr)phase_addr);
     blitz::replay_pause_menu = MEM_W(0, (gpr)pause_up_addr) != 0;
+    // The play's phase, and each time it goes live: the snap, or a kickoff's kick, where the replay's next play starts. Read
+    // on every frame here, so the main thread's 50 ms look (replay_screen.cpp) can't miss one. Outside a game it's 0.
+    {
+        static int last = -1;
+        static bool was_live = false;
+        static const bool trace = getenv("BLITZ_REPLAY_TRACE") != nullptr;
+        const int play = blitz::replay_phase.load() == 2 ? (int)MEM_W(0, (gpr)play_phase_addr) : 0;
+        const bool live = play == 2 || play == 5;
+        if (live && !was_live) blitz::replay_snaps++;
+        static int last_game = -1;
+        if (trace && (play != last || blitz::replay_phase.load() != last_game)) {
+            static const auto t0 = std::chrono::steady_clock::now();
+            const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+            fprintf(stderr, "[replay] play phase %d -> %d (%lld ms, kind %d, game phase %d)\n", last, play, ms, (int)MEM_W(0, (gpr)(int32_t)0x802EA508), blitz::replay_phase.load());
+        }
+        last_game = blitz::replay_phase.load();
+        last = play;
+        was_live = live;
+        blitz::replay_play_live = live;
+    }
     if (blitz::background_hold.load()) {
         fprintf(stderr, "[background] the game holds\n");
         while (blitz::background_hold.load()) {

@@ -45,8 +45,10 @@ Cost: one full-screen triangle at low resolution, no readback, for a chosen rate
 a game ends. Each frame is stretched into the ring's 16:9 and its real shape kept beside it, so 4:3, widescreen and BLITZ DS's
 tall picture all use one ring and a window resize doesn't throw it away.
 
-**What's kept:** live play only, not play select or the pause menu, so waiting at play select doesn't push the play out. The end of
-play select marks the next frame as a play's start (the cyan ticks); the replay opens at the last play and loops inside it.
+**What's kept:** each play from its snap to 2 s after its whistle, and nothing between plays (play select, the line-up, the pause
+menu). The snap marks the next frame as a play's start (the cyan ticks); the replay opens at the last play and loops inside it. So
+the play just run stays the last play in the ring through play select and the next line-up, until the ball is snapped. See
+`docs/notes/REPLAY_LIFECYCLE.md` (1.0.4) for why, and for the game's play phases this reads.
 
 **Dropping it:** under 26 fps for 15 s of play (`BLITZ_REPLAY_FPS_FLOOR`): half the frames, then 30 s later off for the run, with the
 memory, and a `[replay] too slow` line. Never back up in a run, as `ds_view.cpp` does.

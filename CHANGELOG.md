@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.0.4 (2026-11-26)
+
+- **Phones: no more pink screens after the app switcher.** Coming back to New Blitz could leave the game, and then
+  every menu, bright pink. The app now stops all drawing while it's in the background and reloads the menus' pictures
+  when it's back.
+- **No false "The game stopped responding".** Time spent in the app switcher or on the Home Screen counted as a frozen
+  game. It no longer does; a game that's really stuck is still rescued.
+- **Instant Replay shows the play you just ran.** Opened at the line before the snap, it showed the next play's
+  line-up instead. The last play now stays until the ball is snapped, and a quarter break no longer loses it.
+- **Long messages fit their box.** A four-line message ran out of the bottom of its card.
+- **Your Controller Pak can be put back.** New Blitz now keeps a dated copy of your pak each time it changes (the last
+  20 changes, and one a day for two weeks). Settings → General → **Controller Pak Backups** lists them with what each
+  holds, for example "LAR, week 6", and puts the one you pick back. The pak you had is kept as a copy too.
+- **A 2026 Season can't drop off the pak.** On an iPhone a season disappeared from Load after a session of save
+  states; its files were fine, but the pak no longer pointed at them. Now only your own Save to that slot can change a
+  saved season on the pak, and the season files any copy points at are kept.
+- **Loading a save state no longer rolls back your Controller Pak.** A state remembers the pak as it was when you
+  saved it. Loading an old one could make the game think its note was damaged, delete it and offer to create an empty
+  one ("BLITZ NOTE NOT FOUND!"). That is how the season above was lost. Now the game reads the pak as it is when you
+  load a state, so seasons, records and settings saved since then stay.
+- **Handhelds: no crash on a key press at the launcher.** A menu that lost track of where it was closed the app on an
+  RG DS. It now stays where it is.
+- **PS5: a copy installed without a ROM says how to add one.** Instead of an empty launcher, a screen says to send it
+  from Blitz Builder on your computer, or to copy your ROM to `/data/blitzrecomp`; a ROM copied there is found within
+  a few seconds. Each release now raises the PS5 app's version, so the console sees updates (untested on a PS5).
+- **PS5: Blitz Builder now sends 1.0.4.** It sent 1.0.2, the last build we ran on a PS5, so PS5 players missed every
+  fix since. We don't have a jailbroken PS5 to test on right now, so this build hasn't run on one: if you play on a
+  PS5, tell us how it goes on Discord. We're looking for PS5 testers.
+
 ## 1.0.3 (2026-11-24)
 
 - **Quitting no longer crashes.** On Windows most quits mid-game ended in a crash, and a Mac or Linux quit could too:

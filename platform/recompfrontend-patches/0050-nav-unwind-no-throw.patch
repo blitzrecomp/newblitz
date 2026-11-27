@@ -1,0 +1,27 @@
+diff --git a/recompui/src/elements/ui_document.cpp b/recompui/src/elements/ui_document.cpp
+index e75eed8..4ac0d09 100644
+--- a/recompui/src/elements/ui_document.cpp
++++ b/recompui/src/elements/ui_document.cpp
+@@ -1,5 +1,6 @@
+ #include "elements/ui_document.h"
+ #include "recompui/recompui.h"
++#include <cstdio>
+ 
+ // This define shows debug output for the navigation process.
+ // Utilize Element->debug_id to set readable names for your elements.
+@@ -198,7 +199,14 @@ namespace recompui {
+ 
+             int cur_element_index = get_element_index(this_element, nav_parent->nav_children);
+             if (cur_element_index == -1) {
+-                throw std::runtime_error("This should never ever ever happen. Element not found in its parent's nav children.");
++                // The navigation tree and the element disagree (a menu rebuilt under a key press: an RG DS on 1.0.1 aborted
++                // here from a press at the launcher). Stay on the current element instead of ending the app; say so once.
++                static bool told = false;
++                if (!told) {
++                    told = true;
++                    fprintf(stderr, "[ui] navigation: an element isn't among its parent's nav children; staying put\n");
++                }
++                return nullptr;
+             }
+ 
+             // Process grid navigation if retained_grid_index is valid and grid navs are different.

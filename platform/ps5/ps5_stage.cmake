@@ -22,6 +22,34 @@ set_target_properties(BlitzRecompiled PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${BLITZ_PS5_TITLE_DIR}
     RULE_LAUNCH_LINK ${CMAKE_SOURCE_DIR}/tools/ps5/link_title.sh)
 target_compile_definitions(BlitzRecompiled PRIVATE SDL_MAIN_HANDLED)
+# contentVersion (NN.NNN.NNN) is how a console, and ProsperoStore's catalog, learns of an update (docs/PROSPEROSTORE.md):
+# raised every release, from the version (1.0.4 -> 01.000.004, 1.1.0 -> 01.001.000, 2.3.15 -> 02.003.015). A build
+# without VERSION=x.y.z (a dev build) keeps 01.000.000, what every PS5 build carried before 1.0.4.
+set(BLITZ_PS5_CONTENT_VERSION "01.000.000")
+if (BLITZ_VERSION_GIVEN)
+    if (NOT BLITZ_VERSION MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)$")
+        message(FATAL_ERROR "PS5 contentVersion: VERSION ${BLITZ_VERSION} isn't major.minor.patch")
+    endif()
+    set(_parts ${CMAKE_MATCH_1} ${CMAKE_MATCH_2} ${CMAKE_MATCH_3})
+    set(_widths 2 3 3)
+    set(BLITZ_PS5_CONTENT_VERSION "")
+    foreach (_i 0 1 2)
+        list(GET _parts ${_i} _n)
+        list(GET _widths ${_i} _w)
+        math(EXPR _n "${_n}")  # no leading zeros
+        string(LENGTH "${_n}" _len)
+        if (_len GREATER _w)
+            message(FATAL_ERROR "PS5 contentVersion: ${BLITZ_VERSION} doesn't fit NN.NNN.NNN")
+        endif()
+        math(EXPR _pad "${_w} - ${_len}")
+        string(REPEAT "0" ${_pad} _zeros)
+        if (_i GREATER 0)
+            string(APPEND BLITZ_PS5_CONTENT_VERSION ".")
+        endif()
+        string(APPEND BLITZ_PS5_CONTENT_VERSION "${_zeros}${_n}")
+    endforeach()
+endif()
+message(STATUS "PS5 contentVersion ${BLITZ_PS5_CONTENT_VERSION} (version ${BLITZ_VERSION})")
 configure_file(${CMAKE_SOURCE_DIR}/platform/ps5/param.json.in ${BLITZ_PS5_TITLE_DIR}/sce_sys/param.json @ONLY)
 
 add_custom_command(TARGET BlitzRecompiled POST_BUILD

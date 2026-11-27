@@ -25,6 +25,12 @@
 >
 >   Season Mode is latched at launch, so a state from the other mode is refused with a message.
 > - **Advanced Season games** (2026-11-03; before, every save in one gave "broken chain"): its week driver is host code (`adv_engine.cpp`), which calls the match (`802FD094`) itself. `play()` pushes the vanilla driver's own call-site entry (`802FBBE4` → `802FD094` at `802FBD80`) so a sleeping match reads as an unbroken chain; on a restore the generated `802FBBE4` hands the thread to `blitz_adv_week_driver` (resumable.py keeps a teamplus ENTRY hook ahead of the resume switch), which resumes the match, records it and finishes the week from `adv_live` (week, game, quarter length, pad; kept with the state), skipping the week's CPU-skill pass and Super Bowl intro, which already ran. The Season message screens between games stay unsavable and say so at once ("Season screens can't be saved: save once the game starts").
+> - **The Controller Pak isn't in a state** (2026-11-26): it's a file the host writes block by block, and loading a
+>   state leaves it as it is, while the game's memory of it goes back. Since 1.0.4 every restore brings that memory up
+>   to date ("The Controller Pak's view" below), so the game never acts on the pak as it was. `controller_pak.cpp` also
+>   guards what a bad write could cost: in Advanced a write keeps every season stub on disk unless it's the player's own
+>   Save to that slot (or the note was deleted), and `pak_history/` keeps a dated copy before each burst of writes,
+>   which Settings → General → Controller Pak Backups puts back (docs/ADVANCED_SEASON.md §3.6).
 > - **Tournaments need nothing:** the bracket lives in RDRAM and `tournament.bin` is rewritten from it after each result. Replaying a game after a load replaces that result rather than adding a second one.
 > - **Redo Play:** built on the same machinery. The checkpoint hook at the top of the per-play loop asks for a snapshot, which is taken at the next quiescent loop head and kept in memory (the last 8). A play's end (the plays.log hook) and play select's header being drawn (PLYTOP.WMS, gfx_ext.cpp) decide whether a redo goes back to this play or the one before. Game init and game over clear the history. Snapshots stay in memory, about 67 MB at most.
 > - **Slots:** three, at `savestates/slot<N>.state` (the old `quick.state` becomes slot 1). F6 (Shift+F6 for the previous one) or R3 + D-pad right/left picks the slot.
@@ -75,7 +81,7 @@ How processes work (verified):
 | Audio (SDL queue, `src/game/ai.cpp` FIFO model; libmus is in RDRAM) | flush and reset |
 | Loaded overlays (ovl_a/b/c, stadiums) | re-register the snapshot's set |
 | RT64 (reads display lists from RDRAM after submit) | wait for the GPU thread to go idle first |
-| Controller Pak file | never roll back across a pak write |
+| Controller Pak file | not in the state: the pak stays as it is. The game's and libultra's memory of it is in RDRAM and goes back, so since 1.0.4 each restore drops it and the game reopens the pak ("The Controller Pak's view"; the host also keeps Advanced stubs and a dated history: ADVANCED_SEASON.md §3.6) |
 | Advanced mode's host league state | restrict rollback to one game, or save it too |
 
 Blitz uses only the first 4 MB of RDRAM.
@@ -113,6 +119,48 @@ crashed every time at its first touchdown (`sprites_draw_fg` calling 0xF1000000)
 - Every restore (slots, Resume, Redo) then gives each entry whose name matches this run's size and position
   (`fs_sync_ram_toc`). The Nov 3 state moved 935 of 2,765 entries and played on past the touchdown. States from before
   this have no `files` module: they get the resync but not the check.
+
+## The Controller Pak's view (2026-11-26)
+
+The pak is a host file (`controller_pak.cpp`), so loading a state never changes it. What a state does bring back is
+what the game and libultra remember about the pak, in RDRAM:
+
+| What | Where | Lives |
+|---|---|---|
+| libultra's copy of a page table (the inode cache of `__osPfsRWInode`): its bank, its port, 256 bytes | 0x8002CDD4 (u8, 250 = none), 0x8002CDD0 (s32), 0x8005E850 | until the next `__osPfsGetStatus`, which every `osPfsInitPak` calls first |
+| the game's "pak ready" flag per port (set once `osPfsInitPak` succeeds, cleared on any pak error; the pak screens check it and open the pak again when it's 0) | 0x8002B080 (s8 ×4) | across frames |
+| the game's `OSPfs` per port (status, pak ID, its tables' places) | 0x8005E390, 0x68 apart | rebuilt by each `osPfsInitPak` |
+| the port probe (1 controller, 2 pak, 4 Rumble Pak) | 0x8005DEFC + port | rebuilt by the game's probe |
+| the Controller Pak manager's list (16 notes, free pages) | 0x80039F50, 0x8003A290/98 | while that screen is open |
+| note images, the season slots, user records | the heap, per screen | read from the pak each time a screen opens |
+
+Each pak request runs on the controller thread (`func_80000490`, requests at 0x8005E768 + port·0x18), and a state is
+only taken or restored with that thread waiting for its next request, so no request is ever half done.
+
+**What went wrong (the team's iPhone, 2026-11-26).** Our `__osPfsGetStatus` (`blitz_PfsGetStatus`) replaced libultra's,
+which starts with `__osPfsInodeCacheBank = 250`; ours never emptied the cache. The team's slot 1 (Nov 14) held the page
+table of his pak from before it had a Blitz note (every page free). After loading it, the game's next pak screen ran
+`osPfsInitPak`, whose `osPfsChecker` read that copy instead of the pak, found the note's pages "free" and deleted
+the note (its directory entry zeroed, the free page table written). The game then showed BLITZ NOTE NOT FOUND!
+(CREATE / ABORT), and CREATE (`func_80263C90`) made an empty note in the same entry and pages. ADVANCED_SEASON.md §3.6
+has the evidence.
+
+**Since 1.0.4** (`blitz::pak_state_restored`, called at the end of `restore_snapshot`, so for slots, Resume, Redo
+Play and menu steps):
+- the inode cache is emptied (bank 250, port -1), as `__osPfsGetStatus` does;
+- the "pak ready" flags are cleared, so the game's next pak use runs `osPfsInitPak` and `osPfsChecker` on the pak as it
+  is now and rebuilds its `OSPfs`, as after plugging a pak in. The play itself is untouched;
+- `blitz_PfsGetStatus` empties the cache too, as libultra's does, so no `osPfsInitPak` reads an old copy.
+
+Each restore logs it, for example `[savestate] pak view refreshed: its page table copy was stale (0 pages in use then,
+123 now), same pak; its pak-ready flag was already clear; the game reopens the pak at its next use`. A state from another pak
+(another folder, or a pak put back from a backup) says "made with another pak": the reopen reads that pak's ID, so the
+game sees the pak that's there. `BLITZ_PAK_STALE=1` (tests only) keeps the old behaviour.
+
+**Still from the state:** a screen that was open when the state was taken keeps the note data it had read. A state
+taken on the season Save screen, loaded after later saves, would write that screen's old slots back with the next Save
+there (in Advanced the stub guard keeps the other slots' stubs), and the Controller Pak manager's list would be the
+old one until the screen is reopened. States are normally taken in a game, where neither is open.
 
 ## Done so far
 

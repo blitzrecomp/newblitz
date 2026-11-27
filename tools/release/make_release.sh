@@ -12,7 +12,9 @@
 #                           NewBlitz-v<version>-x86_64.AppImage     SDL2 and FreeType inside (needs the AppImage runtime)
 #                           NewBlitz-v<version>-Android.apk         the Android kit (RELEASE_NO_ANDROID=1: none)
 #                           NewBlitz-v<version>-iPhone.ipa          the iPhone kit, unsigned
-#                           SHA256SUMS (every NewBlitz-* file), RELEASE_NOTES.md
+#                           PPSA99961.zip                           the PS5 title folder for ProsperoStore (the kit Blitz
+#                                                                   Builder sends, no launch.elf; make_ps5_store_zip.sh)
+#                           SHA256SUMS (every NewBlitz-* file and PPSA99961.zip), RELEASE_NOTES.md
 #
 # Every app is the public one (BLITZ_CONTENT=public: no licensed content; the 2026 Season pak brings it) and built with
 # RELEASE=1 (no build-machine paths inside) at VERSION. Each computer's app carries the same device kits for Blitz
@@ -141,6 +143,14 @@ cp platform/recomplauncher/recomplauncher.json "$STAGE/linux/"
 # --- One file per device: installer, disk image, AppImage, phone apps -----------------------------------------------
 tools/release/make_downloads.sh "$V" "$STAGE" "$OUT"
 
+# --- PS5: the store zip ---------------------------------------------------------------------------------------------
+# ProsperoStore's catalog (docs/PROSPEROSTORE.md) installs a .zip of the title folder from the GitHub release: the PS5
+# kit the release sends by default (build/devices/ps5, the pinned stable one), PPSA99961/ at the top, no launch.elf or
+# STABLE.txt, contentVersion from this version. One name for every release (the catalog's advice; each tag has its own
+# URL, and the update bot finds the next release's file by the same name). Never replace it once a release is out.
+say "PS5 store zip"
+tools/release/make_ps5_store_zip.sh build/devices/ps5 "$V" "$OUT/PPSA99961.zip"
+
 # --- Notes and checksums -----------------------------------------------------------------------------------------
 say "notes"
 python3 -I - "$V" CHANGELOG.md "$OUT" <<'EOF'
@@ -167,6 +177,10 @@ by_hand = [
     (f"NewBlitz-v{v}-Android.apk", "**Android** (phones and handhelds)",
      "open it on the device and allow installs from that app when asked, then open New Blitz and pick your ROM with "
      "**Pick a File Instead**."),
+    ("PPSA99961.zip", "**PS5** (jailbroken: etaHEN, or ShadowMountPlus with an ELF loader)",
+     "unzip it and copy the `PPSA99961` folder to `/data/homebrew` over FTP; ShadowMountPlus adds New Blitz to the home "
+     "screen. Then add your ROM: Blitz Builder → PS5 from the computer app, or copy the ROM to `/data/blitzrecomp` over "
+     "FTP. It's the PS5 build Blitz Builder sends."),
     (f"NewBlitz-v{v}-iPhone.ipa", "**iPhone / iPad**",
      "install it with Sideloadly (sideloadly.io, on a Mac or Windows; your own Apple ID, a free one works) and turn on "
      "its AutoRefresh (the circular-arrows button), so it renews itself over Wi-Fi. Then open New Blitz and pick your ROM "
@@ -209,7 +223,7 @@ download's SHA-256.
 """
 open(os.path.join(out, "RELEASE_NOTES.md"), "w", encoding="utf-8").write(notes)
 EOF
-(cd "$OUT" && shasum -a 256 NewBlitz-* > SHA256SUMS)
+(cd "$OUT" && shasum -a 256 NewBlitz-* PPSA99961.zip > SHA256SUMS)
 
 say "scan"
 tools/release_scan.sh "$OUT"
@@ -217,3 +231,8 @@ tools/release_scan.sh "$OUT"
 say "done: $OUT"
 ls -la "$OUT"
 cat "$OUT/SHA256SUMS"
+# What goes on the GitHub release (nothing is uploaded here): every download, PPSA99961.zip and SHA256SUMS.
+echo
+echo "To publish (docs/RELEASE.md):"
+echo "  gh release create v$V --repo blitzrecomp/newblitz --title \"New Blitz $V\" --notes-file $OUT/RELEASE_NOTES.md \\"
+echo "    $(cd "$OUT" && ls NewBlitz-* PPSA99961.zip SHA256SUMS | sed "s#^#$OUT/#" | tr '\n' ' ')"

@@ -106,6 +106,11 @@ namespace {
         content->set_padding_left(blitz::ui::px(20));
         content->set_padding_right(blitz::ui::px(20));
         content->set_padding_bottom(blitz::ui::px(12));
+        // The column's own cap (the card's 420 less the 2 x 20 padding): the stack is a flex column across the screen, so
+        // RmlUi measured a card's height at the full width and only then narrowed it to 420. A long status (the freeze
+        // rescue's, four lines on the team's iPhone 2026-11-26) wrapped past the bottom of a two-line card. Capped here, the
+        // text wraps at the width it's measured at.
+        content->set_max_width(blitz::ui::px(380));
         return content;
     }
 

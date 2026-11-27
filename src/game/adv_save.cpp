@@ -15,6 +15,9 @@
 //   0x80267F48 before LOAD    the sidecar's record replaces the stub, so the game loads the season
 //   0x8026807C before write   sidecar written; the slot gets a stub; hidden slots are restored
 //   0x8026809C after write    success: prune old generations; failure: drop the new one
+// Between the two write hooks controller_pak.cpp lets that slot's stub change (pak_season_save_begin/end); any other
+// write keeps the stubs on disk as they are. Pruning keeps every generation a kept pak image points at (the pak's
+// .bak, .bak2 and pak_history/), so a restored backup still loads.
 #if BLITZ_MODERN
 #include <charconv>
 #include <algorithm>
@@ -48,6 +51,9 @@ namespace blitz {
     uint64_t adv_season_seed();                // adv_season.cpp
     uint64_t adv_schedule_fingerprint();       // adv_engine.cpp
     void adv_set_season_seed(uint64_t seed);
+    void pak_season_save_begin(int slot);  // controller_pak.cpp: the stub guard lets this slot change
+    void pak_season_save_end();
+    std::set<std::pair<uint64_t, uint32_t>> pak_kept_season_refs();
 }
 
 namespace {
@@ -400,6 +406,7 @@ extern "C" {
             return;
         }
         write_stub(rdram, slot, s);
+        blitz::pak_season_save_begin(index);  // until blitz_adv_after_write: the game's write of this Save
         pending = path;
         stub_in[index] = Stub{s.id, s.gen, s.crc};
         hidden[index].reset();
@@ -408,6 +415,7 @@ extern "C" {
 
     // 0x8026809C: the pak write returned `status` (0 = written).
     void blitz_adv_after_write(uint8_t* rdram, int32_t status, int32_t slots) {
+        blitz::pak_season_save_end();
         std::error_code ec;
         if (pending) {
             if (status != 0) {
@@ -423,6 +431,7 @@ extern "C" {
                 }
                 if (saved != nullptr) {
                     referenced.insert({saved->id, saved->gen});
+                    for (const auto& r : blitz::pak_kept_season_refs()) referenced.insert(r);
                     std::string prefix = "season-" + hex(saved->id) + "-";
                     for (const auto& e : fs::directory_iterator(season_dir(), ec)) {
                         std::string n = e.path().filename().string();
