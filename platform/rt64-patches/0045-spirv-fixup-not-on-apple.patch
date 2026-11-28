@@ -1,0 +1,31 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 2d7fb35..a4fa309 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -137,13 +137,21 @@ set (DXC_RT_OPTS "${DXC_COMMON_OPTS}" "-D" "RT_SHADER" "-T" "lib_6_3" "-fspv-tar
+ function(build_shader_spirv_impl TARGETOBJ FILENAME TARGET_NAME OUTNAME)
+     # Blitz: the frame read and write shaders' formats as Unknown (src/shaders/spirv_unknown_formats.py).
+     set(SPV_FIXUP "")
+-    if (FILENAME MATCHES "Fb(WriteColor|WriteDepth|ReadAnyFull|ReadAnyChanges)CS")
++    # Not on Apple: build_shader_msl_impl declares the same .spv, and CMake takes a second rule only if it's the same. Metal
++    # doesn't need it (the crash it avoids was an Adreno driver's).
++    if (NOT APPLE AND FILENAME MATCHES "Fb(WriteColor|WriteDepth|ReadAnyFull|ReadAnyChanges)CS")
+         set(SPV_FIXUP COMMAND python3 ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/src/shaders/spirv_unknown_formats.py ${OUTNAME}.spv)
+     endif()
+-    add_custom_command(OUTPUT ${OUTNAME}.spv
+-        COMMAND ${DXC} ${DXC_SPV_OPTS} ${ARGN} ${FILENAME} /Fo ${OUTNAME}.spv
+-        ${SPV_FIXUP}
+-        DEPENDS ${FILENAME} ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/src/shaders/spirv_unknown_formats.py)
++    if (SPV_FIXUP)
++        add_custom_command(OUTPUT ${OUTNAME}.spv
++            COMMAND ${DXC} ${DXC_SPV_OPTS} ${ARGN} ${FILENAME} /Fo ${OUTNAME}.spv
++            ${SPV_FIXUP}
++            DEPENDS ${FILENAME} ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/src/shaders/spirv_unknown_formats.py)
++    else()
++        add_custom_command(OUTPUT ${OUTNAME}.spv
++            COMMAND ${DXC} ${DXC_SPV_OPTS} ${ARGN} ${FILENAME} /Fo ${OUTNAME}.spv
++            DEPENDS ${FILENAME})
++    endif()
+     add_custom_command(OUTPUT ${OUTNAME}.spirv.c
+         COMMAND file_to_c ${OUTNAME}.spv ${TARGET_NAME}BlobSPIRV ${OUTNAME}.spirv.c ${OUTNAME}.spirv.h
+         DEPENDS ${OUTNAME}.spv file_to_c

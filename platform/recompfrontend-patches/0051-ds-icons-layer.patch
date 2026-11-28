@@ -1,0 +1,110 @@
+diff --git a/recompui/include/recompui/recompui.h b/recompui/include/recompui/recompui.h
+index 34208fa..eeac903 100644
+--- a/recompui/include/recompui/recompui.h
++++ b/recompui/include/recompui/recompui.h
+@@ -135,6 +135,10 @@ namespace recompui {
+     // Elements with ids b0, b1, ... in it, moved without parsing anything (0-1 of the screen). None on: no UI pass at all.
+     struct DsMover { bool on = false; float x = 0.0f, y = 0.0f; };
+     void ds_panel_move(const DsMover* movers, int count);
++    // BLITZ DS, Game + Companion: the drive board is the panel on the first window, so the icons over the receivers get a
++    // layer of their own on the second (the game's screen). Its RML once (any thread); ds_panel_move then moves its "b<i>"
++    // elements instead of the panel's while the panel is on the first window.
++    void ds_icons_set(const std::string& rml);
+     Rml::ElementDocument* create_empty_document();
+     Rml::Element* get_child_by_tag(Rml::Element* parent, const std::string& tag);
+ 
+diff --git a/recompui/src/base/ui_state.cpp b/recompui/src/base/ui_state.cpp
+index 2d4389e..2cf505a 100644
+--- a/recompui/src/base/ui_state.cpp
++++ b/recompui/src/base/ui_state.cpp
+@@ -695,6 +695,7 @@ void recompui::activate_mouse() {
+ extern "C" { volatile int blitz_ds_panel_first = 0; }
+ extern "C" int blitz_hotkey_held(void);  // BlitzRecomp controllers.cpp: L3 or R3 held, whose Select is a screenshot
+ namespace { Rml::Context* ds_context = nullptr; Rml::ElementDocument* ds_document = nullptr; }
++namespace { Rml::Context* ds_icons_context = nullptr; Rml::ElementDocument* ds_icons_document = nullptr; }  // Game + Companion's icons
+ 
+ static std::atomic<bool> renew_textures_pending{ false };  // BlitzRecomp: recompui::renew_textures
+ 
+@@ -1136,6 +1137,33 @@ void recompui::ds_panel_move(const DsMover* movers, int count) {
+     ds_movers.assign(movers, movers + count);
+ }
+ 
++namespace { std::string ds_icons_pending, ds_icons_set_rml; }
++void recompui::ds_icons_set(const std::string& rml) {
++    {
++        std::lock_guard lock{ ds_panel_mutex };
++        if (ds_icons_set_rml == rml) return;
++        ds_icons_set_rml = rml;
++    }
++    std::lock_guard ui_lock{ ui_state_mutex };
++    if (!ui_state) {
++        return;
++    }
++    if (ds_icons_context == nullptr) {
++        ds_icons_context = Rml::CreateContext("ds_icons", Rml::Vector2i(640, 480));
++        ds_icons_document = ds_icons_context->LoadDocumentFromMemory(
++            "<rml><head><style>body{position:absolute;left:0;right:0;top:0;bottom:0;font-family:\"Inter Variable\";color:#fff;}"
++            "div{display:block;}</style></head><body></body></rml>");
++        if (ds_icons_document != nullptr) {
++            ds_icons_document->Show();
++        }
++    }
++    if (ds_icons_document != nullptr) {
++        ds_icons_document->SetInnerRML(rml);
++    }
++    ds_movers_applied.clear();
++    blitz_ds_second_dirty = 1;
++}
++
+ static void ds_draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer* framebuffer) {
+     std::vector<recompui::DsMover> movers;
+     {
+@@ -1149,7 +1177,11 @@ static void ds_draw_hook(plume::RenderCommandList* command_list, plume::RenderFr
+         if (!any) return;
+     }
+     std::lock_guard lock{ ui_state_mutex };
+-    if (!ui_state || (ds_document == nullptr)) {
++    // The panel's on the first window (Game + Companion's drive board): the icons' own layer here instead.
++    const bool icons_layer = blitz_ds_panel_first != 0 && ds_icons_document != nullptr;
++    Rml::Context* context = icons_layer ? ds_icons_context : ds_context;
++    Rml::ElementDocument* document = icons_layer ? ds_icons_document : ds_document;
++    if (!ui_state || (document == nullptr) || (!icons_layer && blitz_ds_panel_first != 0)) {
+         return;
+     }
+     int width = framebuffer->getWidth();
+@@ -1160,7 +1192,7 @@ static void ds_draw_hook(plume::RenderCommandList* command_list, plume::RenderFr
+         const recompui::DsMover& now = movers[i];
+         if (was.on == now.on && was.x == now.x && was.y == now.y) continue;
+         was = now;
+-        Rml::Element* element = ds_document->GetElementById("b" + std::to_string(i));
++        Rml::Element* element = document->GetElementById("b" + std::to_string(i));
+         if (element == nullptr) continue;
+         element->SetProperty("display", now.on ? "block" : "none");
+         if (now.on) {
+@@ -1168,12 +1200,12 @@ static void ds_draw_hook(plume::RenderCommandList* command_list, plume::RenderFr
+             element->SetProperty("top", std::to_string(now.y * 100.0f) + "%");
+         }
+     }
+-    ds_context->SetDensityIndependentPixelRatio(height / 1080.0f);
++    context->SetDensityIndependentPixelRatio(height / 1080.0f);
+     ui_state->render_interface.start(command_list, width, height);
+-    ds_context->SetDimensions({ width, height });
+-    ds_context->Update();
+-    ds_context->GetRenderManager().SetViewport({ width, height });
+-    ds_context->Render();
++    context->SetDimensions({ width, height });
++    context->Update();
++    context->GetRenderManager().SetViewport({ width, height });
++    context->Render();
+     ui_state->render_interface.end(command_list, framebuffer);
+ }
+ 
+@@ -1184,6 +1216,8 @@ void deinit_hook() {
+     std::lock_guard lock {ui_state_mutex};
+     ds_context = nullptr;
+     ds_document = nullptr;
++    ds_icons_context = nullptr;
++    ds_icons_document = nullptr;
+     Rml::Debugger::Shutdown();
+     Rml::Shutdown();
+     ui_state->unload();

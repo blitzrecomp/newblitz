@@ -7,6 +7,7 @@
     <uses-feature android:name="android.hardware.gamepad" android:required="false" />
     <application android:label="Blitz Probe" android:hardwareAccelerated="true" android:usesCleartextTraffic="false"
         android:extractNativeLibs="false" android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
+        <uses-library android:name="com.microsoft.device.display.displaymask" android:required="false" />
         <activity android:name=".ProbeActivity" android:exported="true" android:launchMode="singleTask"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode">
             <intent-filter>

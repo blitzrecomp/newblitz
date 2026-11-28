@@ -55,6 +55,15 @@
 			</array>
 		</dict>
 		<dict>
+			<key>CFBundleTypeName</key><string>New Blitz Saves</string>
+			<key>CFBundleTypeRole</key><string>Editor</string>
+			<key>LSHandlerRank</key><string>Owner</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.blitzrecomp.nbsave</string>
+			</array>
+		</dict>
+		<dict>
 			<key>CFBundleTypeName</key><string>Zip Archive</string>
 			<key>CFBundleTypeRole</key><string>Viewer</string>
 			<key>LSHandlerRank</key><string>Alternate</string>
@@ -67,6 +76,19 @@
 	<!-- Imported, not exported: the app uses these types without owning them. Ours for .z64/.n64/.v64 when no other
 	     app declares one; Delta's as Delta declares it (rileytestut/Delta, Delta/Supporting Files/Info.plist), so the
 	     id means the same thing to this app whether or not Delta is installed. Both conform to public.data. -->
+	<!-- Save Sync's file (Settings > General > Save Sync, docs/SAVE_SYNC.md): ours, so it opens in New Blitz. -->
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key><string>com.blitzrecomp.nbsave</string>
+			<key>UTTypeDescription</key><string>New Blitz Saves</string>
+			<key>UTTypeConformsTo</key><array><string>public.data</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key><array><string>nbsave</string></array>
+			</dict>
+		</dict>
+	</array>
 	<key>UTImportedTypeDeclarations</key>
 	<array>
 		<dict>
@@ -88,7 +110,7 @@
 			</dict>
 		</dict>
 	</array>
-	<key>NSLocalNetworkUsageDescription</key><string>Phones on your network can join as controllers, and open the Roster Room.</string>
+	<key>NSLocalNetworkUsageDescription</key><string>Phones on your network can join as controllers and open the Roster Room, and Sync over Wi-Fi sends your saves to your other device.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key><false/>

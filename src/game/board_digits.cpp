@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 
 #include "recomp.h"
@@ -111,6 +112,44 @@ namespace {
         digit(rdram, pixels, b, cells[0], value >= 10 ? value / 10 : 10);
         digit(rdram, pixels, b, cells[1], value % 10);
     }
+
+    // Day, Night and Snow's two boards (the stadium2 model) are one draw: the board image, then 16 corners, 8 at each end
+    // (x about -1480 and +1480). Both ends run the image the same way along z, but they face each other, so one of them
+    // always reads backwards whichever way the image is turned. That end's corners get the image's s run the other way
+    // (s' = 511.5 - s), in the stadium's own vertices in RDRAM. Each end is set, not toggled: an end runs the original way
+    // while its corner at -z has a small s. Checked every tick, so a reload or a save state's older RAM is put right too.
+    // The image reads the right way in the file and is turned once (above), so the +x end (s to the viewer's right) is
+    // the backwards one. BLITZ_BOARD_FLIP / live "BOARD n": -1 or 1 the end to turn (x below or above 0), 0 neither.
+    constexpr uint32_t board_draw = 0x80378BD0, board_vtx_cmd = 0x80378C08, board_vtx = 0x8037EB60;
+    int board_flip = [] {
+        const char* env = getenv("BLITZ_BOARD_FLIP");
+        return env != nullptr ? atoi(env) : 1;
+    }();
+
+    void face_boards(uint8_t* rdram) {
+        if ((uint32_t)rd(rdram, board_draw) != 0xFD500000u || (uint32_t)rd(rdram, board_vtx_cmd) != 0x01010020u ||
+            (uint32_t)rd(rdram, board_vtx_cmd + 4) != board_vtx) {
+            return;  // not the stadium2 model (or not loaded yet)
+        }
+        auto x_of = [&](int v) { return (int16_t)MEM_H(0, (gpr)(int32_t)(board_vtx + v * 16)); };
+        auto z_of = [&](int v) { return (int16_t)MEM_H(4, (gpr)(int32_t)(board_vtx + v * 16)); };
+        auto s_at = [&](int v) { return (gpr)(int32_t)(board_vtx + v * 16 + 8); };
+        for (int end : {-1, 1}) {
+            int lowest = -1;
+            for (int v = 0; v < 16; v++) {
+                if ((x_of(v) < 0) != (end < 0)) continue;
+                if (lowest < 0 || z_of(v) < z_of(lowest)) lowest = v;
+            }
+            if (lowest < 0) continue;
+            bool turned_now = (int16_t)MEM_H(0, s_at(lowest)) >= 256 * 32, want = board_flip == end;
+            if (turned_now == want) continue;
+            for (int v = 0; v < 16; v++) {
+                if ((x_of(v) < 0) != (end < 0)) continue;
+                MEM_H(0, s_at(v)) = (int16_t)(16368 - (int16_t)MEM_H(0, s_at(v)));
+            }
+            fprintf(stderr, "[board] the %s end's board %s\n", end < 0 ? "-x" : "+x", want ? "turned to read the right way" : "back as shipped");
+        }
+    }
 }
 
 // By the ROM's own file numbers (the stadium code asks for them by number), for the game's own image: an added file comes after.
@@ -130,9 +169,19 @@ extern "C" void blitz_board_loaded(uint32_t id, uint32_t pixels) {
 }
 
 // Every frame (gfx_build_frame). A few times a second is plenty, and a save state's restored image is put right too.
+extern "C" void blitz_board_flip(int end) { board_flip = end; }  // live "BOARD n" (dev_input.cpp)
+
 extern "C" void blitz_board_frame(uint8_t* rdram) {
     static int tick = 0;
-    if (++tick % 5 != 0 || blitz::original_game() || rd(rdram, 0x802EA420) != 2) return;  // 2: a game's on
+    if (++tick % 5 != 0 || blitz::original_game()) return;
+    for (int i = 0; i < board_count; i++) {  // the image turned and the model's two ends set, the attract demo's too
+        if (loaded_at[(size_t)i] != 0 && boards[i].mirrored && !turned[i]) {
+            turned[i] = true;
+            turn_over(rdram, loaded_at[(size_t)i], boards[i].width, 32);
+        }
+    }
+    face_boards(rdram);  // its own check for the model, so a save state's stadium (no load seen) is covered too
+    if (rd(rdram, 0x802EA420) != 2) return;  // 2: a game's on
     int spot_now = rd(rdram, 0x802EA48C), marker_now = rd(rdram, 0x802EA49C), quarter_now = rd(rdram, 0x802EA424), down_now = rd(rdram, 0x802EA498), clock_now = rd(rdram, 0x802EA428);
     if (uint32_t strip = loaded_at[strip_ball]) {
         dot_two(rdram, strip, 47, 58, spot_now > 50 ? 100 - spot_now : spot_now, true);
@@ -148,10 +197,6 @@ extern "C" void blitz_board_frame(uint8_t* rdram) {
         uint32_t pixels = loaded_at[(size_t)i];
         if (pixels == 0) continue;
         const Board& b = boards[i];
-        if (b.mirrored && !turned[i]) {
-            turned[i] = true;
-            turn_over(rdram, pixels, b.width, 32);
-        }
         int spot = rd(rdram, 0x802EA48C), marker = rd(rdram, 0x802EA49C), quarter = rd(rdram, 0x802EA424), down = rd(rdram, 0x802EA498);
         digit(rdram, pixels, b, b.quarter, quarter >= 0 && quarter < 4 ? quarter + 1 : 10);
         digit(rdram, pixels, b, b.down, down >= 1 && down <= 4 ? down : 10);
@@ -167,6 +212,7 @@ extern "C" void blitz_board_frame(uint8_t* rdram) {
     }
 }
 #else
+extern "C" void blitz_board_flip(int) {}
 extern "C" void blitz_board_loaded(uint32_t, uint32_t) {}
 extern "C" void blitz_board_frame(uint8_t*) {}
 #endif

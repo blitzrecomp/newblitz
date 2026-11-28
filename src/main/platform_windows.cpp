@@ -4,9 +4,13 @@
 #include "blitz_host.h"
 #include <windows.h>
 #include <winhttp.h>
+#include <wincrypt.h>
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 #pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "crypt32.lib")
 
 namespace {
     std::wstring widen(const std::string& s) {
@@ -135,4 +139,59 @@ namespace blitz {
 
 namespace blitz {
     void early_init() {}
+}
+
+// Secure storage (Cloud Sync's code): DPAPI. The value sealed with CryptProtectData for this Windows user, in
+// %LOCALAPPDATA%\NewBlitz\secrets\<name>.dpapi: another user, or a copy of the file on another PC, can't open it.
+namespace {
+    std::filesystem::path secret_file(const std::string& name) {
+        const wchar_t* base = _wgetenv(L"LOCALAPPDATA");
+        if (base == nullptr || *base == 0) return {};
+        // BRANDING: the folder under LOCALAPPDATA
+        return std::filesystem::path(base) / L"NewBlitz" / L"secrets" / (widen(name) + L".dpapi");
+    }
+}
+
+namespace blitz {
+    bool secure_put(const std::string& name, const std::string& value) {
+        std::filesystem::path p = secret_file(name);
+        if (p.empty()) return false;
+        DATA_BLOB in{(DWORD)value.size(), (BYTE*)value.data()}, out{};
+        if (!CryptProtectData(&in, L"New Blitz", nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out)) return false;
+        std::error_code ec;
+        std::filesystem::create_directories(p.parent_path(), ec);
+        bool ok = false;
+        if (FILE* f = _wfopen(p.c_str(), L"wb")) {
+            ok = fwrite(out.pbData, 1, out.cbData, f) == out.cbData;
+            ok = fclose(f) == 0 && ok;
+        }
+        LocalFree(out.pbData);
+        return ok;
+    }
+
+    bool secure_get(const std::string& name, std::string& value) {
+        value.clear();
+        std::filesystem::path p = secret_file(name);
+        std::vector<BYTE> sealed;
+        if (FILE* f = p.empty() ? nullptr : _wfopen(p.c_str(), L"rb")) {
+            BYTE buf[4096];
+            for (size_t n; (n = fread(buf, 1, sizeof buf, f)) > 0;) sealed.insert(sealed.end(), buf, buf + n);
+            fclose(f);
+        }
+        if (sealed.empty()) return false;
+        DATA_BLOB in{(DWORD)sealed.size(), sealed.data()}, out{};
+        if (!CryptUnprotectData(&in, nullptr, nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out)) return false;
+        value.assign((const char*)out.pbData, out.cbData);
+        SecureZeroMemory(out.pbData, out.cbData);
+        LocalFree(out.pbData);
+        return !value.empty();
+    }
+
+    void secure_erase(const std::string& name) {
+        std::filesystem::path p = secret_file(name);
+        std::error_code ec;
+        if (!p.empty()) std::filesystem::remove(p, ec);
+    }
+
+    const char* secure_kind() { return "Windows' DPAPI"; }
 }

@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -48,17 +49,20 @@
 #include "recompui/recompui.h"
 #include "recompui/config.h"
 #include "ultramodern/ultramodern.hpp"
+#include <map>
 
 extern "C" {
     extern volatile int blitz_ds_mode;
     extern volatile int blitz_edge_trim_px;       // rt64_vi_renderer.cpp
     extern volatile int blitz_ds_clip_right;      // rt64_present_queue.cpp: the last play's clip at the second screen's right
     extern volatile float blitz_ds_split;
+    extern volatile float blitz_ds_first_width, blitz_ds_second_width;  // rt64_present_queue.cpp: each window's share of the width
     extern volatile int blitz_ds_second_on_top;
     extern volatile float blitz_ds_second_ratio;  // rt64_workload_queue.cpp
     extern volatile int blitz_ds_panel_first;     // ui_state.cpp
     extern volatile int blitz_ds_second_icons;    // rt64_present_queue.cpp
     extern volatile int blitz_ds_screen_mode;     // tall_view.cpp: 0 both screens, 1 game + companion, 2 stylus
+    extern volatile int blitz_ds_res_max;         // lib/rt64 rt64_workload_queue.cpp: Auto's most over two screens
     extern volatile uint64_t blitz_ds_second_frames;
     extern volatile uint64_t blitz_ds_second_failures;
     extern volatile float blitz_ds_second_ms;
@@ -96,12 +100,27 @@ namespace {
     float shape(int w, int h) { return w > 0 ? (float)h / (float)w : 0.75f; }
 
     // The picture's shape and the upper screen's share of it follow the two screens' own shapes.
+    // Two screens of different widths (a wide upper screen over a 4:3 lower one: Retroid Pocket Duo, AYN Thor): the picture is
+    // as wide as the wider, each screen at the same scale, the narrower showing the middle of its part (team, 2026-11-27: "just
+    // wide on top and 4:3 on bottom"). Sizes are taken as at one density (a Mac test sizes its windows to the device's
+    // physical screens; a device's own densities differ a little: BLITZ_DS_WIDTHS=<first>/<second> in inches overrides).
+    // Same widths: the picture as before, each screen's own shape stacked. BLITZ_DS_SAME_WIDTH=1: always that.
     void apply_shapes() {
         float a = shape(first_w, first_h), b = shape(second_w, second_h);
-        blitz_tall_ratio = 1.0f / (a + b);
+        float wf = (float)std::max(first_w.load(), 1), ws = (float)std::max(second_w.load(), 1);
+        if (const char* inches = getenv("BLITZ_DS_WIDTHS")) {
+            float f = 0, sc = 0;
+            if (sscanf(inches, "%f/%f", &f, &sc) == 2 && f > 0 && sc > 0) { wf = f; ws = sc; }
+        }
+        static const bool same = getenv("BLITZ_DS_SAME_WIDTH") != nullptr;
+        if (same || std::fabs(wf - ws) <= 0.02f * std::max(wf, ws)) wf = ws = 1.0f;
+        const float wide = std::max(wf, ws), hf = wf * a, hs = ws * b;  // each screen's height at the shared scale
+        blitz_tall_ratio = wide / (hf + hs);
         blitz_ds_second_on_top = swapped.load() ? 0 : 1;
         if (second_h.load() > 0) blitz_ds_second_ratio = (float)second_w.load() / (float)second_h.load();
-        blitz_ds_split = (swapped.load() ? a : b) / (a + b);
+        blitz_ds_split = (swapped.load() ? hf : hs) / (hf + hs);
+        blitz_ds_first_width = wf / wide;
+        blitz_ds_second_width = ws / wide;
     }
 
     struct Badge {
@@ -116,6 +135,9 @@ namespace {
 
 // The game's picture is on two screens right now.
 extern "C" int blitz_ds_active(void) { return have_second.load() ? 1 : 0; }
+
+// The share of the picture's width a screen shows (1: all of it; under a wide screen, the narrower one shows its middle).
+extern "C" float blitz_ds_width_share(int first_window) { return first_window ? blitz_ds_first_width : blitz_ds_second_width; }
 
 // The UI's window (the first) is this share of the picture, from this height (0-1), during play.
 extern "C" int blitz_ds_first_part(float* top, float* bottom) {
@@ -144,11 +166,17 @@ extern "C" void blitz_ds_badge(int k, int on, int screen, float x, float y, cons
 // Stylus in play: the picture's on the second window and nothing of it on the first (tall_view.cpp), so a receiver's icon goes
 // over there. 1 and that window's size, or 0.
 extern "C" int blitz_ds_icons_on_second(int* w, int* h) {
-    if (!have_second.load() || blitz_ds_screen_mode != 2 || blitz_ds_mode != 3 || blitz_ds_panel_first) return 0;
+    // The game on the second window: Stylus in play, Controller (the first window has the touch controller) and Game +
+    // Companion (the first has the drive board; the icons get their own layer on the second, recompui::ds_icons_set). They
+    // showed on the lower screen in both (the team's Duo, 2026-11-27).
+    const int screens = blitz_ds_screen_mode;
+    if (!have_second.load() || blitz_ds_mode != 3 || !((screens == 2 && !blitz_ds_panel_first) || screens == 3 || screens == 1)) return 0;
     *w = second_w.load();
     *h = second_h.load();
     return *w > 0 && *h > 0;
 }
+
+namespace blitz { void ds_screens_next(); }  // config.cpp: the next DS Screens mode
 
 // ---- The drive -------------------------------------------------------------------------------------------------------
 
@@ -163,9 +191,10 @@ namespace {
         const char* ink;     // the gain's colour
     };
     struct Drive {
-        std::string team, result;
+        std::string team, result, short_result;
         int plays = 0, yards = 0, seconds = 0;
     };
+    std::string pending_end;  // play_log.cpp's word for how this play ended a drive (blitz_ds_drive_end)
     std::mutex drive_mutex;
     Drive drive, last_drive;
     int drive_side = -1, drive_start = 0, drive_clock_start = 0, last_clock = -1, last_quarter = -1;
@@ -187,6 +216,7 @@ namespace {
     void end_drive(const std::string& how) {
         if (drive.team.empty() || drive.plays == 0) return;
         drive.result = how;
+        drive.short_result = pending_end;
         fprintf(stderr, "[drive] %s: %d plays, %d yds, %d:%02d, %s\n", drive.team.c_str(), drive.plays, drive.yards, drive.seconds / 60, drive.seconds % 60, how.c_str());
         last_drive = drive;
     }
@@ -225,7 +255,15 @@ namespace {
     }
 
     std::string how_it_ended(const std::string& result, int kind, bool turnover) {
-        if (turnover) return "Change of possession";  // a punt and downs look the same here as a pick
+        if (pending_end == "TD") return "Touchdown";
+        if (pending_end == "FG") return "Field goal";
+        if (pending_end == "SAFETY") return "Safety";
+        if (pending_end == "PUNT") return "Punt";
+        if (pending_end == "DOWNS") return "Turnover on downs";
+        if (pending_end == "INT") return "Interception";
+        if (pending_end == "FUMBLE") return "Fumble";
+        if (pending_end == "END HALF") return "End of half";
+        if (turnover) return "Change of possession";
         if (kind == 4) return "Touchdown";            // the next snap is an extra point
         if (kind == 1) return "Score";                // the next snap is a kickoff
         return shown_result(result);
@@ -284,6 +322,11 @@ namespace {
     }
 }
 
+extern "C" void blitz_ds_drive_end(const char* how) {
+    std::lock_guard lock{drive_mutex};
+    pending_end = how != nullptr ? how : "";
+}
+
 // play_log.cpp, once per play: the state describes the next snap. result: what just happened.
 extern "C" void blitz_ds_play(const char* result, const char* situation, int offense_side, const char* team, int spot, int kind, int quarter, int clock_seconds, int turnover, int has_gain, int gain) {
     std::lock_guard lock{drive_mutex};
@@ -319,10 +362,13 @@ extern "C" void blitz_ds_play(const char* result, const char* situation, int off
 // ---- Taps ------------------------------------------------------------------------------------------------------------
 
 namespace blitz {
+    bool hints_for_upper_screen(std::string& title, std::string& body_rml);  // hints.cpp
+    void hints_touched();                                                      // hints.cpp
     uint8_t* monitor_rdram();    // dev_monitor.cpp
     float fps_last_second();     // fps_counter.cpp: the game's latest frame rate, 0 if not known
 }
 extern "C" int blitz_play_mode(void);     // savestate.cpp: 1 play select, 2 a play
+extern "C" int blitz_savestate_settling(void);  // savestate.cpp: a state loaded in the last seconds
 extern "C" int blitz_port_side(int port);
 extern "C" int blitz_touch_port(void);  // savestate.cpp: the player a touch plays for
 extern "C" int blitz_replay_count(void);  // rt64_blitz_replay.cpp
@@ -446,6 +492,7 @@ namespace blitz {
 
     // A tap, from a finger or a mouse. screen 0: the first window; 1: the second. x, y 0-1 on that screen. Any thread.
     void ds_tap(int screen, float x, float y) {
+        hints_touched();  // a tip on the upper screen goes at any touch on either (hints.cpp)
         if ((screen == 0) == swapped.load()) upper_touched = true;
         tap_mark(screen, x, y);
         if (!have_second.load() || recompui::is_context_capturing_input()) return;
@@ -465,6 +512,13 @@ namespace blitz {
             fprintf(stderr, "[ds] tap: replay\n");
             ds_touch_result(tap_did_something);
             replay_open();
+            return;
+        }
+        // SCREENS, left of REPLAY: the next DS Screens mode, by touch alone (team, 2026-11-27).
+        if (screen == board && (mode != 2 || blitz_ds_panel_first) && ux >= edge - 684.0f && ux < edge - 472.0f && y > 0.91f) {
+            fprintf(stderr, "[ds] tap: screens\n");
+            ds_touch_result(tap_did_something);
+            blitz::ds_screens_next();
             return;
         }
         // The SETTINGS button (panel_settings): a device may have no key that opens it.
@@ -700,6 +754,35 @@ namespace {
         return true;
     }
 
+    std::mutex primary_mutex;
+    std::map<uint32_t, std::string> primaries;
+    std::map<uint32_t, float> logo_aspects;  // width over height of each logo read (team_logo)
+    float team_logo_aspect(int side) {
+        uint8_t* rdram = blitz::monitor_rdram();
+        if (rdram == nullptr) return 2.0f;
+        uint32_t id = (uint32_t)MEM_W(0, (gpr)(int32_t)(0x802E9408u + (uint32_t)side * 0x64 + 0x5C));
+        std::lock_guard lock{primary_mutex};
+        auto it = logo_aspects.find(id);
+        return it != logo_aspects.end() && it->second > 0.2f && it->second < 6.0f ? it->second : 2.0f;
+    }
+    void remember_primary(uint32_t id, const std::vector<char>& rgba) {
+        std::map<uint32_t, std::array<uint64_t, 4>> buckets;  // 4 bits a channel: sum r, g, b, count
+        for (size_t i = 0; i + 3 < rgba.size(); i += 4) {
+            const int r = (uint8_t)rgba[i], g = (uint8_t)rgba[i + 1], b = (uint8_t)rgba[i + 2], a = (uint8_t)rgba[i + 3];
+            const int hi = std::max({r, g, b}), lo = std::min({r, g, b});
+            if (a < 160 || hi - lo < 48 || hi < 48) continue;  // see-through, grey, white or near black
+            auto& k = buckets[(uint32_t)((r >> 4) << 8 | (g >> 4) << 4 | (b >> 4))];
+            k[0] += r; k[1] += g; k[2] += b; k[3]++;
+        }
+        const std::array<uint64_t, 4>* best = nullptr;
+        for (const auto& [key, v] : buckets) if (best == nullptr || v[3] > (*best)[3]) best = &v;
+        if (best == nullptr || (*best)[3] < 20) return;
+        char hex[8];
+        snprintf(hex, sizeof(hex), "#%02x%02x%02x", (int)((*best)[0] / (*best)[3]), (int)((*best)[1] / (*best)[3]), (int)((*best)[2] / (*best)[3]));
+        std::lock_guard lock{primary_mutex};
+        primaries[id] = hex;
+    }
+
     // This game's logo for a side, as the play select's: the copy of the team's record (Pro Bowl art included). "" if none.
     std::string team_logo(int side) {
         static std::set<uint32_t> ready, failed;
@@ -720,11 +803,35 @@ namespace {
             }
             recompui::queue_image_from_bytes_rgba32(src, rgba, w, h);
             ready.insert(id);
+            remember_primary(id, rgba);
+            // The shape the game draws it at: the header's size at +16 and +20 (64x64 for the 128x85 logos: square on the
+            // play select, stretched half again on the drive board when the stored shape was used; the team, 2026-11-27).
+            auto be = [&](size_t o) { return (uint32_t)(*file)[o] << 24 | (uint32_t)(*file)[o + 1] << 16 | (uint32_t)(*file)[o + 2] << 8 | (*file)[o + 3]; };
+            const uint32_t draw_w = file->size() >= 24 ? be(16) : 0, draw_h = file->size() >= 24 ? be(20) : 0;
+            const bool drawn = draw_w > 0 && draw_h > 0 && draw_w <= 1024 && draw_h <= 1024;
+            if (w > 0 && h > 0) {
+                std::lock_guard lock{primary_mutex};
+                logo_aspects[id] = drawn ? (float)draw_w / (float)draw_h : (float)w / (float)h;
+            }
+            fprintf(stderr, "[ds] logo %06X: %ux%u stored, drawn %ux%u\n", id & 0xFFFFFF, w, h, draw_w, draw_h);
         }
         return src;
     }
+
+    // A team's primary colour for the drive strip's end zones (team, 2026-11-26): the commonest strong colour in its logo, so
+    // any pack's teams have one. "" until the logo's been read, or for a logo of only white, black and greys.
+    std::string team_color(int side) {
+        uint8_t* rdram = blitz::monitor_rdram();
+        if (rdram == nullptr || blitz::original_game()) return "";
+        uint32_t id = (uint32_t)MEM_W(0, (gpr)(int32_t)(0x802E9408u + (uint32_t)side * 0x64 + 0x5C));
+        std::lock_guard lock{primary_mutex};
+        auto it = primaries.find(id);
+        return it != primaries.end() ? it->second : "";
+    }
 #else
     std::string team_logo(int) { return ""; }
+    std::string team_color(int) { return ""; }
+    float team_logo_aspect(int) { return 2.0f; }
 #endif
 
     std::string image_at(const std::string& name, int left, int top, int width, int height) {
@@ -782,8 +889,10 @@ namespace {
         std::string o;
         o += box_at(left - 3, top - 3, width + 6, height + 6, "background-color:#8feff5b2;");
         o += box_at(field_left, top, field_w, height, "background-color:#14682c;");
-        o += box_at(left, top, zone, height, "background-color:#3f0a5f;");
-        o += box_at(left + width - zone, top, zone, height, "background-color:#b3101e;");
+        // The end zones in the teams' colours (team_color): the offense's own on the left, the defense's on the right.
+        const std::string own = team_color(live.offense & 1), theirs = team_color((live.offense & 1) ^ 1);
+        o += box_at(left, top, zone, height, "background-color:" + (own.empty() ? std::string("#3f0a5f") : own) + ";");
+        o += box_at(left + width - zone, top, zone, height, "background-color:" + (theirs.empty() ? std::string("#b3101e") : theirs) + ";");
         for (int yard = 10; yard <= 90; yard += 10) {
             o += box_at(x_of(yard) - 1, top, yard == 50 ? 4 : 2, height, "background-color:#ffffff8c;");
         }
@@ -838,7 +947,8 @@ namespace {
         // The score, on the bevelled plate; the team with the ball in yellow.
         constexpr int plate_h = 152, plate_mid = 78;
         const int name_w = with_clip ? 110 : 330, points_w = with_clip ? 72 : 170, off = live.offense & 1;  // room for the clock, on one line
-        o += frame_at("header_bevel", left, 0, top_w, plate_h, 44, 37);
+        // As wide as the panels under it, so their sides line up (team, 2026-11-26: it ran out to the screen's edge).
+        o += frame_at("header_bevel", x0, 0, top_inner, plate_h, 44, 37);
         const int name_size = with_clip ? 56 : 88, points_size = with_clip ? 70 : 104, clock_size = with_clip ? 34 : 56;
         // Each team's logo, over a bar on the one with the ball; its letters if there's no logo.
         for (int side = 0; side < 2; side++) {
@@ -848,8 +958,12 @@ namespace {
                 o += text_at(slot_x, plate_mid - name_size / 2, name_w, side == 0 ? "left" : "right", name_size, off == side ? "#ffe14a" : "#ffffff", display, live.team[side]);
                 continue;
             }
-            const int logo_h = plate_h - 52, logo_w = std::min(name_w, logo_h * 2);
-            o += "<img src=\"" + logo + "\" style=\"position:absolute;left:" + std::to_string(slot_x + (name_w - logo_w) / 2) + "dp;top:18dp;width:" + std::to_string(logo_w) + "dp;height:" + std::to_string(logo_h) + "dp;\"/>";
+            // The logo's own shape (it was stretched to twice its height), as big as fits the slot.
+            const float aspect = team_logo_aspect(side);
+            int logo_h = plate_h - 52, logo_w = (int)(logo_h * aspect);
+            if (logo_w > name_w) { logo_w = name_w; logo_h = (int)(name_w / aspect); }
+            const int logo_top = 18 + ((plate_h - 52) - logo_h) / 2;
+            o += "<img src=\"" + logo + "\" style=\"position:absolute;left:" + std::to_string(slot_x + (name_w - logo_w) / 2) + "dp;top:" + std::to_string(logo_top) + "dp;width:" + std::to_string(logo_w) + "dp;height:" + std::to_string(logo_h) + "dp;\"/>";
             if (off == side) o += box_at(slot_x + name_w / 4, plate_h - 30, name_w / 2, 6, "background-color:#ffe14a;");
         }
         o += text_at(x0 + name_w, plate_mid - points_size / 2, points_w, "center", points_size, "#ffffff", display, std::to_string(live.points[0]));
@@ -918,15 +1032,33 @@ namespace {
             o += text_at(list_x + 28, list_y + head_h + (list_h - head_h) / 2 - 28, list_w - 56, "center", with_clip ? 44 : 56, "#b8c4da", display, "First play of the drive");
         }
 
+        // A hint (hints.cpp) over the drive's list, where nothing of the play select is covered (team, 2026-11-26).
+        {
+            std::string hint_title, hint_body;
+            if (blitz::hints_for_upper_screen(hint_title, hint_body)) {
+                o += box_at(list_x, list_y, list_w, list_h, "background-color:#0b1530;border-radius:6dp;");  // solid: the list under it doesn't show through
+                o += glass_at(list_x, list_y, list_w, list_h);
+                o += box_at(list_x + 4, list_y + 4, 8, list_h - 8, "background-color:#f6d400;");
+                o += text_at(list_x + 36, list_y + 22, list_w - 72, "left", with_clip ? 26 : 30, "#8feff5", "font-weight:700;letter-spacing:2dp;", "TIP");
+                o += text_at(list_x + 36, list_y + 60, list_w - 72, "left", with_clip ? 46 : 56, "#f6d400", display, hint_title);
+                o += "<div style=\"position:absolute;left:" + std::to_string(list_x + 36) + "dp;top:" + std::to_string(list_y + (with_clip ? 124 : 138)) + "dp;width:" +
+                     std::to_string(list_w - 72) + "dp;font-size:" + std::to_string(with_clip ? 34 : 40) + "dp;line-height:1.3;color:#f2f2f2;\">" + hint_body + "</div>";
+            }
+        }
+
         // How the last one went, while this one's young.
         if (!last_drive.team.empty() && rows.size() <= 2) {
             char line[80];
             snprintf(line, sizeof(line), with_clip ? "Last: %s, %d plays, %d yds" : "Last drive: %s, %d plays, %d yds, ", last_drive.team.c_str(), last_drive.plays, last_drive.yards);
-            const std::string last_text = with_clip ? std::string(line) : line + last_drive.result;
-            const int last_size = fit_size(last_text, inner - 454, with_clip ? 24 : 30, 0.56f);  // clear of the buttons
-            if (inner - 454 >= 300) o += text_at(x0, 1038 - last_size / 2, inner - 454, "left", last_size, "#b8c4da", "font-weight:700;white-space:nowrap;", last_text);  // no room beside the clip
+            // Beside the clip, the ending in the team's short words (PUNT, DOWNS, INT, FUMBLE, TD, FG, SAFETY, END HALF).
+            const std::string last_text = with_clip ? std::string(line) + (last_drive.short_result.empty() ? "" : ", " + last_drive.short_result) : line + last_drive.result;
+            const int last_size = fit_size(last_text, inner - 678, with_clip ? 24 : 30, 0.56f);  // clear of the buttons
+            if (inner - 678 >= 300) o += text_at(x0, 1038 - last_size / 2, inner - 678, "left", last_size, "#b8c4da", "font-weight:700;white-space:nowrap;", last_text);  // no room beside the clip
         }
         // Instant Replay, full screen: ds_tap. At the board's own right edge, clear of a clip beside it.
+        // The next DS Screens mode (ds_tap), left of it.
+        o += box_at(edge - 684, 1010, 212, 56, "background-color:#0d1a3a;border-width:2dp;border-color:#8feff561;border-radius:4dp;") +
+             text_at(edge - 684, 1038 - 17, 212, "center", 34, "#b8c4da", display, "Screens");
         o += box_at(edge - 460, 1010, 212, 56, "background-color:#0d1a3a;border-width:2dp;border-color:#f6d40080;border-radius:4dp;") +
              text_at(edge - 460, 1038 - 17, 212, "center", 34, "#f6d400", display, "Replay");
         return o + panel_settings(edge);
@@ -1014,6 +1146,7 @@ namespace blitz {
             const SDL_TouchFingerEvent& f = e->tfinger;
             if (e->type == SDL_FINGERDOWN) {
                 fprintf(stderr, "[touch raw] down %.3f,%.3f finger %lld\n", f.x, f.y, (long long)f.fingerId);
+                hints_touched();  // the lower screen's touches send a tip away too
                 if (down && f.fingerId != finger) return;  // the first finger's the one followed
                 down = true;
                 finger = f.fingerId;
@@ -1115,6 +1248,55 @@ namespace blitz {
 #endif
     }
 
+    // The live command DSSTACK (the dev kit): the Mac test's two windows one above the other at one size, as the Duo is
+    // held, sized so both fit on the screen (width: as asked, else the game window's, smaller if they wouldn't fit).
+    namespace { std::atomic<int> stack_wanted{-1}; }
+    void ds_stack_request(int width) { stack_wanted = width < 0 ? 0 : width; }
+    void ds_stack_apply(SDL_Window* first) {  // the main thread, each loop (main.cpp window_size_update)
+        int width = stack_wanted.exchange(-1);
+        if (width < 0 || first == nullptr) return;
+#if defined(__APPLE__) && !defined(BLITZ_IOS)
+        SDL_Window* second = second_window != 0 ? SDL_GetWindowFromID(second_window) : nullptr;
+        if (second == nullptr) {
+            fprintf(stderr, "[ds] DSSTACK: no second window (BLITZ_DS=1)\n");
+            return;
+        }
+        // Each window keeps its own shape and the two their sizes to each other (a wide upper screen over a 4:3 lower one:
+        // BLITZ_DS_SECOND), scaled together to fit the screen; `width`, if given, is the lower window's.
+        int w = 0, h = 0, sw = 0, sh = 0;
+        SDL_GetWindowSize(first, &w, &h);
+        SDL_GetWindowSize(second, &sw, &sh);
+        if (w <= 0 || h <= 0) { w = 900; h = 675; }
+        if (sw <= 0 || sh <= 0) { sw = w; sh = h; }
+        int display = SDL_GetWindowDisplayIndex(first);
+        SDL_Rect usable{0, 0, 1440, 900};
+        SDL_GetDisplayUsableBounds(display < 0 ? 0 : display, &usable);
+        const int title = 28, gap = title + 8;  // the lower window's title bar, and a hinge's worth
+        float f = width > 0 ? (float)width / (float)w : 1.0f;
+        f = std::min(f, (float)(usable.h - title - gap) / (float)(h + sh));
+        f = std::min(f, (float)(usable.w - 24) / (float)std::max(w, sw));
+        const int lw = std::max(160, (int)(w * f)), lh = std::max(120, (int)(h * f));
+        const int uw = std::max(160, (int)(sw * f)), uh = std::max(90, (int)(sh * f));
+        const int cx = usable.x + 12 + std::max(lw, uw) / 2, y = usable.y + title;
+        if (SDL_GetWindowFlags(first) & SDL_WINDOW_MAXIMIZED) SDL_RestoreWindow(first);
+        SDL_SetWindowSize(second, uw, uh);
+        SDL_SetWindowPosition(second, cx - uw / 2, y);
+        SDL_SetWindowSize(first, lw, lh);
+        SDL_SetWindowPosition(first, cx - lw / 2, y + uh + gap);
+        int pw = uw, ph = uh;
+        SDL_GetWindowSizeInPixels(second, &pw, &ph);
+        void* a = nullptr;
+        void* b = nullptr;
+        {
+            std::lock_guard lock{second_mutex};
+            a = second_a;
+            b = second_b;
+        }
+        if (a != nullptr) ds_second_screen(a, b, pw, ph);
+        fprintf(stderr, "[ds] DSSTACK: upper %dx%d over lower %dx%d, centred on %d, the game's below\n", uw, uh, lw, lh, cx);
+#endif
+    }
+
     namespace { int first_w_now = 0, first_h_now = 0; }
 
     long host_total_memory_mb() {
@@ -1182,6 +1364,12 @@ namespace blitz {
         const bool lean = getenv("BLITZ_LEAN") != nullptr;
         std::string profile = env != nullptr ? env : lean ? "low" : mb <= 0 ? "high" : mb < 2500 ? "low" : mb < 5000 ? "mid" : "high";
         fprintf(stderr, "[ds] quality profile %s (%ld MB)\n", profile.c_str(), mb);
+        // Auto over two screens takes both panels' lines: 12x on a Surface Duo, 13 fps. 4x with MSAA held ~29 there (the team's sweep,
+        // 2026-11-26: 8x 22, 6x 25 with or without MSAA). BLITZ_DS_RES_MAX=<n> overrides; GFX dsmax=N live (rt64 0043).
+        {
+            const char* cap = getenv("BLITZ_DS_RES_MAX");
+            blitz_ds_res_max = cap != nullptr ? atoi(cap) : 3;  // 4x dipped below the guard in real play (team, 11-27)
+        }
         // The first thing to go when a frame rate won't hold (hold_frame_rate), but on from 800 MB: an RG DS (950 MB) has
         // ~290 MB free in a game and the clip takes ~47 MB (the team wants it there, 2026-11-02). It was off in the low profile.
         blitz_ds_clip_enabled = (mb > 0 && mb < 800) ? 0 : 1;
@@ -1269,6 +1457,10 @@ namespace blitz {
         static clock::time_point next = clock::now() + std::chrono::seconds(30);
         static int slow = 0;
         if (!playing || clock::now() < next) return;
+        if (blitz_savestate_settling()) {  // a state's just loaded: its stall isn't the game's speed
+            slow = 0;
+            return;
+        }
         next = clock::now() + std::chrono::seconds(5);
         float fps = fps_last_second();
         if (fps <= 0.0f) return;
@@ -1447,7 +1639,7 @@ namespace blitz {
             first_w = w;
             first_h = h;
             apply_shapes();
-            fprintf(stderr, "[ds] first screen %dx%d, second %dx%d, picture ratio %.3f, upper share %.3f\n", w, h, second_w.load(), second_h.load(), (float)blitz_tall_ratio, (float)blitz_ds_split);
+            fprintf(stderr, "[ds] first screen %dx%d, second %dx%d, picture ratio %.3f, upper share %.3f, width shares %.3f / %.3f\n", w, h, second_w.load(), second_h.load(), (float)blitz_tall_ratio, (float)blitz_ds_split, (float)blitz_ds_first_width, (float)blitz_ds_second_width);
         }
 
         enum class Show { Title, Drive, Play } show = Show::Title;
@@ -1522,7 +1714,18 @@ namespace blitz {
         int stylus_w = 0, stylus_h = 0;
         const bool stylus_icons = blitz_ds_icons_on_second(&stylus_w, &stylus_h) != 0;
         blitz_ds_second_icons = stylus_icons ? 1 : 0;
-        if (show == Show::Play || stylus_icons) {
+        if (stylus_icons && blitz_ds_panel_first) {  // Game + Companion: the board stays the panel, the icons on their own layer
+            if (live.valid) recompui::ds_panel_set(panel_drive(clip, full, live) + second_mark(full));
+            else recompui::ds_panel_set(panel_title(full) + second_mark(full));
+            recompui::ds_icons_set(panel_badges());
+            std::lock_guard lock{badges_mutex};
+            std::array<recompui::DsMover, 3> movers;
+            for (size_t k = 0; k < badges.size(); k++) {
+                movers[k] = {badges[k].on && badges[k].screen == 1, badges[k].x, badges[k].y};
+            }
+            recompui::ds_panel_move(movers.data(), (int)movers.size());
+        }
+        else if (show == Show::Play || stylus_icons) {
             recompui::ds_panel_set(panel_badges());
             std::lock_guard lock{badges_mutex};
             std::array<recompui::DsMover, 3> movers;

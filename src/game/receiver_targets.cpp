@@ -48,6 +48,7 @@ extern "C" int blitz_tall_2d(void);
 extern "C" int blitz_tall_carry(float nx, float ny, float height, float lift, float* tx, float* ty);
 extern "C" float blitz_tall_window_y(float picture_y, int w, int h);
 extern "C" int blitz_ds_first_part(float* top, float* bottom);  // ds_view.cpp
+extern "C" float blitz_ds_width_share(int first_window);       // ds_view.cpp
 extern "C" void blitz_ds_badge(int k, int on, int screen, float x, float y, const char* glyph);
 extern "C" int blitz_ds_active(void);          // ds_view.cpp
 extern "C" int blitz_ds_icons_on_second(int* w, int* h);
@@ -327,6 +328,14 @@ namespace blitz {
         return {g[0], g[1], g[2]};
     }
 
+    // Turbo held on a player's controller (play_art.cpp: before the snap, the routes show only while it is, as the
+    // icons over the receivers do; the team, 2026-11-27).
+    bool turbo_held(int port) {
+        if (port < 0 || port > 3) return false;
+        std::lock_guard lock{mutex};
+        return (held[(size_t)port] & Z) != 0;
+    }
+
     // Every UI tick (main.cpp): the icons over the receivers while a human's quarterback has the ball.
     void receiver_targets_update(SDL_Window* window) {
         uint8_t* rdram = monitor_rdram();
@@ -420,12 +429,15 @@ namespace blitz {
                     float other_top = part_top > 0.0f ? 0.0f : part_bottom, other_bottom = part_top > 0.0f ? part_top : 1.0f;
                     float top_of = here ? part_top : other_top, bottom_of = here ? part_bottom : other_bottom;
                     // Kept just inside the screen, so the button's still there to press (as below).
-                    blitz_ds_badge((int)k, 1, here ? 0 : 1, std::clamp(0.5f + tx * 0.5f, 0.04f, 0.96f), std::clamp((y - top_of) / (bottom_of - top_of), 0.10f, 0.97f), glyphs_for(family)[k]);
+                    // Across that screen: a narrower screen shows only the middle of the picture's width.
+                    const float share = std::max(blitz_ds_width_share(here ? 1 : 0), 0.05f);
+                    blitz_ds_badge((int)k, 1, here ? 0 : 1, std::clamp(0.5f + tx * 0.5f / share, 0.04f, 0.96f), std::clamp((y - top_of) / (bottom_of - top_of), 0.10f, 0.97f), glyphs_for(family)[k]);
                     if (!here) {
                         badge[k]->set_display(recompui::Display::None);
                         continue;
                     }
                     py = h * (y - part_top) / (part_bottom - part_top);
+                    px = w * (0.5f + tx * 0.5f / std::max(blitz_ds_width_share(1), 0.05f));
                 }
             }
             badge[k]->set_display(recompui::Display::Block);

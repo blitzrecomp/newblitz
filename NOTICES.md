@@ -24,6 +24,7 @@ Build steps: README.md.
 | RT64 | Copyright (c) 2024 RT64 Contributors. MIT | lib/rt64/LICENSE |
 | n64sym (build tooling only) | Copyright (c) 2017-2020 shygoo. MIT | ext/n64sym/LICENSE.md |
 | QR Code generator | Copyright (c) Project Nayuki. MIT | third_party/qrcodegen (file headers) |
+| Monocypher 4.0.2 | Its authors (see the file). CC0-1.0 or BSD-2-Clause, at our choice | third_party/monocypher (LICENCE.md) |
 | BanjoRecomp | GPL-3.0. `src/main/main.cpp` and the root `CMakeLists.txt` started from its structure | file headers |
 | Zelda64Recomp patch headers | GPL-3.0, with RecompFrontend | patches/*.h |
 | SDL2 | zlib licence | built by tools/build_deps.sh (tools/deps.sha256) |

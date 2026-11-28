@@ -111,6 +111,54 @@ namespace blitz {
         return status >= 200 && status < 300;
     }
 
+    // BlitzActivity.secretPut/Get/Erase: AES-GCM under a key in the Android Keystore (Cloud Sync's code).
+    bool secure_put(const std::string& name, const std::string& value) {
+        Activity a;
+        if (!a) return false;
+        jmethodID m = a.method("secretPut", "(Ljava/lang/String;Ljava/lang/String;)Z");
+        if (!m) return false;
+        JNIEnv* env = a.env;
+        jstring jn = jstr(env, name), jv = jstr(env, value);
+        jboolean ok = env->CallStaticBooleanMethod(a.cls, m, jn, jv);
+        bool threw = a.failed("secretPut");
+        env->DeleteLocalRef(jn);
+        env->DeleteLocalRef(jv);
+        return ok && !threw;
+    }
+
+    bool secure_get(const std::string& name, std::string& value) {
+        value.clear();
+        Activity a;
+        if (!a) return false;
+        jmethodID m = a.method("secretGet", "(Ljava/lang/String;)Ljava/lang/String;");
+        if (!m) return false;
+        JNIEnv* env = a.env;
+        jstring jn = jstr(env, name);
+        jstring got = (jstring)env->CallStaticObjectMethod(a.cls, m, jn);
+        bool threw = a.failed("secretGet");
+        env->DeleteLocalRef(jn);
+        if (got != nullptr && !threw) {
+            const char* c = env->GetStringUTFChars(got, nullptr);
+            if (c) value = c;
+            env->ReleaseStringUTFChars(got, c);
+        }
+        if (got) env->DeleteLocalRef(got);
+        return !value.empty();
+    }
+
+    void secure_erase(const std::string& name) {
+        Activity a;
+        if (!a) return;
+        jmethodID m = a.method("secretErase", "(Ljava/lang/String;)V");
+        if (!m) return;
+        jstring jn = jstr(a.env, name);
+        a.env->CallStaticVoidMethod(a.cls, m, jn);
+        a.failed("secretErase");
+        a.env->DeleteLocalRef(jn);
+    }
+
+    const char* secure_kind() { return "the Android Keystore"; }
+
     // The app's external files folder (Android/data/<package>/files): adb push and file managers reach it.
     std::filesystem::path rom_drop_folder() {
         const char* p = SDL_AndroidGetExternalStoragePath();

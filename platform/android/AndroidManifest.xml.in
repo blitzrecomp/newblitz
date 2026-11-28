@@ -43,6 +43,9 @@
         android:enableOnBackInvokedCallback="false"
         android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
 
+        <!-- Surface Duo: where the hinge is (BlitzHinge). Not required, so every other device installs it as before. -->
+        <uses-library android:name="com.microsoft.device.display.displaymask" android:required="false" />
+
         <activity android:name="com.blitzrecomp.newblitz.BlitzActivity"
             android:label="@BLITZ_BUNDLE_NAME@"
             android:exported="true"

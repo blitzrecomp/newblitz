@@ -1,0 +1,61 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 96a5307..2d7fb35 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -135,9 +135,15 @@ set (DXC_GS_OPTS "${DXC_COMMON_OPTS}" "-E" "GSMain" "-T gs_6_3")
+ set (DXC_RT_OPTS "${DXC_COMMON_OPTS}" "-D" "RT_SHADER" "-T" "lib_6_3" "-fspv-target-env=vulkan1.1spirv1.4" "-fspv-extension=SPV_KHR_ray_tracing" "-fspv-extension=SPV_EXT_descriptor_indexing")
+ 
+ function(build_shader_spirv_impl TARGETOBJ FILENAME TARGET_NAME OUTNAME)
++    # Blitz: the frame read and write shaders' formats as Unknown (src/shaders/spirv_unknown_formats.py).
++    set(SPV_FIXUP "")
++    if (FILENAME MATCHES "Fb(WriteColor|WriteDepth|ReadAnyFull|ReadAnyChanges)CS")
++        set(SPV_FIXUP COMMAND python3 ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/src/shaders/spirv_unknown_formats.py ${OUTNAME}.spv)
++    endif()
+     add_custom_command(OUTPUT ${OUTNAME}.spv
+         COMMAND ${DXC} ${DXC_SPV_OPTS} ${ARGN} ${FILENAME} /Fo ${OUTNAME}.spv
+-        DEPENDS ${FILENAME})
++        ${SPV_FIXUP}
++        DEPENDS ${FILENAME} ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/src/shaders/spirv_unknown_formats.py)
+     add_custom_command(OUTPUT ${OUTNAME}.spirv.c
+         COMMAND file_to_c ${OUTNAME}.spv ${TARGET_NAME}BlobSPIRV ${OUTNAME}.spirv.c ${OUTNAME}.spirv.h
+         DEPENDS ${OUTNAME}.spv file_to_c
+diff --git a/src/shaders/spirv_unknown_formats.py b/src/shaders/spirv_unknown_formats.py
+new file mode 100644
+index 0000000..33f8bbb
+--- /dev/null
++++ b/src/shaders/spirv_unknown_formats.py
+@@ -0,0 +1,34 @@
++#!/usr/bin/env python3
++# Blitz: spirv_unknown_formats.py <module.spv>, in place. The frame read and write shaders' texel buffers take the Unknown
++# format, with the capabilities to read and write without one. DXC 1.7 declares RWBuffer<uint> as R32ui and
++# ignores [[vk::image_format("unknown")]] on buffers, while RT64 views them as R8, R16 or R32 by the pixel size: undefined
++# per the spec, and the Surface Duo's Adreno 640 (driver 512.502) crashed at the dispatch (docs/SURFACE_DUO.md). Vulkan only;
++# the Metal build compiles its own SPIR-V. Needs shaderStorageImageReadWithoutFormat and WriteWithoutFormat (plume enables both).
++import struct
++import sys
++
++OP_CAPABILITY, OP_TYPE_IMAGE = 17, 25
++DIM_BUFFER = 5
++CAP_READ_WITHOUT_FORMAT, CAP_WRITE_WITHOUT_FORMAT = 55, 56
++
++path = sys.argv[1]
++data = open(path, 'rb').read()
++words = list(struct.unpack('<%dI' % (len(data) // 4), data))
++assert words[0] == 0x07230203, 'not SPIR-V'
++caps, changed, i = set(), 0, 5
++while i < len(words):
++    op, count = words[i] & 0xFFFF, words[i] >> 16
++    if op == OP_CAPABILITY:
++        caps.add(words[i + 1])
++    elif op == OP_TYPE_IMAGE and words[i + 3] == DIM_BUFFER and words[i + 8] != 0:
++        # Texel buffers only: a storage image made Unknown can duplicate another image type (invalid SPIR-V), and its view's
++        # format is the declared one anyway.
++        words[i + 8] = 0
++        changed += 1
++    i += count
++if changed:
++    for cap in (CAP_WRITE_WITHOUT_FORMAT, CAP_READ_WITHOUT_FORMAT):
++        if cap not in caps:
++            words[5:5] = [(2 << 16) | OP_CAPABILITY, cap]
++    open(path, 'wb').write(struct.pack('<%dI' % len(words), *words))
++print('%s: %d image type(s) to Unknown' % (path.split('/')[-1], changed))

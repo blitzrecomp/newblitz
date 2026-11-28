@@ -33,6 +33,9 @@ namespace blitz {
     // The app in the background (a clamshell closed, an app left on a phone; savestate.cpp sets it once the Auto slot is
     // saved): the game holds at the dispatcher, as for a replay, until it's back. It played on with the lid shut before.
     std::atomic_bool background_hold{false};
+    bool settings_hold_pass();          // settings_hold.cpp: the game held under Settings
+    bool settings_hold_keep();
+    void settings_hold_held(bool on);
 }
 
 namespace {
@@ -67,6 +70,14 @@ extern "C" void blitz_replay_gate(uint8_t* rdram) {
         last = play;
         was_live = live;
         blitz::replay_play_live = live;
+    }
+    // Settings up: the game holds under it (settings_hold.cpp), let go for a save or load, a redraw's few frames and close.
+    if (blitz::settings_hold_pass()) {
+        blitz::settings_hold_held(true);
+        while (blitz::settings_hold_keep()) {
+            osRecvMesg(rdram, retrace_queue, NULLPTR, OS_MESG_BLOCK);
+        }
+        blitz::settings_hold_held(false);
     }
     if (blitz::background_hold.load()) {
         fprintf(stderr, "[background] the game holds\n");

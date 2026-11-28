@@ -13,6 +13,8 @@
 namespace blitz {
     using StateBlob = std::vector<uint8_t>;
 
+    // check, before a load: "" to go ahead, a message to refuse it, or "?" and a question to ask the player first (Load It /
+    // Cancel; not for test marks or the game saved on quitting).
     void savestate_register(const std::string& name, std::function<StateBlob()> save, std::function<void(const StateBlob&)> load,
                             std::function<std::string(const StateBlob&)> check = nullptr);
 

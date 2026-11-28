@@ -19,15 +19,25 @@ namespace blitz {
     std::array<std::string, 4> port_descriptions();  // controllers.cpp
     void identify_port(int port);
     void swap_ports(int a, int b);
+    std::string port_layout(int port);  // controllers.cpp: Auto, PlayStation, Xbox, Switch ("" no controller)
+    void port_layout_next(int port);
     std::string phone_pads_url();  // phone_pads.cpp
     int phone_count();
 }
 
 namespace recompui {
     namespace {
+        // The phone address on two lines, broken before its "?" (the part after it is the game's code).
+        std::string two_lines(const std::string& url) {
+            const size_t q = url.find('?');
+            return q == std::string::npos ? url : url.substr(0, q) + "\n" + url.substr(q);
+        }
+
         class ControllersPanel : public Element {
             std::array<Label*, 4> devices{};
             std::array<Button*, 4> identify{};
+            std::array<Button*, 4> layout{};
+            std::array<std::string, 4> shown_layout{};
             std::array<Element*, 4> cards{};
             std::array<std::string, 4> shown{"-", "-", "-", "-"};
             Button* phone_button = nullptr;
@@ -83,6 +93,14 @@ namespace recompui {
                 if (e.type != EventType::Update) return;
                 auto now = blitz::port_descriptions();
                 for (int i = 0; i < 4; i++) {
+                    const std::string lay = blitz::port_layout(i);
+                    if (lay != shown_layout[i]) {
+                        shown_layout[i] = lay;
+                        layout[i]->set_text(lay.empty() ? "Buttons" : "Buttons: " + lay);
+                        layout[i]->set_enabled(!lay.empty());
+                    }
+                }
+                for (int i = 0; i < 4; i++) {
                     if (now[i] == shown[i]) continue;
                     shown[i] = now[i];
                     // An empty slot is quiet ("No controller", steel at 70%); the card's rim is the player's
@@ -117,11 +135,14 @@ namespace recompui {
                                              " isn't on a network.");
                     }
                     else if (firewall_hint) {
-                        phone_text->set_text("Phone can't connect? Check it's on the same Wi-Fi as this computer.\nThe address: " + url);
+                        phone_text->set_text("Phone can't connect? Check it's on the same Wi-Fi as this computer.\nThe address:\n" +
+                                             two_lines(url));
                     }
                     else {
-                        // One short line each (white-space: pre-line), so the address sits on its own.
-                        phone_text->set_text("Scan the code with a phone,\nor open " + url + "\nTurn the phone sideways to play.");
+                        // One short line each (white-space: pre-line), so the address sits on its own. The address has no
+                        // spaces to wrap at and ran into the next column (the Mac sweep, 2026-11-27): two lines, at its "?".
+                        phone_text->set_text("Scan the code with a phone,\nor open " + two_lines(url) +
+                                             "\nTurn the phone sideways to play.");
                     }
                     draw_qr(url);
                 }
@@ -186,6 +207,13 @@ namespace recompui {
                     devices[i]->set_flex_shrink(1.0f);
                     devices[i]->set_white_space(WhiteSpace::Nowrap);
                     devices[i]->set_overflow(Overflow::Hidden);
+                    // Which way its face buttons go (controllers.cpp apply_layout): a pad that says it's a Switch Pro but has
+                    // PlayStation buttons can be told (team, 2026-11-27).
+                    layout[i] = context.create_element<Button>(card, "Buttons: Auto", ButtonStyle::Tertiary, ButtonSize::Card);
+                    layout[i]->set_flex_shrink(0.0f);
+                    layout[i]->set_white_space(WhiteSpace::Nowrap);
+                    layout[i]->set_enabled(false);
+                    layout[i]->add_pressed_callback([i]() { blitz::port_layout_next(i); });
                     identify[i] = context.create_element<Button>(card, "Identify", ButtonStyle::Secondary, ButtonSize::Card);
                     identify[i]->set_flex_shrink(0.0f);
                     identify[i]->set_enabled(false);

@@ -1,3 +1,4 @@
+#include <cctype>
 // Save states, slots, Save & Quit and Redo Play (experimental; build/analysis/savestates/PLAN.md).
 // Built for real with BLITZ_SAVESTATES (`make app` / `make app2026`; SAVESTATES=0 builds without),
 // where the game code comes from tools/savestate/resumable.py and every function that can reach
@@ -87,6 +88,20 @@ namespace blitz {
     int fs_sync_ram_toc(uint8_t* rdram);  // art_dropin.cpp
     void pak_state_restored(uint8_t* rdram);  // controller_pak.cpp: the pak's view as the pak is now, not as it was
 }
+
+// The dev kit's HOLD (dev_input.cpp) loads one moment over and over: its toasts would be in every screenshot.
+static std::atomic<bool> savestate_quiet{false};
+[[maybe_unused]] static void say(const std::string& msg) { if (!savestate_quiet.load()) blitz::post_status(msg); }
+[[maybe_unused]] static void say_held(const std::string& msg) { if (!savestate_quiet.load()) blitz::post_status_held(msg); }
+extern "C" void blitz_savestate_quiet(int on) { savestate_quiet = on != 0; }
+// A load that asks first (a module's "?" check): the question for the UI thread, and the request a Load It answers.
+static std::mutex question_mutex;
+static std::string question_text;
+static int question_request = 0;
+static std::atomic<int> load_confirmed{0};
+extern "C" int blitz_dev_holding(void);  // dev_input.cpp
+extern "C" int blitz_settings_holding(void);   // settings_hold.cpp: the game held under Settings
+extern "C" int blitz_settings_hold_settling(void);  // ... or let go in the last few seconds
 
 namespace {
     // Each roster pack keeps its own Controller Pak and season files, so a state saved under one pack must not
@@ -247,7 +262,9 @@ namespace {
     std::mutex done_mutex;
     std::function<void(bool)> on_done;     // called once the requested save or load finished (or failed)
     int on_done_slot = -1;                 // ... for that slot only (Save & Quit: slot 0), not any other request
+    void set_mark_status(int slot, int status);  // below
     void finish(bool ok, int slot) {
+        if (!ok) set_mark_status(slot, -1);  // a mark refused or failed (a no-op for the player's slots)
         std::function<void(bool)> f;
         {
             std::lock_guard lock{done_mutex};
@@ -554,12 +571,47 @@ namespace {
     // becomes slot 1). Slot 4 is Auto: written when the app goes to the background mid-game (a clamshell closed, an app
     // left on a phone: the team, 2026-11-02), and stepped to, loaded or saved like the others.
     constexpr int slot_count = 4, auto_slot = 4;
-    std::string slot_name(int slot) { return slot == auto_slot ? std::string("Auto slot") : "Slot " + std::to_string(slot); }
+    std::string mark_name(int slot);
+    std::string slot_name(int slot) { return slot >= 100 ? "Mark " + mark_name(slot) : slot == auto_slot ? std::string("Auto slot") : "Slot " + std::to_string(slot); }
     std::atomic_int current_slot{1};
+
+    // Test marks (the live command MARK, docs/SURFACE_DUO.md): named states for dialling in one moment again and again,
+    // apart from a player's slots. Slot 100 and up in a request; savestates/mark-<name>.state.
+    std::mutex mark_mutex;
+    std::vector<std::string> mark_names;
+    int mark_slot(const std::string& name) {
+        std::lock_guard lock{mark_mutex};
+        for (size_t i = 0; i < mark_names.size(); i++) if (mark_names[i] == name) return 100 + (int)i;
+        mark_names.push_back(name);
+        return 100 + (int)mark_names.size() - 1;
+    }
+
+    std::string mark_name(int slot) {
+        std::lock_guard lock{mark_mutex};
+        const size_t i = (size_t)(slot - 100);
+        return i < mark_names.size() ? mark_names[i] : std::string("?");
+    }
+
+    // How each mark's last request went (blitz_savestate_mark_status): 0 waiting, 1 saved, 2 loaded, -1 refused or cancelled.
+    std::map<int, int> mark_status;  // under mark_mutex
+    void set_mark_status(int slot, int status) {
+        if (slot < 100) return;
+        std::lock_guard lock{mark_mutex};
+        mark_status[slot] = status;
+    }
+    // Settings' hold (settings_hold.cpp): its moment stays in memory, not written to a file (8 MB each time Settings opens).
+    // Loading it again is the same game a moment ago: Redo Play's plays before it stay.
+    bool memory_mark(int slot) { return slot >= 100 && mark_name(slot) == "settings"; }
+    std::atomic_int cancel_slot{-1};  // a mark's request to drop at the next tick (blitz_savestate_mark_cancel)
 
     // Slot 0 is the game saved on quitting (quit.state, with a one-line quit.txt for the startup prompt).
     std::filesystem::path state_file(int slot) {
         std::filesystem::path dir = recompui::file::get_app_folder_path() / "savestates";
+        if (slot >= 100) {
+            std::lock_guard lock{mark_mutex};
+            const size_t i = (size_t)(slot - 100);
+            return dir / ("mark-" + (i < mark_names.size() ? mark_names[i] : std::string("unknown")) + ".state");
+        }
         std::filesystem::path path = dir / (slot == 0 ? std::string("quit.state") : "slot" + std::to_string(slot) + ".state");
         std::error_code ec;
         if (slot == 1 && !std::filesystem::exists(path, ec) && std::filesystem::exists(dir / "quick.state", ec)) {
@@ -1003,7 +1055,7 @@ namespace {
             fprintf(stderr, "[rescue] game stopped at %s: the Save & Quit save made after it is kept for the next start instead\n", where.c_str());
             rescue = Rescue::kept;  // nothing of the rescue's own on the disk
             rescue_toast = true;
-            blitz::post_status_held(rescue_message(saved));
+            say_held(rescue_message(saved));
             return;
         }
         if (!write_file_to(copy, rescue_file())) {
@@ -1019,7 +1071,7 @@ namespace {
         rescue = Rescue::kept;
         fprintf(stderr, "[rescue] game stopped at %s: kept for the next start\n", where.c_str());
         rescue_toast = true;
-        blitz::post_status_held(rescue_message(where));
+        say_held(rescue_message(where));
     }
 
     // The game runs again (or ended): rescue.state goes, and the toast with it.
@@ -1100,7 +1152,8 @@ namespace blitz {
         // the app came back counts, so a game stuck after it's back is still rescued (5 s on), and one that simply hasn't
         // drawn yet isn't. (the team's iPhone, 2026-11-26: blitz_app_foreground clears both at once, and the next VI saw 11 s
         // with no frame and posted "The game stopped responding" over a game that was fine.)
-        if (in_background.load() || blitz::background_hold.load()) {
+        // The dev kit's HOLD and Settings' hold (settings_hold.cpp) too.
+        if (in_background.load() || blitz::background_hold.load() || blitz_dev_holding() || blitz_settings_holding()) {
             held_for = away;
             frames_away = 0.0;
             flowing = {};
@@ -1278,7 +1331,7 @@ namespace {
         quit_saving_ms = guard_now_ms();
         quit_saving = true;
         request = 1;  // slot 0
-        blitz::post_status_held("Saving your game: a moment...");
+        say_held("Saving your game: a moment...");
     }
 
     // Quit Anyway: as "Quit without saving?" did. A stuck game holds up the quit (it waits for the game's thread): the app
@@ -1333,7 +1386,7 @@ namespace blitz {
             return true;
         }
         if (quit_saving.load()) {  // Quit again while the save's on its way: it quits once it's done
-            blitz::post_status_held("Saving your game: a moment...");
+            say_held("Saving your game: a moment...");
             return true;
         }
         replay_close();  // the save needs the game running: it saves at the dispatcher's next turn
@@ -1357,6 +1410,25 @@ namespace blitz {
     // UI thread, every tick: quitting once the game's saved (or asking when it couldn't be), and once the game runs, a
     // game saved on quitting offered to be picked up again.
     void savestate_startup_prompt() {
+        {
+            std::string text;
+            int asked = 0;
+            {
+                std::lock_guard qlock{question_mutex};
+                std::swap(text, question_text);
+                asked = question_request;
+            }
+            if (!text.empty()) {
+                recompui::open_choice_prompt(
+                    "Load this save state?", text, "Load It", "Cancel",
+                    [asked] {
+                        load_confirmed = asked;
+                        request = asked;
+                        say_held("Loading: a few seconds...");
+                    },
+                    [] { say("Not loaded"); }, recompui::ButtonStyle::Primary, recompui::ButtonStyle::Tertiary, false);
+            }
+        }
         if (quit_now.exchange(false)) {
             ps5_crumb("save & quit: saved, quitting");
             blitz::checkpoint_discard_on_quit();
@@ -1434,7 +1506,7 @@ namespace blitz {
         if (blitz::game_frames() - frames_at_start < 30 && guard_now_ms() - started_ms < 10000) return;
         asked = true;
         if (!guard_notice.empty()) {
-            blitz::post_status(guard_notice);
+            say(guard_notice);
             guard_notice.clear();
         }
         std::error_code ec;
@@ -1446,7 +1518,7 @@ namespace blitz {
             old.replace_extension(".old-version.state");
             std::filesystem::rename(state_file(0), old, ec);
             std::filesystem::remove(state_file(0).replace_extension(".txt"), ec);
-            blitz::post_status("The game saved on quitting is from another version of the app and can't be picked up");
+            say("The game saved on quitting is from another version of the app and can't be picked up");
             return;
         }
         std::string what, tag;
@@ -1477,7 +1549,7 @@ namespace blitz {
                 guard_arm(Guard::resume);
                 ps5_crumb("resume: Resume chosen");
                 request = 2;  // slot 0
-                blitz::post_status_held("Resuming your game: a few seconds...");
+                say_held("Resuming your game: a few seconds...");
             });
         offer_open = true;
         blitz::ui_step("savestate prompt");
@@ -1504,13 +1576,61 @@ extern "C" int blitz_touch_port(void) {
 // After a load, until the game runs at speed again (the slow handhelds compile and upload for a few seconds, and quick taps
 // fall between its reads meanwhile: the team, RG DS): the notice says so and stays up. 0: not warming.
 static std::atomic<uint64_t> warm_from_ms{0};
+static std::atomic<uint64_t> loaded_at_ms{0};
+// BLITZ DS's frame-rate guard (ds_view.cpp hold_frame_rate) doesn't count these seconds: a load's stall isn't the game being
+// too slow (marks and loads stepped a Surface Duo down to 2x without antialiasing, 2026-11-27).
+// A save or load asked for and not done yet (the dev kit's HOLD lets the game run until it is).
+extern "C" int blitz_savestate_busy(void) { return request.load() != 0 ? 1 : 0; }
+
+extern "C" int blitz_savestate_settling(void) {
+    const uint64_t t = loaded_at_ms.load();
+    // Settings' hold stops the game too: not the game being slow either.
+    return warm_from_ms.load() != 0 || (t != 0 && now_ms() - t < 10000) || blitz_settings_hold_settling() ? 1 : 0;
+}
 
 // op 1 saves, 2 loads, in the current slot.
 extern "C" void blitz_savestate_request(int op) {
     int pending = request.load();
     if ((pending & 0xF) != 0 && (pending >> 4) == 0) return;  // Save & Quit or Resume is waiting: it goes first
     request = op | (current_slot.load() << 4);
-    if (op == 2) blitz::post_status_held("Loading: a few seconds...");
+    if (op == 2) say_held("Loading: a few seconds...");
+}
+
+// A test mark: op 1 saves, 2 loads savestates/mark-<name>.state (the live command MARK save|load <name>).
+extern "C" void blitz_savestate_mark(int op, const char* name) {
+    if (name == nullptr || name[0] == 0) return;
+    std::string clean;
+    for (const char* c = name; *c && clean.size() < 40; c++) clean += (std::isalnum((unsigned char)*c) || *c == '-' || *c == '_') ? *c : '_';
+    int pending = request.load();
+    if ((pending & 0xF) != 0 && (pending >> 4) == 0) return;
+    const int slot = mark_slot(clean);
+    set_mark_status(slot, 0);
+    cancel_slot = -1;
+    request = op | (slot << 4);
+    fprintf(stderr, "[savestate] mark %s: %s\n", op == 1 ? "save" : "load", clean.c_str());
+}
+
+// How the mark's last save or load went: 0 not done yet (or never asked), 1 saved, 2 loaded, -1 refused or cancelled.
+extern "C" int blitz_savestate_mark_status(const char* name) {
+    if (name == nullptr) return -1;
+    const int slot = mark_slot(name);
+    std::lock_guard lock{mark_mutex};
+    auto it = mark_status.find(slot);
+    return it == mark_status.end() ? 0 : it->second;
+}
+
+// Drops the mark's save or load if it hasn't happened yet: the tick clears it (before any wait of its own), or it's done
+// already. Settings' hold uses it so a moment it couldn't save or load in time never lands later, in the middle of play.
+extern "C" void blitz_savestate_mark_cancel(const char* name) {
+    if (name == nullptr) return;
+    const int slot = mark_slot(name);
+    int pending = request.load();
+    if ((pending >> 4) != slot) return;
+    cancel_slot = slot;  // the tick forgets its waiting on it too
+    if (request.compare_exchange_strong(pending, 0)) {
+        set_mark_status(slot, -1);
+        fprintf(stderr, "[savestate] mark %s: cancelled\n", name);
+    }
 }
 
 // The next or previous slot (F6, or R3 + D-pad); a toast says what it holds.
@@ -1532,7 +1652,7 @@ extern "C" void blitz_savestate_slot_step(int delta) {
         what = "saved " + std::string(month) + " " + std::to_string(tm.tm_mday) + ", " +
                std::to_string(tm.tm_hour % 12 == 0 ? 12 : tm.tm_hour % 12) + ":" + minute_ampm;
     }
-    blitz::post_status((slot == auto_slot ? std::string("Auto slot") : "Save slot " + std::to_string(slot)) + " (" + what + ")");
+    say((slot == auto_slot ? std::string("Auto slot") : "Save slot " + std::to_string(slot)) + " (" + what + ")");
 }
 
 namespace blitz {
@@ -1555,16 +1675,34 @@ extern "C" void blitz_app_background(void) {
         return;
     }
     // The game stuck (no frame for 2 s): the Auto slot would wait on its thread for ever, so the freeze rescue instead, here
-    // and now, before the app is suspended (the team's iPhone, 2026-11-16).
-    if (frames_away.load() >= 2.0 && !blitz::replay_is_open()) {
+    // and now, before the app is suspended (the team's iPhone, 2026-11-16). Not a load's stall (reading, restoring, warming up):
+    // the load holds threads_mutex and has just emptied the Redo ring, so a rescue would only wait and keep nothing.
+    const bool loading = (request.load() & 0xF) == 2 || blitz_savestate_settling() != 0;
+    if (frames_away.load() >= 2.0 && !blitz::replay_is_open() && !loading) {
         fprintf(stderr, "[background] mid-game, the game stuck (no frame for %.0f s): the freeze rescue instead of the Auto slot\n", frames_away.load());
+#if defined(__ANDROID__)
+        // Android: this is the activity's onPause on its UI thread (nativeAppBackground), or SDL's event inside SDL's event-watch
+        // lock, which every touch and key from that thread waits on. The rescue waits up to 2 s for threads_mutex and writes
+        // 8 MB: on a thread of its own, as rescue_watch's, so Android never sees the app stop responding. Android doesn't
+        // suspend the process as it pauses, as iOS does.
+        try {
+            std::thread(rescue_now).detach();
+        } catch (...) {
+            rescue_now();
+        }
+#else
         rescue_now();
+#endif
         return;
     }
+    if (loading && frames_away.load() >= 2.0) fprintf(stderr, "[background] mid-game, a state loading (no frame for %.0f s): paused, then the Auto slot, once it's in\n", frames_away.load());
     if (blitz_play_mode() == 2 && !blitz::replay_pause_menu.load()) blitz::ds_press(0x1000, 6);  // Start: the pause menu
     pause_then_save = 1;
     fprintf(stderr, "[background] mid-game: paused, then the Auto slot\n");
 }
+
+// The app is in the background (Settings' hold lets the game go, so the Auto slot can be saved).
+extern "C" int blitz_app_in_background(void) { return in_background.load() ? 1 : 0; }
 
 extern "C" void blitz_app_foreground(void) {
     if (!in_background.exchange(false)) return;
@@ -1606,7 +1744,7 @@ extern "C" void blitz_savestate_tick(uint8_t* rdram, recomp_context* ctx) {
     if (uint64_t t0 = warm_from_ms.load(); t0 != 0 && now_ms() - t0 > 1500 && (blitz::fps_last_second() >= 20.0f || now_ms() - t0 > 45000)) {
         warm_from_ms = 0;
         blitz::release_status();
-        blitz::post_status("Ready");
+        say("Ready");
     }
     // Gone to the background mid-game: the pause menu first (it was pressed for), then the Auto slot.
     if (int w = pause_then_save.load(); w > 0) {
@@ -1618,6 +1756,16 @@ extern "C" void blitz_savestate_tick(uint8_t* rdram, recomp_context* ctx) {
         }
         else pause_then_save = w + 1;
         req = request.load();
+    }
+    // A mark's request cancelled (blitz_savestate_mark_cancel): its waiting is forgotten, and it's dropped if it's still here.
+    if (int cancelled = cancel_slot.exchange(-1); cancelled >= 0) {
+        waited = 0;
+        wait_tally.clear();
+        if ((req >> 4) == cancelled && (req & 0xF) != 0) {
+            int expected = req;
+            if (request.compare_exchange_strong(expected, 0)) set_mark_status(cancelled, -1);
+            req = request.load();
+        }
     }
     int op = req & 0xF, slot = req >> 4;
     // Clears the request handled here only: one made meanwhile (e.g. Save & Quit) stays for the next tick.
@@ -1637,7 +1785,7 @@ extern "C" void blitz_savestate_tick(uint8_t* rdram, recomp_context* ctx) {
             std::string err = read_file(loaded, slot);
             if (!err.empty()) {
                 blitz::release_status();
-                blitz::post_status(err);
+                say(err);
                 clear_request();
                 if (slot == 0) guard_failed = true;  // nothing restored: the resume guard comes off (guard_tick)
                 finish(false, slot);
@@ -1650,9 +1798,24 @@ extern "C" void blitz_savestate_tick(uint8_t* rdram, recomp_context* ctx) {
             for (const auto& m : blitz::state_modules()) {
                 for (const auto& [name, blob] : snap.modules) {
                     std::string err = name == m.name && m.check ? m.check(blob) : "";
+                    if (!err.empty() && err[0] == '?') {  // a question: asked first (savestate_startup_prompt), unless answered
+                        const int asked = 2 | (slot << 4);
+                        if (slot == 0 || slot >= 100 || load_confirmed.exchange(0) == asked) continue;  // the quit save, test marks
+                        blitz::release_status();
+                        clear_request();
+                        waited = 0;
+                        wait_tally.clear();
+                        {
+                            std::lock_guard qlock{question_mutex};
+                            question_text = err.substr(1);
+                            question_request = asked;
+                        }
+                        finish(false, slot);
+                        return;
+                    }
                     if (!err.empty()) {
                         blitz::release_status();
-                        blitz::post_status(err);
+                        say(err);
                         clear_request();
                         waited = 0;
                         wait_tally.clear();
@@ -1668,21 +1831,25 @@ extern "C" void blitz_savestate_tick(uint8_t* rdram, recomp_context* ctx) {
             if (op == 1) {
                 take_snapshot(rdram, ctx, self);
                 snap.slot = slot;
-                std::thread([copy = snap, slot] {
+                set_mark_status(slot, 1);
+                if (memory_mark(slot)) finish(true, slot);  // kept in memory only (Settings' hold)
+                else std::thread([copy = snap, slot] {
                     std::string n = slot_name(slot);
                     bool written = write_file(copy, slot);
                     if (slot == 0 && written) {
                         std::ofstream(state_file(0).replace_extension(".txt")) << describe_game(copy) << "\n";
                         ps5_crumb("save & quit: quit.state written");
                     }
-                    else blitz::post_status(written ? n + ": state saved" : n + ": state saved, but not to a file");
+                    else say(written ? n + ": state saved" : n + ": state saved, but not to a file");
                     finish(written, slot);
                 }).detach();
             }
             else {
                 if (slot == 0) ps5_crumb("resume: restoring");
                 restore_snapshot(rdram, ctx, self, snap);
-                redo_ring.clear();  // another moment, maybe another game
+                set_mark_status(slot, 2);
+                const bool same_game = memory_mark(slot);  // Settings' hold: this game, a moment ago
+                if (!same_game) redo_ring.clear();  // another moment, maybe another game
                 if (slot == 0) {  // the game saved on quitting: used up, once its frames show (guard_tick)
                     ps5_crumb("resume: restored");
                     std::error_code ec;
@@ -1694,10 +1861,11 @@ extern "C" void blitz_savestate_tick(uint8_t* rdram, recomp_context* ctx) {
                     guard_restored = true;
                     snap.valid = false;
                     snap = Snapshot{};  // its 8 MB RDRAM copy too: nothing loads it again
-                    blitz::post_status_held("Game resumed: warming up, controls may lag for a moment");
+                    say_held("Game resumed: warming up, controls may lag for a moment");
                 }
-                else blitz::post_status_held(slot_name(slot) + ": state loaded, warming up for a moment");
-                warm_from_ms = now_ms();
+                else if (!same_game) say_held(slot_name(slot) + ": state loaded, warming up for a moment");
+                if (!same_game) warm_from_ms = now_ms();  // Settings' hold redraws behind the menu: no notice
+                loaded_at_ms = now_ms();
                 finish(true, slot);
             }
             if (waited > 0) fprintf(stderr, "[savestate]   (after waiting %d ticks%s%s)\n", waited, waited > 60 ? ": " : "", waited > 60 ? tally_text().c_str() : "");
@@ -1715,8 +1883,8 @@ extern "C" void blitz_savestate_tick(uint8_t* rdram, recomp_context* ctx) {
                 waiting = (bool)on_done;
             }
             blitz::release_status();
-            if (!waiting && r == season_screen && op == 1) blitz::post_status("Season screens can't be saved: save once the game starts");
-            else if (!waiting) blitz::post_status(std::string(op == 1 ? "Can't save a state here" : "Can't load the state here") + " (" + why + ")");
+            if (!waiting && r == season_screen && op == 1) say("Season screens can't be saved: save once the game starts");
+            else if (!waiting) say(std::string(op == 1 ? "Can't save a state here" : "Can't load the state here") + " (" + why + ")");
             clear_request();
             waited = 0;
             if (op == 2 && slot == 0) guard_failed = true;
@@ -1742,7 +1910,7 @@ extern "C" void blitz_savestate_tick(uint8_t* rdram, recomp_context* ctx) {
     // Redo Play (after any save/load request above).
     if (op == 0 && redo_request.load() && MEM_W(0, (gpr)(int32_t)0x802EA420) == 1) {
         if (step_ring.empty()) {
-            blitz::post_status("Nothing to go back to");
+            say("Nothing to go back to");
             redo_request = false;
         }
         else {
@@ -1751,19 +1919,19 @@ extern "C" void blitz_savestate_tick(uint8_t* rdram, recomp_context* ctx) {
             if (r == ok) {
                 restore_snapshot(rdram, ctx, self, step_ring.back());
                 step_ring.pop_back();
-                blitz::post_status("Back a step");
+                say("Back a step");
                 redo_request = false;
                 redo_wait = 0;
             }
             else if (++redo_wait >= 600) {
-                blitz::post_status("Can't go back here (" + why + ")");
+                say("Can't go back here (" + why + ")");
                 redo_request = false;
                 redo_wait = 0;
             }
         }
     }
     else if (op == 0 && redo_request.load() && MEM_W(0, (gpr)(int32_t)0x802EA420) != 2) {
-        blitz::post_status("Redo Play works during a game");
+        say("Redo Play works during a game");
         redo_request = false;
     }
     else if (op == 0 && redo_request.load()) {
@@ -1773,7 +1941,7 @@ extern "C" void blitz_savestate_tick(uint8_t* rdram, recomp_context* ctx) {
         // At (or before) play select with no play run since the newest snapshot: the play before.
         size_t back = (!play_ended_since && (on_select || !select_seen)) ? 2 : 1;
         if (n < back) {
-            blitz::post_status(n == 0 ? "Nothing to redo yet" : "No earlier play to redo");
+            say(n == 0 ? "Nothing to redo yet" : "No earlier play to redo");
             redo_request = false;
         }
         else {
@@ -1787,12 +1955,12 @@ extern "C" void blitz_savestate_tick(uint8_t* rdram, recomp_context* ctx) {
                 play_ended_since = false;
                 select_draws_at_newest = blitz_play_select_draws();
                 redo_capture = false;
-                blitz::post_status("Redo: " + what);
+                say("Redo: " + what);
                 redo_request = false;
                 redo_wait = 0;
             }
             else if (++redo_wait >= 600) {
-                blitz::post_status("Can't redo here (" + why + ")");
+                say("Can't redo here (" + why + ")");
                 redo_request = false;
                 redo_wait = 0;
             }
@@ -1837,6 +2005,12 @@ extern "C" void blitz_ss_note_destroy(int32_t) {}
 extern "C" void blitz_thread_created(uint8_t*, recomp_context*) {}
 extern "C" void blitz_savestate_request(int) {}  // F5/F7, R3 combos and the phone menu do nothing in a SAVESTATES=0 build
 extern "C" void blitz_savestate_slot_step(int) {}
+extern "C" void blitz_savestate_mark(int, const char*) {}
+extern "C" int blitz_savestate_settling(void) { return 0; }
+extern "C" int blitz_savestate_mark_status(const char*) { return -1; }  // no marks: Settings' hold doesn't redraw
+extern "C" int blitz_app_in_background(void) { return 0; }
+extern "C" void blitz_savestate_mark_cancel(const char*) {}
+extern "C" int blitz_savestate_busy(void) { return 0; }
 extern "C" void blitz_redo_play_top(uint8_t*) {}
 extern "C" void blitz_redo_play_ended(uint8_t*) {}
 extern "C" void blitz_redo_clear() {}

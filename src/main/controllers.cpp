@@ -37,6 +37,9 @@
 #include "recompui/config.h"
 #include "recompui/recompui.h"
 #include "ultramodern/ultramodern.hpp"
+#include "librecomp/game.hpp"
+#include <filesystem>
+#include <fstream>
 
 extern "C" void blitz_savestate_request(int op);  // savestate.cpp
 extern "C" void blitz_savestate_slot_step(int delta);
@@ -191,6 +194,121 @@ namespace {
     }
 
     // Open new controllers, drop removed ones. Main thread.
+    // Face buttons per controller model (team, 2026-11-27, a PlayStation-style pad that reports itself as a Switch Pro on
+    // the Surface Duo). Settings → Players → each card's "Buttons": Auto, PlayStation, Xbox or Switch, kept by the
+    // controller's SDL GUID in <app folder>/pad_layouts.txt. PlayStation and Xbox go by position: the bottom button is
+    // ×/A (hike, OK). Switch goes by the Nintendo letters: A, on the right, is hike and OK. Auto keeps what the pad
+    // reports, except that Settings → General → Button Icons set to PlayStation or Xbox makes any Nintendo-letter pad
+    // with no choice of its own go by position too. Done where the game reads its buttons (A with B, X with Y).
+    // Android reports a Switch-type pad by its letters (A on the right is SDL's south button: the team's Duo, 2026-11-27);
+    // the desktop's SDL, with button labels off (main.cpp), already by position.
+    std::map<std::string, int> layout_choice;   // GUID -> 0 Auto, 1 PlayStation, 2 Xbox, 3 Switch
+    bool layouts_loaded = false;
+
+    std::filesystem::path layouts_file() { return recomp::get_config_path() / "pad_layouts.txt"; }
+    void layouts_load() {
+        if (layouts_loaded) return;
+        layouts_loaded = true;
+        std::ifstream f(layouts_file());
+        std::string guid;
+        int v = 0;
+        while (f >> guid >> v) if (v >= 0 && v <= 3) layout_choice[guid] = v;
+    }
+    void layouts_save() {
+        std::ofstream f(layouts_file());
+        for (const auto& [guid, v] : layout_choice) if (v != 0) f << guid << " " << v << "\n";
+    }
+    std::string guid_of(SDL_GameController* c) {
+        char b[64] = {};
+        SDL_JoystickGetGUIDString(SDL_JoystickGetGUID(SDL_GameControllerGetJoystick(c)), b, sizeof b);
+        return b;
+    }
+    bool nintendo_letters(SDL_GameController* c) {
+        switch (SDL_GameControllerGetType(c)) {
+            case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO:
+#if SDL_VERSION_ATLEAST(2, 24, 0)
+            case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
+#endif
+                return true;
+            default: return false;
+        }
+    }
+    bool reports_by_letter(SDL_GameController* c) {
+#if defined(__ANDROID__)
+        return nintendo_letters(c);
+#else
+        return false;
+#endif
+    }
+    // The pads whose face buttons are read traded (A with B, X with Y). Rewriting the SDL mapping instead reported
+    // success on Android and changed nothing (the team's Duo, 2026-11-27), so it's done where the game reads its buttons.
+    // The app's menus, the replay screen and the rest read SDL's button events, not the game's reads: an event filter
+    // trades those too, before anything sees them, so the menus follow the same setting (team, 2026-11-27).
+    std::mutex swap_mutex;
+    std::set<SDL_GameController*> face_swapped;
+    std::set<SDL_JoystickID> face_swapped_ids;
+    bool face_swap(SDL_GameController* c) {
+        std::lock_guard lock{swap_mutex};
+        return face_swapped.count(c) != 0;
+    }
+    // In front of the filter already set (RT64's, which hands the app its events: replacing it lost Start and the menu,
+    // The team's Duo 2026-11-27), which then gets every event, traded or not.
+    SDL_EventFilter filter_before = nullptr;
+    void* filter_before_data = nullptr;
+    int face_filter(void*, SDL_Event* e) {
+        if ((e->type == SDL_CONTROLLERBUTTONDOWN || e->type == SDL_CONTROLLERBUTTONUP) && e->cbutton.button <= SDL_CONTROLLER_BUTTON_Y) {
+            std::lock_guard lock{swap_mutex};
+            if (face_swapped_ids.count(e->cbutton.which)) {
+                static const uint8_t other[4] = {SDL_CONTROLLER_BUTTON_B, SDL_CONTROLLER_BUTTON_A, SDL_CONTROLLER_BUTTON_Y, SDL_CONTROLLER_BUTTON_X};
+                e->cbutton.button = other[e->cbutton.button];
+            }
+        }
+        return filter_before != nullptr ? filter_before(filter_before_data, e) : 1;
+    }
+    SDL_GameControllerButton traded(SDL_GameControllerButton b) {
+        switch (b) {
+            case SDL_CONTROLLER_BUTTON_A: return SDL_CONTROLLER_BUTTON_B;
+            case SDL_CONTROLLER_BUTTON_B: return SDL_CONTROLLER_BUTTON_A;
+            case SDL_CONTROLLER_BUTTON_X: return SDL_CONTROLLER_BUTTON_Y;
+            case SDL_CONTROLLER_BUTTON_Y: return SDL_CONTROLLER_BUTTON_X;
+            default: return b;
+        }
+    }
+    // A pad's choice, applied if it changed. Main thread (reconcile).
+    bool apply_layout(SDL_GameController* c, const std::string& name) {  // true: its buttons go by the Nintendo letters
+        layouts_load();
+        const std::string guid = guid_of(c);
+        const int choice = layout_choice.count(guid) ? layout_choice[guid] : 0;
+        const int icons = blitz::button_icons();
+        const bool letters = reports_by_letter(c);
+        bool want_letters = choice == 3 ? true : (choice == 1 || choice == 2) ? false : (nintendo_letters(c) && (icons == 1 || icons == 2)) ? false : letters;
+        const bool swap = want_letters != letters;
+        static const bool filtering = [] {
+            if (!SDL_GetEventFilter(&filter_before, &filter_before_data)) filter_before = nullptr;
+            SDL_SetEventFilter(face_filter, nullptr);
+            return true;
+        }();
+        (void)filtering;
+        const SDL_JoystickID id = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(c));
+        {
+            std::lock_guard lock{swap_mutex};
+            if ((face_swapped.count(c) != 0) == swap) return want_letters;
+            if (swap) {
+                face_swapped.insert(c);
+                face_swapped_ids.insert(id);
+            }
+            else {
+                face_swapped.erase(c);
+                face_swapped_ids.erase(id);
+            }
+        }
+        static const char* names[4] = {"Auto", "PlayStation", "Xbox", "Switch"};
+        fprintf(stderr, "[pads] %s: face buttons %s (choice %s, icons %d, it reports by %s)\n", name.c_str(),
+                want_letters ? "by the Nintendo letters (A on the right is OK)" : "by position (the bottom one is OK)", names[choice], icons,
+                letters ? "letter" : "position");
+        return want_letters;
+    }
+
     void reconcile() {
         std::lock_guard lock{pads_mutex};
         for (auto it = pads.begin(); it != pads.end();) {
@@ -284,6 +402,14 @@ namespace {
                     default: break;
                 }
             }
+            if (first != nullptr) {
+                const bool by_letters = apply_layout(first->controller, first->name);
+                const std::string guid = guid_of(first->controller);
+                if (layout_choice.count(guid) && layout_choice[guid] != 0) fam = layout_choice[guid] - 1;  // its own choice's icons
+                // By the Nintendo letters, OK is A on the right: the Switch icons put A on the right too, which is the
+                // position the game asks for as B. The letter icons (A bottom, B right...) name what's printed (2026-11-27).
+                if (fam == 2 && by_letters) fam = 1;
+            }
             if (forced[port] != -2) fam = forced[port];
             port_family[port] = fam;
         }
@@ -363,6 +489,11 @@ namespace {
         Latch& l = latches[e->cbutton.which];
         if (e->type == SDL_CONTROLLERBUTTONUP) { l.held &= ~bit; return 0; }
         l.held |= bit;
+        if (e->cbutton.button <= SDL_CONTROLLER_BUTTON_Y) {  // the first face presses of a run, to check a pad's layout
+            static int said = 0;
+            static const char* sides[4] = {"bottom/A", "right/B", "left/X", "top/Y"};  // as read: after face_filter
+            if (said++ < 40) fprintf(stderr, "[pads] press: SDL %s (pad %d)\n", sides[e->cbutton.button], (int)e->cbutton.which);
+        }
         if (!(l.held & sticks & ~bit)) { l.kept |= bit; l.at[e->cbutton.button] = SDL_GetTicks64(); }
         return 0;
     }
@@ -389,7 +520,9 @@ namespace {
             if (f.input_id < 0 || f.input_id >= SDL_CONTROLLER_BUTTON_MAX) return 0.0f;
             SDL_GameControllerButton b = (SDL_GameControllerButton)f.input_id;
             if (held_upright) b = upright_button(b);
-            return (SDL_GameControllerGetButton(c, b) || (b < 32 && (reading_kept & (1u << b)))) ? 1.0f : 0.0f;
+            const SDL_GameControllerButton asked = b;  // the kept presses come from events, already traded (face_filter)
+            if (face_swap(c)) b = traded(b);
+            return (SDL_GameControllerGetButton(c, b) || (asked < 32 && (reading_kept & (1u << asked)))) ? 1.0f : 0.0f;
         }
         if (f.input_type == InputType::ControllerAnalog) return axis(c, f.input_id);
         return 0.0f;
@@ -579,7 +712,17 @@ namespace blitz {
                 fprintf(stderr, "[dev] fullscreen toggled\n");
                 continue;
             }
-            recomp::config::Config& c = recompui::config::get_config(tab);
+            // A tab or option that isn't there threw and ended the app (dev CONFIG controllers ..., 2026-11-27): say so.
+            recomp::config::Config* cp = nullptr;
+            try {
+                cp = &recompui::config::get_config(tab);
+                (void)cp->get_option_value(option);
+            }
+            catch (const std::exception& e) {
+                fprintf(stderr, "[dev] CONFIG %s %s: %s\n", tab.c_str(), option.c_str(), e.what());
+                continue;
+            }
+            recomp::config::Config& c = *cp;
             recomp::config::ConfigValueVariant v;
             // Stored as the option's own type (a double setting given "0" would throw in save_config).
             bool is_double = std::holds_alternative<double>(c.get_option_value(option));
@@ -587,6 +730,11 @@ namespace blitz {
             else if (is_double && !value.empty() && value.find_first_not_of("0123456789.-") == std::string::npos) v = std::stod(value);
             else if (!value.empty() && value.find_first_not_of("0123456789") == std::string::npos) v = (uint32_t)std::stoul(value);
             else v = value;
+            // A value of the wrong kind (an enum's name for its number) threw out of its change callback and ended the app.
+            if (v.index() != c.get_option_value(option).index()) {
+                fprintf(stderr, "[dev] %s.%s: '%s' isn't that option's kind of value (an enum takes its number)\n", tab.c_str(), option.c_str(), value.c_str());
+                continue;
+            }
             c.update_option_value(option, v);  // runs the option's change callbacks, like the page does
             c.save_config();
             fprintf(stderr, "[dev] %s.%s = %s\n", tab.c_str(), option.c_str(), value.c_str());
@@ -774,6 +922,38 @@ namespace blitz {
         if (out[0].empty()) out[0] = "Keyboard";
         else out[0] += " + Keyboard";
         return out;
+    }
+
+    // Settings → Players: a player's controller's "Buttons" choice, and the next one (UI thread; applied by reconcile).
+    std::string port_layout(int port) {
+        static const char* names[4] = {"Auto", "PlayStation", "Xbox", "Switch"};
+        std::lock_guard lock{pads_mutex};
+        for (const Pad& p : pads) {
+            if (p.port != port) continue;
+            layouts_load();
+            const std::string guid = guid_of(p.controller);
+            return names[layout_choice.count(guid) ? layout_choice[guid] : 0];
+        }
+        return "";
+    }
+    void port_layout_set(int port, int v) {  // the live command PADLAYOUT <player 1-4> <0-3>
+        std::lock_guard lock{pads_mutex};
+        for (const Pad& p : pads) {
+            if (p.port != port || v < 0 || v > 3) continue;
+            layouts_load();
+            layout_choice[guid_of(p.controller)] = v;
+            layouts_save();
+        }
+    }
+    void port_layout_next(int port) {
+        std::lock_guard lock{pads_mutex};
+        for (const Pad& p : pads) {
+            if (p.port != port) continue;
+            layouts_load();
+            int& v = layout_choice[guid_of(p.controller)];
+            v = (v + 1) % 4;
+            layouts_save();
+        }
     }
 
     // Rumble and flash the light bar white on the player's controller. UI thread.

@@ -1,7 +1,7 @@
 PY ?= python3
 VENV := .venv
 
-.PHONY: psp-recomp regress ios-classic ios-modern win win-classic win-modern ps5-classic ps5-modern bundle bundle-classic bundle-teamplus recomp-modern houston team-art app-modern env venv test test-adv test-pak rom-scan rom-import rom-verify syms recomp n64recomp rsp patches app dist notarize rom2026 syms2026 recomp2026 app2026 dist2026 logo27
+.PHONY: psp-recomp regress ios-classic ios-modern win win-classic win-modern ps5-classic ps5-modern bundle bundle-classic bundle-teamplus recomp-modern houston team-art app-modern env venv test test-adv test-pak test-sync test-cloud test-cloud-ask test-sync-worker test-play-art rom-scan rom-import rom-verify syms recomp n64recomp rsp patches app dist notarize rom2026 syms2026 recomp2026 app2026 dist2026 logo27
 
 env:            ## Check the toolchain
 	@./tools/check_env.sh
@@ -11,8 +11,18 @@ venv:           ## Python tools: ROM analysis (splat, spimdisasm), Pillow, dmgbu
 	$(VENV)/bin/pip install -q --upgrade pip
 	$(VENV)/bin/pip install -q -r requirements.txt
 
-test: test-adv test-pak
+test: test-adv test-pak test-screens test-sync test-cloud test-cloud-ask test-sync-worker
 	$(VENV)/bin/python -m unittest discover -s tests -v
+
+test-screens:   ## Unit tests for Settings → Two Screens' presets and Custom Layout (src/game/two_screens.h) against tall_view.cpp
+	@mkdir -p build/tests
+	clang++ -std=c++20 -O1 -g -Wall tests/two_screens_test.cpp -o build/tests/two_screens_test
+	build/tests/two_screens_test src/game/tall_view.cpp
+
+test-cloud-ask: ## Unit tests for "Playing on multiple devices?" (src/game/cloud_ask.h): first run, after updates, 3 in all, Don't Ask Again
+	@mkdir -p build/tests
+	clang++ -std=c++20 -O1 -g -Wall tests/cloud_ask_test.cpp -o build/tests/cloud_ask_test
+	build/tests/cloud_ask_test
 
 test-adv:       ## Unit tests for Advanced mode's league model (standings, tiebreakers, playoffs)
 	@mkdir -p build/tests
@@ -23,6 +33,40 @@ test-pak:       ## Unit tests for the Controller Pak stub guard and history (src
 	@mkdir -p build/tests
 	clang++ -std=c++20 -O1 -g -Wall tests/pak_guard_test.cpp src/game/pak_guard.cpp -o build/tests/pak_guard_test
 	build/tests/pak_guard_test $(PAK_GOOD) $(PAK_WIPED)
+
+test-sync:      ## Unit tests for Save Sync's bundle (src/game/save_sync_core.cpp): export, checks, conflicts, the staged apply
+	@mkdir -p build/tests/miniz
+	@printf '#define MINIZ_EXPORT\n' > build/tests/miniz/miniz_export.h
+	@for f in miniz miniz_tdef miniz_tinfl miniz_zip; do clang -c -O1 -w -Ibuild/tests/miniz lib/N64ModernRuntime/thirdparty/miniz/$$f.c -o build/tests/miniz/$$f.o || exit 1; done
+	clang++ -std=c++20 -O1 -g -Wall -isystem lib/N64ModernRuntime/thirdparty -isystem lib/N64ModernRuntime/thirdparty/miniz -isystem build/tests/miniz \
+		tests/save_sync_test.cpp src/game/save_sync_core.cpp src/game/pak_guard.cpp src/common/sha256.cpp build/tests/miniz/*.o -o build/tests/save_sync_test
+	build/tests/save_sync_test
+
+# Cloud Sync and Sync over Wi-Fi (docs/SAVE_SYNC.md §7): codes, keys, sealing, decisions, Wi-Fi on loopback, and two
+# app folders syncing through the Worker's own code on this computer (tools/save_sync_worker/test/local_server.mjs; node,
+# skipped without it). No Cloudflare account, nothing leaves the computer.
+test-cloud:     ## Unit tests for Cloud Sync and Sync over Wi-Fi, two "devices" through a local copy of the sync Worker
+	@mkdir -p build/tests/miniz
+	@printf '#define MINIZ_EXPORT\n' > build/tests/miniz/miniz_export.h
+	@for f in miniz miniz_tdef miniz_tinfl miniz_zip; do clang -c -O1 -w -Ibuild/tests/miniz lib/N64ModernRuntime/thirdparty/miniz/$$f.c -o build/tests/miniz/$$f.o || exit 1; done
+	clang -c -O2 -w third_party/monocypher/monocypher.c -o build/tests/monocypher.o
+	clang++ -std=c++20 -O1 -g -Wall -isystem lib/N64ModernRuntime/thirdparty -isystem lib/N64ModernRuntime/thirdparty/miniz -isystem build/tests/miniz -isystem third_party/monocypher \
+		tests/save_sync_cloud_test.cpp src/game/save_sync_cloud.cpp src/game/save_sync_core.cpp src/game/pak_guard.cpp src/common/sha256.cpp \
+		src/main/save_sync_wifi.cpp build/tests/monocypher.o build/tests/miniz/*.o -o build/tests/save_sync_cloud_test
+	@if command -v node > /dev/null; then \
+		L=build/tests/sync_server.log; PAIR_TRIES=40 node tools/save_sync_worker/test/local_server.mjs 0 > $$L 2>&1 & S=$$!; P=; \
+		for i in 1 2 3 4 5 6 7 8 9 10; do P=$$(sed -n 's/^listening //p' $$L); [ -n "$$P" ] && break; sleep 0.3; done; \
+		build/tests/save_sync_cloud_test $$P; rc=$$?; kill $$S; exit $$rc; \
+	else echo "test-cloud: no node, so the two-device part is skipped"; build/tests/save_sync_cloud_test; fi
+
+test-sync-worker: ## The save sync Worker's rules (tools/save_sync_worker): compare-and-set, size, rate, tokens, the 90-day sweep, against R2 in memory (node)
+	@if command -v node > /dev/null; then node tools/save_sync_worker/test/worker_test.mjs; else echo "test-sync-worker: no node: skipped"; fi
+
+test-play-art:  ## Play Art's route walker and display list (src/game/play_art_walk.h) over the ROM's 45 plays, against tools/analysis/play_routes.py
+	@mkdir -p build/tests
+	clang++ -std=c++20 -O1 -g -Wall tests/play_art_test.cpp -o build/tests/play_art_test
+	build/tests/play_art_test build/baserom.z64
+	$(PY) tests/test_play_art.py
 
 test-ps5-send:  ## Send to PS5 without a console (src/main/ps5_send.h): connect timeout, progress, manifest, whole sends to a local FTP server (pyftpdlib in .venv)
 	@mkdir -p build/tests
@@ -303,7 +347,16 @@ roster_snapshot = if [ -f build/blitz-rosters/manifest.json ]; then rm -rf $(1)/
 # and Add-Ons download the 2026 Season from it (season_pak.cpp). Without it the app offers the season from a file only.
 # $(call pak_server_file,<folder>)
 pak_server_file = if [ -s build/pak_server ]; then mkdir -p $(1)/paks && cp build/pak_server $(1)/paks/server; \
-	else echo "no build/pak_server: no season server in this build (Add-Ons still installs a .nbpak)"; fi
+	else echo "no build/pak_server: no season server in this build (Add-Ons still installs a .nbpak)"; fi; \
+	$(call save_sync_server_file,$(1))
+# Cloud Sync's server (tools/save_sync_worker; docs/SAVE_SYNC.md §7): its address from build/save_sync_server (one line,
+# kept out of the source like build/pak_server) into Resources/sync/server, in public and private builds alike since
+# 1.0.5 (CMakeLists.txt BLITZ_SAVE_SYNC_NET; the public Worker's address ships in the app, as the season server's does).
+# Without the file, Settings → Saves has no Cloud Sync (Sync over Wi-Fi needs no server); a release refuses to go
+# without it (tools/release/make_release.sh).
+save_sync_server_file = rm -f $(1)/sync/server; \
+	if [ -s build/save_sync_server ]; then mkdir -p $(1)/sync && cp build/save_sync_server $(1)/sync/server; \
+	else echo "no build/save_sync_server: no Cloud Sync in this build (tools/save_sync_worker/DEPLOY.md)"; fi
 
 # Modern's content (the engine's houston files; art, uniforms and announcer from <app folder>; the roster snapshot)
 # into a built app folder: $(call modern_content,<folder>)

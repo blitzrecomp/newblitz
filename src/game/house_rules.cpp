@@ -302,6 +302,7 @@ namespace {
 namespace blitz {
     void add_cpu_rules(recomp::config::Config& c);                // cpu_smart.cpp: the CPU section
     void add_receiver_option(recomp::config::Config& c);          // receiver_targets.cpp: Receiver Buttons
+    void add_play_art_option(recomp::config::Config& c);          // play_art.cpp: Play Art
 #if BLITZ_MODERN
     void add_crew_option(recomp::config::Config& c);              // crew.cpp: Pick Your Crew
 #endif
@@ -331,6 +332,7 @@ namespace blitz {
                           "clash). Your team re-dresses on the spot.",
                           true);
         blitz::add_receiver_option(c);
+        blitz::add_play_art_option(c);
 #if BLITZ_MODERN
         c.add_enum_option("cpu_uniforms", "Unpicked Uniforms",
                           "What a team wears when nobody picks with △ (the CPU's team, Season games, or yours if you "

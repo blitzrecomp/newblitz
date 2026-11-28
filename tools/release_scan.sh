@@ -13,8 +13,9 @@
 #     tools/make_public_tree.sh does; the list itself never ships);
 #   - licensed content that only the 2026 Season pak may carry ("Houston Texans");
 #   - the private addresses and keys in build/ (live rosters, the logs and remote-testing mailbox, install links, the
-#     PSP keys, the season server's upload keys): read from those files at scan time and never printed. Only the season
-#     server's own address (build/pak_server) may appear, and no other *.workers.dev host at all.
+#     PSP keys, the season server's upload keys): read from those files at scan time and never printed. Only the public
+#     servers' own addresses may appear (the season server's, build/pak_server, and since 1.0.5 Cloud Sync's,
+#     build/save_sync_server: both ship in the app), and no other *.workers.dev host at all.
 # Plus files a public build must not hold: a logs/remote address (assets/res/logs_hub), live-rosters secrets
 # (rosters/token|hub|repo), a provisioning profile, the team-signed iPhone kit (NewBlitz.app.zip), the 2026 roster pack
 # or Houston; an app bundle signed for a team; and a tar entry owned by this user.
@@ -130,7 +131,7 @@ while IFS= read -r -d '' app; do
 done < <(find "$WORK"/in.* -type d -name '*.app' -print0)
 
 # The search: every file's bytes, each word in ASCII and UTF-16LE, case-insensitively; the secrets from build/ files;
-# any *.workers.dev host but the season server's.
+# any *.workers.dev host but the public servers'.
 python3 -I - "$WORK" "$PAT" "$ROOT/build" ${BLITZ_SECRETS_DIR:-} <<'EOF' || echo hit >> "$WORK/hits"
 import os, re, sys
 work, patfile, secret_dirs = sys.argv[1], sys.argv[2], sys.argv[3:]
@@ -144,14 +145,20 @@ def host(u):
     m = re.match(r"https?://([^/:]+)", u)
     return m.group(1).lower() if m else ""
 
-allowed_host = ""
+# The public servers, whose addresses ship in the app: the season server (build/pak_server) and, since 1.0.5, Cloud
+# Sync's (build/save_sync_server; docs/SAVE_SYNC.md §7).
+PUBLIC_SERVERS = ["pak_server", "save_sync_server"]
+allowed_hosts = set()
 for d in secret_dirs:
-    try:
-        allowed_host = allowed_host or host(open(os.path.join(d, "pak_server")).read().strip())
-    except OSError:
-        pass
-# Private files in build/: every value in them (KEY=VALUE lines: the value), plus a URL's host unless it's the season
-# server's. public_author (the public identity) and pak_server (the one allowed address) aren't secrets.
+    for name in PUBLIC_SERVERS:
+        try:
+            h = host(open(os.path.join(d, name)).read().strip())
+        except OSError:
+            continue
+        if h:
+            allowed_hosts.add(h)
+# Private files in build/: every value in them (KEY=VALUE lines: the value), plus a URL's host unless it's a public
+# server's. public_author (the public identity) and the public servers' addresses aren't secrets.
 SECRET_FILES = ["rosters_token", "rosters_hub", "rosters_repo", "blitz_logs_hub", "android_install_link",
                 "android_short_link", "ios_install_link", "psp_key", "psp_cmd_key", "pak_upload_secret", "pak_hub_key"]
 for d in secret_dirs:
@@ -170,7 +177,7 @@ for d in secret_dirs:
                 if len(v) >= 8:
                     pats.append(("secret from build/" + name, v.rstrip("/").lower().encode()))
                     h = host(v)
-                    if h and h != allowed_host:
+                    if h and h not in allowed_hosts:
                         pats.append(("private host from build/" + name, h.encode()))
 # Each word's UTF-16LE form too.
 pats += [(l + " (UTF-16)", w.decode().encode("utf-16-le")) for l, w in list(pats) if w.isascii()]
@@ -194,8 +201,8 @@ for top, _, files in (w for r in roots for w in os.walk(r)):
                 print(f"{rel}: {label}")
                 hits += 1
         for h in set(workers.findall(data)):
-            if h.decode() != allowed_host:
-                print(f"{rel}: a workers.dev host other than the season server's")
+            if h.decode() not in allowed_hosts:
+                print(f"{rel}: a workers.dev host other than the public servers'")
                 hits += 1
                 break
 sys.exit(1 if hits else 0)

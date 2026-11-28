@@ -12,6 +12,10 @@
 //   Setup: Recommended, or Customize (Settings opens on Rules; setup goes on when it closes).
 //   D. Updates and reports (a device with internet: this computer's own play, a phone): two check boxes, roster and
 //      season updates (ticked) and crash reports (not ticked; crash_report.cpp).
+//   E. Playing on multiple devices? Turn on Cloud Sync? (the same paths as D, in builds with Cloud Sync, while it's off):
+//      Yes opens Cloud Sync's screen (save_sync.cpp: Turn On, or Join with a 6-digit number) and setup goes on when it
+//      closes; No asks again after a later update; Don't Ask Again never. Also asked on its own at the first start after
+//      an update, on the launcher before the game starts (never over a game), up to 3 times after updates, setup's ask besides (src/game/cloud_ask.h).
 //   Then the path's last step: Play (the game starts); the Android or iPhone file (device_send.cpp) and how to install
 //   it; the PS5's address, the send and "Sent"; or the Export screen (export_screen.cpp) and "Your ROM is saved".
 // Phones never see A: B, C, Setup, D, Play. A phone set up from a computer (its builder_done) asks D only.
@@ -56,6 +60,7 @@
 #include "util/file.h"
 #include "firstrun_screen.h"
 #include "os_shell.h"
+#include "../game/cloud_ask.h"
 
 namespace blitz {
     void export_screen_open_for_setup(const std::string& lead, std::function<void()> back, std::function<void()> exported);  // export_screen.cpp
@@ -95,6 +100,13 @@ namespace blitz {
     void reset_data_update();
     void pak_backups_open();    // pak_backups.cpp: Settings → General → Controller Pak Backups
     void pak_backups_update();
+    void save_sync_open();      // save_sync.cpp: Settings → General → Save Sync
+    void save_sync_update();
+    void save_sync_open_file(const std::filesystem::path& path);
+    void save_sync_open_cloud();       // save_sync.cpp: Cloud Sync's own screen (the multiple-devices question's Yes)
+    bool save_sync_cloud_available();  // this build has Cloud Sync and its server's address
+    bool save_sync_cloud_on();
+    bool save_sync_showing();          // a Saves screen is up
     extern std::atomic<int> stored_rom_changes;  // known_roms.cpp
     std::string stored_rom_display_name();
 }
@@ -118,12 +130,12 @@ namespace {
     enum Step {
         Idle, Where, Qr, Rom, RomBad, Season, Downloading, SeasonFailed, Setup, CustomizeWait, Updates, ReportView,
         Device, Android, Iphone, Sending, SendFailed, InstallSteps, Ps5, Sent, Export, ExportWait, ExportDone,
-        LeaveGame, StepCount
+        LeaveGame, Cloud, CloudWait, StepCount
     };
     const char* step_names[StepCount] = {
         "idle", "where", "qr", "rom", "rom-bad", "season", "season-download", "season-failed", "setup", "customize",
         "updates", "report-view", "device", "android", "iphone", "sending", "send-failed", "install-steps", "ps5",
-        "sent", "export", "export-wait", "export-done", "leave-game"};
+        "sent", "export", "export-wait", "export-done", "leave-game", "cloud", "cloud-wait"};
 
     // Where the player wants to play (A), and on the phone path, which phone and how.
     enum Where { Here, Phone, Ps5Target, ExportTarget };
@@ -141,7 +153,8 @@ namespace {
         int rom_tries = 0;         // wrong ROMs in a row
         std::string rom_problem;
         bool rom_confirmed = false;  // "Use It" on the saved ROM
-        bool rom_shown = false, season_shown = false, updates_shown = false;
+        bool rom_shown = false, season_shown = false, updates_shown = false, cloud_shown = false;
+        bool after_setup = false;  // welcomed already, and only D or E to ask (a device set up from a computer, an update)
         bool rosters = true, reports = false;  // D's boxes, kept while going back and forth
         bool updates_read = false;             // ... read from the settings the first time D shows
         std::string ps5_ip;
@@ -268,12 +281,76 @@ namespace {
 
     void log_state(bool checked) {
         std::time_t t = rom_time();
-        log("state welcomed=%d rom=%s romsaved=%s pak=%d season_asked=%d updates_asked=%d builder_done=%d",
+        log("state welcomed=%d rom=%s romsaved=%s pak=%d season_asked=%d updates_asked=%d builder_done=%d cloud_asked=%d",
             welcomed() ? 1 : 0, rom_state(checked), t ? date_text(t, "%Y-%m-%d").c_str() : "", blitz::season_content() ? 1 : 0,
-            flag("setup_season_asked") ? 1 : 0, flag("setup_updates_asked") ? 1 : 0, builder_done_at_start ? 1 : 0);
+            flag("setup_season_asked") ? 1 : 0, flag("setup_updates_asked") ? 1 : 0, builder_done_at_start ? 1 : 0,
+            (int)std::get<double>(general().get_option_value("cloud_ask_count")));
     }
 
     bool is_ps5() { return blitz::platform::name == std::string_view("PS5"); }
+
+    // ---- E: "Playing on multiple devices?" (src/game/cloud_ask.h has the rule) --------------------------------------
+
+    namespace ca = blitz::cloud_ask;
+    const std::string app_version = BLITZ_VERSION;  // CMakeLists.txt: a release's version (rebuilds of one aren't updates)
+
+    ca::Record cloud_record() {
+        ca::Record r;
+        r.asked = (int)std::get<double>(general().get_option_value("cloud_ask_count"));
+        r.never = flag("cloud_ask_never");
+        r.version = std::get<std::string>(general().get_option_value("cloud_ask_version"));
+        return r;
+    }
+
+    int cloud_moment_cached = -1;  // worked out once (Cloud Sync's state file is read), again after each change
+    bool cloud_moment_welcomed = false;  // ... and again when setup finishes (or a computer's builder_done marks it done)
+
+    void cloud_record_save(const ca::Record& r) {
+        general().update_option_value("cloud_ask_count", (double)r.asked);
+        general().update_option_value("cloud_ask_never", r.never);
+        general().update_option_value("cloud_ask_version", r.version);
+        general().save_config();
+        cloud_moment_cached = -1;
+    }
+
+    ca::Moment cloud_moment() {
+        if (cloud_moment_cached < 0 || cloud_moment_welcomed != welcomed()) {
+            cloud_moment_welcomed = welcomed();
+            ca::Record r = cloud_record();
+            // Not asked on a PS5 (team, 2026-11-27: a phone might be the main device, the PS5 isn't); Cloud Sync is still in
+            // its Settings → Saves.
+#if defined(BLITZ_PLATFORM_PS5)
+            bool available = false;
+#else
+            bool available = blitz::save_sync_cloud_available();
+#endif
+            bool on = available && blitz::save_sync_cloud_on();
+            ca::Moment m = ca::due(r, available, on, !welcomed(), app_version);
+            // Set up, and not asked at this start (Cloud Sync on, or not in this build): this version counts as seen, so
+            // turning Cloud Sync off later asks at the next update, not at the next start.
+            if (m == ca::Moment::None && welcomed() && !r.never && r.version != app_version) {
+                ca::passed(r, app_version);
+                general().update_option_value("cloud_ask_version", r.version);
+                general().save_config();
+            }
+            cloud_moment_cached = (int)m;
+            log("cloud ask=%s asked=%d never=%d at=%s version=%s available=%d on=%d",
+                m == ca::Moment::FirstRun ? "first-run" : m == ca::Moment::Update ? "update" : "no", r.asked, r.never ? 1 : 0,
+                r.version.empty() ? "-" : r.version.c_str(), app_version.c_str(), available ? 1 : 0, on ? 1 : 0);
+        }
+        return (ca::Moment)cloud_moment_cached;
+    }
+
+    // Set up already, and the question is due (the first start after an update): the launcher shows, for it alone.
+    bool cloud_update_due() { return welcomed() && cloud_moment() == ca::Moment::Update; }
+
+    void cloud_answer(ca::Answer a) {
+        ca::Record r = cloud_record();
+        ca::answered(r, a, app_version, !welcomed());  // in setup: not one of the 3
+        cloud_record_save(r);
+        log("cloud answer=%s asked=%d never=%d", a == ca::Answer::Yes ? "yes" : a == ca::Answer::Never ? "never" : "not-now",
+            r.asked, r.never ? 1 : 0);
+    }
 
     // A phone set up from a computer (builder_done) still asks D once: the computer never answers it for a device.
     bool device_asks_updates() { return flag("setup_ask_updates") && !flag("setup_updates_asked"); }
@@ -281,11 +358,12 @@ namespace {
     // Whether setup should be up, from the state alone (no latch: a missed tick or a ROM that arrives late can't lose
     // it). reason: why not, or why.
     bool needed(const char*& reason) {
-        if (is_ps5()) { reason = "ps5"; return false; }
+        // The PS5 is set up from a computer; after an update it asks E too (it has Cloud Sync), once it has its ROM.
+        if (is_ps5() && !(welcomed() && rom_valid() && cloud_update_due())) { reason = "ps5"; return false; }
         if (autostarted) { reason = "autostart"; return false; }
         if (ultramodern::is_game_started()) { reason = "game"; return false; }
-        if (welcomed() && !device_asks_updates()) { reason = builder_done_at_start ? "builder_done" : "welcomed"; return false; }
-        reason = welcomed() ? "updates-unasked" : "not-welcomed";
+        if (welcomed() && !device_asks_updates() && !cloud_update_due()) { reason = builder_done_at_start ? "builder_done" : "welcomed"; return false; }
+        reason = !welcomed() ? "not-welcomed" : device_asks_updates() ? "updates-unasked" : "cloud-ask";
         return true;
     }
 
@@ -323,12 +401,15 @@ namespace {
     // its own), the PS5 or an N64.
     bool updates_on_path() { return st.where == Here && !st.no_camera; }
     bool updates_needed() { return !flag("setup_updates_asked"); }
+    // E: on D's paths (where this device plays), while it's due (cloud_ask.h).
+    bool cloud_needed() { return cloud_moment() != ca::Moment::None; }
 
     // The screens of the current path, in order (the step count, and what comes next).
     std::vector<int> plan() {
         std::vector<int> p;
-        if (welcomed() && device_asks_updates() && !st.builder) {  // set up from a computer: D only
-            p.push_back(Updates);
+        if (st.after_setup) {  // set up from a computer: D (and E); after an update: E only
+            if (device_asks_updates() || st.updates_shown) p.push_back(Updates);
+            if (cloud_needed() || st.cloud_shown) p.push_back(Cloud);
             return p;
         }
         if (blitz::platform::desktop) p.push_back(Where);
@@ -336,6 +417,7 @@ namespace {
         if (season_needed() || st.season_shown) p.push_back(Season);
         p.push_back(Setup);
         if (updates_on_path() && (updates_needed() || st.updates_shown)) p.push_back(Updates);
+        if (updates_on_path() && (cloud_needed() || st.cloud_shown)) p.push_back(Cloud);
         if (st.where == Phone) {
             p.push_back(Device);
             p.push_back(st.phone == AndroidUsb || st.phone == AndroidFile ? Android : Iphone);
@@ -359,6 +441,7 @@ namespace {
             case Downloading: case SeasonFailed: return Season;
             case CustomizeWait: return Setup;
             case ReportView: return Updates;
+            case CloudWait: return Cloud;
             case Sending: case SendFailed: return st.where == Ps5Target ? Ps5 : st.phone == AndroidUsb || st.phone == AndroidFile ? Android : Iphone;
             case ExportWait: return Export;
             default: return s;
@@ -368,6 +451,8 @@ namespace {
     std::string eyebrow() {
         std::vector<int> p = plan();
         auto it = std::find(p.begin(), p.end(), step_of(st.step));
+        // E on its own after an update isn't setup: no step count.
+        if (st.after_setup && p.size() == 1 && step_of(st.step) == Cloud) return "CLOUD SYNC";
         std::string head = st.builder ? "BLITZ BUILDER" : "SETUP";
         // A, the first screen: how many steps follow depends on its answer (a PS5 has its own), so no count there.
         if (it == p.end() || step_of(st.step) == Where) return head;
@@ -436,6 +521,7 @@ namespace {
 
     void do_exit() {
         log("abandoned at=%s", step_names[st.step]);
+        if (st.step == Cloud) cloud_answer(ca::Answer::NotNow);  // Exit on E: asked again after a later update
         blitz::export_screen_close();
         blitz::firstrun_ui::hide();
         bool leave = st.export_started_game && ultramodern::is_game_started();  // as do_finish: not into the export's game
@@ -452,6 +538,13 @@ namespace {
     void do_finish(const char* target) {
         set_flag("welcomed", true);
         set_flag("setup_ask_updates", false);
+        // Finished without E (a path that doesn't play here, Cloud Sync on, or not in this build): this version counts as
+        // seen, so the next start isn't taken for an update.
+        if (ca::Record r = cloud_record(); r.version != app_version) {
+            ca::passed(r, app_version);
+            cloud_record_save(r);
+        }
+        cloud_moment_cached = -1;
         log("done target=%s welcomed=1 game=%s setup=%s", target, original_chosen() ? "original" : "new",
             st.customize ? "customize" : "recommended");
         blitz::firstrun_ui::hide();
@@ -780,6 +873,27 @@ namespace {
                 };
                 break;
             }
+            case Cloud:
+                st.cloud_shown = true;
+                // The owner's words (2026-11-27). Yes: Cloud Sync's screen, then setup goes on (CloudWait).
+                s = base("Playing on multiple devices?",
+                         "Turn on Cloud Sync?\n\nYou can turn it on later in Settings \xE2\x86\x92 Saves. It syncs your Controller "
+                         "Pak and season saves, not save states.");
+                s.actions = {
+                    act("Yes", "yes", [] {
+                        cloud_answer(ca::Answer::Yes);
+                        go(CloudWait);
+                    }),
+                    act("No", "no", [] {
+                        cloud_answer(ca::Answer::NotNow);
+                        next();
+                    }),
+                    act("Don't Ask Again", "never", [] {
+                        cloud_answer(ca::Answer::Never);
+                        next();
+                    }),
+                };
+                break;
             case ReportView: {
                 bool sent = false;
                 std::vector<std::string> blocks = blitz::crash_report_preview(sent);
@@ -1152,7 +1266,9 @@ namespace blitz {
         log("trigger=%s", trigger);
         abandoned = false;
         st = State{};
-        st.builder = welcomed() && !device_asks_updates();
+        cloud_moment_cached = -1;  // looked at afresh (Cloud Sync may have been turned on since)
+        st.builder = welcomed() && !device_asks_updates() && !cloud_update_due();
+        st.after_setup = welcomed() && !st.builder;
         setup_started();
         if (where >= 0) st.where = where;
         // Potato Mode with its ROM (BlitzRomFirst's screen was step 1): still a step of the plan, so the count goes on from
@@ -1211,7 +1327,8 @@ namespace blitz {
     }
 
     // Whether the launcher's Finish Setup row shows (and the launcher shows at all at start: config.cpp).
-    bool firstrun_unfinished() { return !welcomed() || device_asks_updates(); }
+    // Also while E is due after an update: this start opens on the launcher for it (config.cpp skip_launcher).
+    bool firstrun_unfinished() { return !welcomed() || device_asks_updates() || cloud_update_due(); }
 
     void firstrun_finish_setup_row() { firstrun_start("finish-setup-row"); }
 
@@ -1238,6 +1355,7 @@ namespace blitz {
     void builder_update() {
         blitz::reset_data_update();  // Reset Data and Restore a Backup's screens (reset_data.cpp)
         blitz::pak_backups_update();  // Controller Pak Backups' screens (pak_backups.cpp)
+        blitz::save_sync_update();    // Save Sync's screens (save_sync.cpp)
 #if defined(BLITZ_PLATFORM_PS5)
         ps5_no_rom::tick();  // no ROM yet: how to add one
 #endif
@@ -1245,7 +1363,12 @@ namespace blitz {
         // A ROM opened into the app from another (Files' Share → New Blitz): setup's ROM screen takes it as if Load ROM
         // had picked it and goes on; anywhere else it's stored as Settings → Change ROM would, with a toast.
         for (const fs::path& path : ios_take_opened_files()) {
-            if (st.step == Rom || st.step == RomBad) {
+            if (path.extension() == ".nbsave") {
+                // A saves file (Export My Saves on another device): Save Sync's import.
+                fprintf(stderr, "[sync] opened file %s from another app\n", path.filename().string().c_str());
+                blitz::save_sync_open_file(path);
+            }
+            else if (st.step == Rom || st.step == RomBad) {
                 took_rom(path);
                 fprintf(stderr, "[rom] opened file %s: %s (setup's ROM screen)\n", path.filename().string().c_str(),
                         rom_pick.load() == 1 ? "stored" : "not stored");
@@ -1299,6 +1422,14 @@ namespace blitz {
                     abandoned = true;
                 }
                 blitz::pak_backups_open();
+            }
+            else if (r == 11) {
+                if (running()) {
+                    log("abandoned at=%s for %s", step_names[st.step], "save-sync");
+                    st = State{};
+                    abandoned = true;
+                }
+                blitz::save_sync_open();
             }
             else if (r == 8 || r == 9) {
                 // Reset Data or Restore from Settings during setup (Customize has Settings open): setup steps aside, as
@@ -1394,6 +1525,16 @@ namespace blitz {
                 go(RomBad, st.step == Rom);
             }
         }
+        // E's Yes: Cloud Sync's screen is up; setup goes on when it closes.
+        if (st.step == CloudWait) {
+            static bool seen_open = false;
+            if (blitz::save_sync_showing()) seen_open = true;
+            else if (seen_open) {
+                seen_open = false;
+                st.step = Cloud;
+                next();
+            }
+        }
         // Customize: Settings is open on Rules; setup goes on when it closes.
         if (st.step == CustomizeWait) {
             static bool seen_open = false;
@@ -1441,6 +1582,13 @@ namespace blitz {
             blitz::firstrun_ui::hide();
             log("asked customize");
             open_settings("rules");
+            return;
+        }
+        if (st.step == CloudWait) {
+            if (!blitz::save_sync_showing()) {
+                log("asked cloud-sync screen");
+                blitz::save_sync_open_cloud();  // its screen replaces this one on the next tick
+            }
             return;
         }
         if (st.step == Idle) {

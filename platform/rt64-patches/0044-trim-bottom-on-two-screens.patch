@@ -1,0 +1,18 @@
+diff --git a/src/render/rt64_vi_renderer.cpp b/src/render/rt64_vi_renderer.cpp
+index 831dddf..8f50e67 100644
+--- a/src/render/rt64_vi_renderer.cpp
++++ b/src/render/rt64_vi_renderer.cpp
+@@ -128,6 +128,13 @@ namespace RT64 {
+             if (scissor.right >= int32_t(targetWidth) - 2) scissor.right = int32_t(targetWidth);
+         }
+ 
++        // The same at the bottom, for the picture over two screens: the game's last rows are its border colour too, ~10 px
++        // under a Surface Duo's lower screen, and they flickered (team, 2026-11-26). Every screen's part takes the same stretch
++        // from the picture's top, so the halves still meet at the hinge.
++        if ((trim > 0.0f) && p.part && !p.stored && (viewport.height > 8.0f * trim)) {
++            viewport.height += trim;
++        }
++
+         p.commandList->setViewports(viewport);
+         p.commandList->setScissors(scissor);
+ 

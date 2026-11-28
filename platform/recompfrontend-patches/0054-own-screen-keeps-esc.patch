@@ -1,0 +1,22 @@
+diff --git a/recompui/src/base/ui_state.cpp b/recompui/src/base/ui_state.cpp
+--- a/recompui/src/base/ui_state.cpp
++++ b/recompui/src/base/ui_state.cpp
+@@ -694,6 +694,7 @@
+ 
+ extern "C" { volatile int blitz_ds_panel_first = 0; }
+ extern "C" int blitz_hotkey_held(void);  // BlitzRecomp controllers.cpp: L3 or R3 held, whose Select is a screenshot
++extern "C" int blitz_own_screen_up(void);  // BlitzRecomp firstrun_screen.cpp: a setup or Saves screen is up (its Esc is Back)
+ namespace { Rml::Context* ds_context = nullptr; Rml::ElementDocument* ds_document = nullptr; }
+ namespace { Rml::Context* ds_icons_context = nullptr; Rml::ElementDocument* ds_icons_document = nullptr; }  // Game + Companion's icons
+ 
+@@ -988,7 +989,9 @@
+         }
+ 
+         // If the config menu isn't open and the game has been started and either the escape key or select button are pressed, open the config menu.
+-        if (!config_was_open && ultramodern::is_game_started()) {
++        // BlitzRecomp: not while one of the app's own screens is up over the game (Settings → Saves, Blitz Builder): there
++        // Esc and Select are that screen's Back (firstrun_screen.cpp), and Settings opening over it swallowed them.
++        if (!config_was_open && ultramodern::is_game_started() && !blitz_own_screen_up()) {
+             bool open_config = false;
+ 
+             switch (cur_event.type) {

@@ -97,6 +97,38 @@ func = "gfx_build_frame"
 before_vram = 0x8000F3D4
 text = "    if (blitz_force_color_clear()) ctx->r3 = 1;"
 
+# Players at the widescreen sides (src/game/widescreen.cpp, docs/notes/WIDESCREEN_CULLING.md). ovl_a 0x802FB6A8 is
+# the process that sets each player's on-screen bit (flags +0x1A4, bit 0x2) from the game's camera against the 4:3
+# edges. The bit also steers gameplay (off-screen defenders run faster), so it is left as the game computes it; these
+# hooks work out a wider answer beside it (s3 = the player; 0x802FB860 the depth test, f18/f10/f8 = x/y/depth, f2 the
+# |x| limit, f6 the |y| slope; 0x802FB918 the game's other reason to hide him; 0x802FB928 the join, s0 = player+0x758)
+# and hand it only to the player's draw (func_80255180) and his shadow (func_80255E58), where v1 = his flags and s0 =
+# him. A picture no wider than 4:3 gets the game's flags back unchanged.
+[[patches.hook]]
+func = "ovl_a_func_802FB6A8"
+before_vram = 0x802FB6A8
+text = "    blitz_ws_cull_begin();"
+[[patches.hook]]
+func = "ovl_a_func_802FB6A8"
+before_vram = 0x802FB860
+text = "    blitz_ws_cull_test(rdram, ctx);"
+[[patches.hook]]
+func = "ovl_a_func_802FB6A8"
+before_vram = 0x802FB918
+text = "    blitz_ws_cull_hidden(ctx);"
+[[patches.hook]]
+func = "ovl_a_func_802FB6A8"
+before_vram = 0x802FB928
+text = "    blitz_ws_cull_done(rdram, ctx);"
+[[patches.hook]]
+func = "func_80255180"
+before_vram = 0x802551B4
+text = "    ctx->r3 = (gpr)(int32_t)blitz_ws_draw_flags(rdram, (int32_t)ctx->r16, (uint32_t)ctx->r3);"
+[[patches.hook]]
+func = "func_80255E58"
+before_vram = 0x80255E88
+text = "    ctx->r3 = (gpr)(int32_t)blitz_ws_draw_flags(rdram, (int32_t)ctx->r16, (uint32_t)ctx->r3);"
+
 # Content packs (src/game/content_pack.cpp). At 0x80001748 dma_read has finished (both the loop exit
 # and the size-0 branch land here): s3 = ROM end, s2 = RDRAM end. When the transfer was ovl_b (ROM
 # ..0x129A90 -> RDRAM ..0x8033B5B0), its team table and rosters are fresh from ROM: apply the active

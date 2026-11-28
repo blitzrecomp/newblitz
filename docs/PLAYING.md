@@ -19,7 +19,7 @@ This guide is for people who have never set up an emulator, and for anyone who w
    - **Which Blitz?** **New Blitz** (today's 32 teams, rosters and uniforms) or **Original 1999** (NFL Blitz 2000 exactly as it shipped). Change it later in Settings → Season → Game.
    - **Set it up for you?** **Recommended** plays straight away; **Customize** opens Settings on the house rules (Receiver Buttons, the play clock, realism and the rest are all off until you turn them on).
    - **Where do you want to play?** (on a computer) **Here**, or **Somewhere else**: a **PS5** (etaHEN running; type its address), an **iPhone** (connected or paired with Xcode on this Mac) or an **Android** device (USB debugging on, adb), sent with your ROM and your Season and Rules settings; or **N64 or Emulator** for a ROM with your setup built in (Export ROM). Devices need an app built with the device kits (`make device-kits app-modern`). The iPhone app isn't among them unless the Mac app was built with `DEVICE_KITS_IOS=1` (it's signed for one developer's team): otherwise build and install it with your own Xcode, `make ios-modern` then `tools/ios/install.sh modern` (set `BLITZ_IOS_TEAM` to your team id), and Blitz Builder says so when you pick iPhone.
-4. From then on a computer opens on the launcher with **Play** ready, and a phone or the PS5 goes straight into the game. **Settings → General → Launcher at Start** changes that either way (it was Skip Launcher). The launcher's **Blitz Builder** asks again, say to make a ROM for an N64.
+4. From then on the app starts straight into the game, on a computer, a phone and the PS5 alike. **Settings → General → Main Menu** goes back to the launcher, and on a computer **Settings → General → Blitz Builder** asks again, say to make a ROM for an N64 (holding Shift as it opens shows the launcher too).
 
 **Hints.** The first time you reach each part of the game (the menus, team select, play select, offense, defense), a small TIP card shows what to press, in your own controller's buttons. Each shows once and never blocks a button. **Settings → General → Hints** turns them off; **Show Hints Again** brings them back.
 
@@ -34,7 +34,7 @@ Settings and Controller Pak saves are kept in your Library folder (`~/Library/Ap
 - **Each controller becomes the next free player (1-4).** The light bar shows which player you are: blue 1, red 2, green 3, yellow 4. **Settings → Players** shows who is who: **Identify** buzzes a controller, **Swap** trades two players' places, and **Make Player 1** swaps a controller into player 1, who drives the game's menus.
 - **Player 1 can also use the keyboard:** W A S D to move, Space to pass, Shift to jump, Q for turbo, Return for Start.
 - **In the game's own screens, each player sees their own controller's buttons:** PlayStation, Xbox or Switch. Any other controller, or an empty spot, shows PlayStation. The play-select help shows each player's column in their own buttons, and Controller Setup shows the controller you're setting up. Menu footers follow whoever pressed a button last.
-- **The app's menus (launcher, settings, prompts) follow player 1's controller** (PlayStation or Xbox letters). **Settings → General → Button Icons** can pick one style for everyone instead: PlayStation, Xbox, Switch or N64 (the game's original icons). This setting was reset to Each Player's Controller in the update that added it.
+- **The app's menus (launcher, settings, prompts) follow player 1's controller** (PlayStation or Xbox letters). **Settings → Controls → Button Icons** can pick one style for everyone instead: Each Player's (the default), PS, Xbox, Switch or N64 (the game's original icons). To set one controller on its own, **Settings → Players → Buttons** on that player: Auto, PlayStation, Xbox or Switch (for a pad that says it's a Switch controller but has PlayStation buttons).
 - **In the app's menus:** ✕ selects and ○ goes back (□ works too), L1 / R1 change tabs, and Create (Xbox: View) opens or closes settings. On a keyboard: Enter, Backspace, Page Up / Page Down and Esc.
 - **Nintendo controllers use the button positions, not the letters:** on a Switch Pro the bottom button (B) passes and the left one (Y) tackles, as on every other controller. To go by the letters instead, remap in Settings → Controls.
 
@@ -42,17 +42,17 @@ Default buttons: pass/change player = Cross (A), jump/tackle = Square (X), turbo
 
 ## Playing with friends
 
-For a party: **Settings → General → TV Mode** (full screen with a widescreen picture), **Settings → Players** for phone controllers (everyone scans the QR code), and **Rules → Quick Setup → Party** (infinite and faster turbo, late hits, a big football, field goal odds).
+For a party: **Settings → Graphics → TV Mode** (full screen with a widescreen picture), **Settings → Players** for phone controllers (everyone scans the QR code), and **Rules → Quick Setup → Party** (infinite and faster turbo, late hits, a big football, field goal odds).
 
 ### Tournaments
 
-**Settings → Bracket** sets up a bracket for 2 to 8 people:
-1. Under **Players**, type the names separated by commas (up to 9 letters each), e.g. `SAM, ALEX, JO, PAT`. Teams are picked before each game, so these are the people.
+**Settings → Teams**, under **BRACKET**, sets up a bracket for 2 to 8 people:
+1. Under **Player Names**, type the names separated by commas (up to 9 letters each), e.g. `SAM, ALEX, JO, PAT`. Teams are picked before each game, so these are the people.
 2. Choose **Each Round** (one game, or best of 3) and **Matchups** (random, or as typed: 1 v 2, 3 v 4, ...).
-3. Press **Create**.
+3. Press **Create Tournament**.
 4. Close Settings, open **Tournament** from the game's main menu, and choose **PLAY**. The bracket is already there, with no name entry.
 
-Party tournaments play the shortest quarters. The bracket is saved after every game (`tournament.bin` in the app folder) and comes back after a restart. **Show** (Show Standings) shows each player's record and points, and the champion. A tied game is played again.
+Party tournaments play the shortest quarters. The bracket is saved after every game (`tournament.bin` in the app folder) and comes back after a restart. **Show Standings** shows each player's record and points, and the champion. A tied game is played again.
 
 ## Phones as controllers
 
@@ -66,7 +66,7 @@ No controller for everyone? **Settings → Players → Phone Controllers → Tur
 ## On a TV
 
 - **Connect** with an HDMI cable, or mirror to an Apple TV with AirPlay (Control Center → Screen Mirroring).
-- **Settings → General → TV Mode** switches to full screen with a widescreen picture in one go.
+- **Settings → Graphics → TV Mode** switches to full screen with a widescreen picture in one go.
 - **Without TV Mode,** **L3 + R3** (both sticks pressed in) toggles full screen from the controller, and **F11** does it from the keyboard.
 - **Pair everyone's controllers first,** then hand them out. Settings → Players shows who is who.
 
@@ -74,16 +74,16 @@ No controller for everyone? **Settings → Players → Phone Controllers → Tur
 
 | Where | Setting | What it does |
 |---|---|---|
-| General | Skip Intro Screens | Gets you to Start in a few seconds |
-| General | Skip Rumble Pak Screen | Goes straight from controller select to team select |
-| General | Player 1 Rumble | Player 1's controller rumbles on hits (default on) |
-| General | Resume Interrupted Games (Experimental) | Off by default. Quitting mid-game asks whether to save the game, and after a crash the app offers to recover it; the next game between the same teams picks up from there |
+| Rules | Skip Intro Screens | Gets you to Start in a few seconds |
+| Rules | Skip Rumble Pak Screen | Goes straight from controller select to team select |
+| Controls | Player 1 Rumble | Player 1's controller rumbles on hits (default on) |
+| Saves | Resume Interrupted Games (Experimental) | Off by default. Quitting mid-game asks whether to save the game, and after a crash the app offers to recover it; the next game between the same teams picks up from there |
 | Rules | Choose CPU Opponent | Lets you pick who you play against in a 1-player game (the opponent list is marked 3, the other team's first player) |
 | Rules | Uniform Picker | On by default. At team select, △ (Y on Xbox; UNIFORM on a phone) cycles your team's uniform: Home, Away, or back to the game's choice; the player re-dresses and a toast says which. While choosing your CPU opponent it picks theirs. The other team adapts so the two don't clash |
 | Rules | Receiver Buttons | Off by default (Blitz Builder's Customize can turn it on). When your quarterback has the ball, a button icon floats over each receiver (left to right △, R1, ○; Y, RB, B on Xbox) and follows him on his route. Press one to throw to that receiver. Before the snap, hold L2 (Turbo) to see the icons. On a phone, small ← ↓ → buttons wrap around A while your quarterback has the ball, and the icons show the same arrows. ✕ still passes the usual way, and the right stick still works as the C buttons. The icons stay hidden on defense and when the CPU is at quarterback. Off puts the C buttons back as they were. On two screens, DS Screens' Stylus has them on for player 1 whatever this says |
 | Rules | Pick Your Crew (Modern Blitz) | On by default. After team select, pick who plays for your team: a QB, RB, WR and a FLEX from the skill players left, then **Pick Line** (three linemen), **Pick Defense** (three linemen, four behind them) and **Pick CPU** (their team the same way); ○ goes back a page, **Go Play** starts. Looks only: names, numbers, bodies and shades, not ratings. Picks are remembered per team; **This Week's** puts a page back to the Lineups setting's players |
 | Team select | Pro Bowl (Modern Blitz) | At team select press the game's **R** (R2 on most pads; the tip card draws yours): it picks the hovered team's stadium with the Pro Bowl star as your logo (the QB steps away, and the list shows your team code) and moves on. On Choose Opponent, R again makes the CPU a Pro Bowl crew. After team select: your **team code** (three letters, the scoreboard's; the first time, R asks for one on the keyboard; **Type One…** changes it), **uniforms** (2026, 1999 or Random: each player in his own team's, one crew in colour and the other in white), and your crew from every team's starter at each spot (Offense, Line, Defense; **Shuffle** deals a page again). The CPU's crew is dealt at random each game; **Pick CPU** changes it. In the game: a VS card, the stars at play select, codes on the scoreboard, quarter banners and line scores |
-| Everywhere | On-screen keyboard | Any text box (Settings → Bracket's Player Names, a Pro Bowl team code): press ✕ / A on it with a controller for a QWERTY keyboard (Shift, Space, Delete, Done; ○ cancels). A keyboard still types straight in |
+| Everywhere | On-screen keyboard | Any text box (Settings → Teams → Player Names, a Pro Bowl team code): press ✕ / A on it with a controller for a QWERTY keyboard (Shift, Space, Delete, Done; ○ cancels). A keyboard still types straight in |
 | Rules | Quick Setup | Original, Party or Tournament codes in one pick, plus any shared rules files (see below) |
 | Rules | The Blitz codes | Big Heads, Tiny Players, Infinite Turbo, weather, stadium: on for every game, no code entry needed |
 | Rules | Home Field | The home team plays on its real stadium's grass or turf, and a roofed stadium gets no rain or snow (on in Modern) |
@@ -126,7 +126,7 @@ second in, it closes the app and goes back to its menu, before the app hears of 
 - **The hotkey's other buttons:** **□ / ○** (or **D-pad left / right**) pick the slot, **△** (or **D-pad up**) is Redo Play,
   **Select** takes a screenshot, and on two screens **Start** switches them. While it's held the game gets none of these.
 - There are three slots, and a fourth, **Auto**, which the app fills itself when it goes to the background in the middle of a
-  game (a clamshell closed, another app opened on a phone). **F6** (**Shift+F6** goes back, or **hotkey + ○ / □**) picks one, and the note shows whether it's empty or when it was saved. Saving replaces what's in the current slot. Settings → General → Save State Buttons turns the controller buttons off.
+  game (a clamshell closed, another app opened on a phone). **F6** (**Shift+F6** goes back, or **hotkey + ○ / □**) picks one, and the note shows whether it's empty or when it was saved. Saving replaces what's in the current slot. Settings → Saves → Save State Buttons turns the controller buttons off.
 - A state only loads in the same version of the app that saved it. After an update, save a new one.
 - Loading puts everything the game keeps in memory back as it was, including its copy of your records and season. If the game saves to the Controller Pak after you load an old state, it saves that older copy. A 2026 Season you saved stays on the pak whatever the game writes, unless you save over that slot yourself, and Controller Pak Backups (below) has the pak from before any write.
 - At a few moments a state can't be taken, for example while the game is talking to the Controller Pak. The app waits up to ten seconds, then says so in a note.
@@ -138,7 +138,7 @@ Botched a kickoff, or want a do-over at a party? Hold the hotkey, **R3** (the ri
 - During a play, or while its result is on screen, it goes back to that play's play select.
 - At play select it goes back one play more, and each press goes back another, up to 8 plays. Potato Mode keeps the last play only, and the menus have no step-back there: their snapshots are too much for a 1 GB handheld.
 - Everything rewinds with it: score, clock, down and the stats.
-- Each new game starts fresh. Settings → General → Redo Play turns it off.
+- Each new game starts fresh. Settings → Rules → Redo Play turns it off.
 - **In the menus before a game** it goes back a step instead: picked the wrong team, or Arcade when you meant Season?
   Each press undoes one confirm (✕), back to the main menu if need be, with the cursor where it was. On a phone it's
   the UNDO button at the top right. The game's own □ BACK still works where it did, and at team select (where the game took □ as a pick) □ goes back a step too.
@@ -149,14 +149,20 @@ New Blitz keeps a dated copy of your Controller Pak (your seasons and records) e
 app opens: the last 20 changes, plus one a day for the last two weeks. They're in `pak_history`, next to the pak in
 `saves`.
 
-To put one back: Settings → General → **Controller Pak Backups**. Each copy shows when it was made and what it holds,
+To put one back: Settings → Saves → **Backups**. Each copy shows when it was made and what it holds,
 for example **Nov 26, 1:53 PM · LAR, week 6** for a 2026 Season, newest first (**Older** pages back). Pick one, then
 **Restore**. The pak you have now is kept as a copy first, so you can go back to it the same way. From the main menu
 it's done at once; during a game New Blitz restarts to do it (a phone or console closes: open it again).
 
+## Your saves on every device
+
+**Settings → Saves → Cloud Sync:** turn it on, then on your other device choose **Join** and type the 6-digit number the first one shows (it works once, for 2 minutes). Your Controller Pak and season saves go up after each save and come down when New Blitz starts; save states don't sync. They're encrypted before they leave the device, and there's no account. If a save doesn't carry on from yours, New Blitz shows both and asks, and whatever is replaced goes to **Backups** first. **Cloud Save Slots** keep three separate sets under one code. **Sync Now** does it at once.
+
+Without the cloud: **Sync over Wi-Fi** sends your saves to another device on the same network, and **Export / Import Save File** (Settings → Saves) makes a file you move yourself. On a PS5, Cloud Sync is the way.
+
 ## If something goes wrong
 
-- **A season or your records are gone from Load:** Settings → General → **Controller Pak Backups** (above) has the pak as
+- **A season or your records are gone from Load:** Settings → Saves → **Backups** (above) has the pak as
   it was before.
 - **The app closed by itself:** Settings → General → **Save Logs** zips `blitz.log` (what happened), the run before's, any crash reports and your settings into one file: in Downloads on a computer, in the app's folder on a phone (the Files app), in `/data/blitzrecomp` on the PS5. Please send it along with what you were doing.
 - **Something looks wrong on screen (flicker, garbage, a frozen picture):** press **Ctrl+Shift+F12** while it's happening. It saves three frames and a memory snapshot in the app folder's `dumps` folder; send them with `blitz.log`.

@@ -89,6 +89,7 @@ namespace blitz::pakimg {
                 s.gen = (uint32_t)le(b + 0x14, 4);
                 s.team = b[0x18];
                 s.week = b[0x19];
+                s.crc = (uint32_t)le(b + 0x1C, 4);
                 out.push_back(s);
             }
         }

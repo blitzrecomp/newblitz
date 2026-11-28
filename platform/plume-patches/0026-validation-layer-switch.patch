@@ -1,0 +1,41 @@
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index de9b797..14325ba 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -5366,24 +5366,31 @@ namespace plume {
+         createInfo.ppEnabledExtensionNames = enabledExtensions.data();
+         createInfo.enabledExtensionCount = uint32_t(enabledExtensions.size());
+ 
+-#   ifdef VULKAN_VALIDATION_LAYER_ENABLED
+-        // Search for validation layer and enabled it.
++        // Blitz: BLITZ_VK_VALIDATION (test_env.txt) turns it on in any build, with the layer packed beside the game's library
++        // (docs/SURFACE_DUO.md). Its messages go to logcat, tag VALIDATION.
++        const char validationLayerName[] = "VK_LAYER_KHRONOS_validation";
++        const char *enabledLayerNames[] = { validationLayerName };
++#   ifndef VULKAN_VALIDATION_LAYER_ENABLED
++        if (getenv("BLITZ_VK_VALIDATION") != nullptr)
++#   endif
++        {
++        bool validationFound = false;
+         uint32_t layerCount;
+         vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
+ 
+         std::vector<VkLayerProperties> availableLayers(layerCount);
+         vkEnumerateInstanceLayerProperties(&layerCount, availableLayers.data());
+         
+-        const char validationLayerName[] = "VK_LAYER_KHRONOS_validation";
+-        const char *enabledLayerNames[] = { validationLayerName };
+         for (const VkLayerProperties &layerProperties : availableLayers) {
+             if (strcmp(layerProperties.layerName, validationLayerName) == 0) {
+                 createInfo.ppEnabledLayerNames = enabledLayerNames;
+                 createInfo.enabledLayerCount = 1;
++                validationFound = true;
+                 break;
+             }
+         }
+-#   endif
++        fprintf(stderr, "[vulkan] validation layer: %s (%u layers listed)\n", validationFound ? "on" : "asked for, not found", layerCount);
++        }
+         
+         res = vkCreateInstance(&createInfo, nullptr, &instance);
+         if (res != VK_SUCCESS) {

@@ -61,6 +61,7 @@ namespace {
 extern "C" void blitz_redo_play_ended(uint8_t* rdram);  // savestate.cpp
 extern "C" void blitz_capture_event(const char* fields);  // capture.cpp: BLITZ_CAPTURE_EVENTS
 extern "C" void blitz_ds_play(const char* result, const char* situation, int offense_side, const char* team, int spot, int kind, int quarter, int clock_seconds, int turnover, int has_gain, int gain);  // ds_view.cpp
+extern "C" void blitz_ds_drive_end(const char* how);  // ds_view.cpp: how the drive ended, said just before blitz_ds_play
 
 // BLITZ DS, at play select: the score and the next snap, straight from the game. Laid out as ds_view.cpp's LiveState.
 namespace {
@@ -217,6 +218,26 @@ extern "C" void blitz_play_ended(uint8_t* rdram) {
                  kind, why, quarters[q >= 0 && q <= 6 ? q : 0], (c >> 16) & 0xFF, (c >> 8) & 0xFF,
                  team[0].c_str(), now_total[0], now_total[1], team[1].c_str());
         blitz_capture_event(ev);
+    }
+    // How a drive ended, for BLITZ DS's summary (team, 2026-11-26): from the score, the snap's down and what the play was. A
+    // pass that changes hands is called a pick and a run a fumble, which a fumble after a catch gets wrong.
+    {
+        static int last_down = 0, last_quarter = -1, score_before[2] = {-1, -1};
+        const int now[2] = {total(rdram, 0), total(rdram, 1)};
+        int gained[2] = {0, 0};
+        if (score_before[0] >= 0) { gained[0] = now[0] - score_before[0]; gained[1] = now[1] - score_before[1]; }
+        const int best = std::max(gained[0], gained[1]);
+        const char* ended = "";
+        if (best >= 6) ended = "TD";
+        else if (best == 3) ended = "FG";
+        else if (best == 2 && kind == 1) ended = "SAFETY";
+        else if (turnover) ended = last_down == 4 ? (why == 4 ? "PUNT" : "DOWNS") : (pass ? "INT" : "FUMBLE");
+        else if (last_quarter == 1 && q == 2) ended = "END HALF";
+        blitz_ds_drive_end(ended);
+        score_before[0] = now[0];
+        score_before[1] = now[1];
+        last_down = d;
+        last_quarter = q;
     }
     // BLITZ DS's drive summary (ds_view.cpp).
     blitz_ds_play(result.c_str(), situation.c_str(), off, team[off].c_str(), los, kind, q, ((c >> 16) & 0xFF) * 60 + ((c >> 8) & 0xFF), turnover ? 1 : 0, why == 0 || why == 6 ? 1 : 0, los - prev);

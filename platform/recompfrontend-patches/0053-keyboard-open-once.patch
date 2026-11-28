@@ -1,0 +1,15 @@
+diff --git a/recompui/src/composites/ui_keyboard.cpp b/recompui/src/composites/ui_keyboard.cpp
+index d985b66..1acd390 100644
+--- a/recompui/src/composites/ui_keyboard.cpp
++++ b/recompui/src/composites/ui_keyboard.cpp
+@@ -265,7 +265,9 @@ void recompui::open_keyboard(const std::string& title, const std::string& text,
+     kb.context.close();
+     if (prev != ContextId::null()) prev.open();
+     kb.open = true;
+-    show_context(kb.context, "");
++    // Asked twice (a tap that arrives as a touch and a click opened Join with a Code's keyboard twice on the team's Surface
++    // Duo, 2026-11-27: "Attempted to show the same context twice"): the second only updates the one already up.
++    if (!is_context_shown(kb.context)) show_context(kb.context, "");
+ }
+ 
+ bool recompui::is_keyboard_open() {

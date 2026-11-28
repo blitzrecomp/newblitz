@@ -168,7 +168,7 @@ body { background:
 }
 </style></head><body>
 <div id="bar"><span id="chip" class="cap">–</span><span id="who" class="cap">Connecting…</span><span id="mode"></span><span id="spacer"></span>
-  <div id="start" class="top cap" role="button" aria-label="Start">START</div><div id="more" class="top" role="button" aria-label="Menu">···</div></div>
+  <div id="start" class="top cap" role="button" aria-label="Start">&#9654;&#xFE0E;</div><div id="more" class="top" role="button" aria-label="Menu">···</div></div>
 <div id="stick"><div id="ring"></div><div id="knob"></div>
   <div id="hint"><div class="dial"><i></i></div><b class="cap">Move</b><span>touch anywhere here</span></div></div>
 <div id="pad">

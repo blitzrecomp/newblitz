@@ -181,7 +181,14 @@ namespace {
             std::string url = endpoint();
             int tries = std::atoi(read_file(tries_file()).c_str()) + 1;
             int status = 0;
+#if defined(BLITZ_PLATFORM_PS5)
+            // No crash reports from the PS5 (docs/design/FIRST_RUN_V2.md §2.3), though its http_post works since Cloud
+            // Sync needed one (2026-11-27).
+            bool ok = false;
+            url.clear();
+#else
             bool ok = !body.empty() && !url.empty() && blitz::http_post(url, "text/plain; charset=utf-8", body, status);
+#endif
             if (ok) {
                 fs::rename(pending_file(), sent_file(), ec);
                 fs::remove(tries_file(), ec);

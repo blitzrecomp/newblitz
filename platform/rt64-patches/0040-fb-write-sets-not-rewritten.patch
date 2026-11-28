@@ -1,0 +1,76 @@
+diff --git a/src/render/rt64_native_target.cpp b/src/render/rt64_native_target.cpp
+index 9f6aa95..9de4f06 100644
+--- a/src/render/rt64_native_target.cpp
++++ b/src/render/rt64_native_target.cpp
+@@ -1,3 +1,6 @@
++#include <cstdlib>
++#include <unordered_map>
++#include <mutex>
+ #include <cstdio>
+ #include <atomic>
+ //
+@@ -316,12 +319,21 @@ namespace RT64 {
+             writeBuffer.nativeReadbackBufferSize = bufferSize;
+         }
+ 
+-        if (writeBuffer.writeDescSet == nullptr) {
++        const void *view = readBuffer->nativeBufferWriteView.get();
++        if ((writeBuffer.writeDescSet == nullptr) || (writeBuffer.boundView != view) || (writeBuffer.boundSize != bufferSize)) {
++            if (writeBuffer.writeDescSet != nullptr) {
++                writeBuffer.retiredSets.emplace_back(std::move(writeBuffer.writeDescSet));
++                if (writeBuffer.retiredSets.size() > 8) {
++                    writeBuffer.retiredSets.erase(writeBuffer.retiredSets.begin());
++                }
++            }
++
+             writeBuffer.writeDescSet = std::make_unique<FramebufferWriteDescriptorBufferSet>(worker->device);
++            writeBuffer.writeDescSet->setBuffer(writeBuffer.writeDescSet->gOutput, readBuffer->nativeBuffer.get(), bufferSize, readBuffer->nativeBufferWriteView.get());
++            writeBuffer.boundView = view;
++            writeBuffer.boundSize = bufferSize;
+         }
+ 
+-        writeBuffer.writeDescSet->setBuffer(writeBuffer.writeDescSet->gOutput, readBuffer->nativeBuffer.get(), bufferSize, readBuffer->nativeBufferWriteView.get());
+-
+         if (smallerReadBuffer != nullptr) {
+             RenderBufferBarrier copyBarriers[] = {
+                 RenderBufferBarrier(smallerReadBuffer->nativeBuffer.get(), RenderBufferAccess::READ),
+@@ -340,6 +352,23 @@ namespace RT64 {
+         const int BlockSize = FB_COMMON_WORKGROUP_SIZE;
+         uint32_t dispatchX = (nativeCB.resolution.x + BlockSize - 1) / BlockSize;
+         uint32_t dispatchY = (nativeCB.resolution.y + BlockSize - 1) / BlockSize;
++        {   // Surface Duo: each render target's first three writes, just before the dispatch (BLITZ_FB_WRITE_LOG=1).
++            static const bool logWrites = getenv("BLITZ_FB_WRITE_LOG") != nullptr;
++            static std::mutex logMutex;
++            static std::unordered_map<const void *, int> perTarget;
++            if (logWrites) {
++                std::scoped_lock lock(logMutex);
++                int &n = perTarget[srcTarget];
++                if (n < 3) {
++                    n++;
++                    fprintf(stderr, "[fbwrite] target %p #%d: %ux%u fmt %u siz %u, resolved texture %p view %p (texture %p view %p), set1 %p, read buffer %p %u bytes (history %u), write set %p, dispatch %ux%u rows %u-%u\n",
++                        (const void *)srcTarget, n, srcTarget->width, srcTarget->height, unsigned(fmt), unsigned(siz), (const void *)srcTarget->getResolvedTexture(), (const void *)srcTarget->getResolvedTextureView(),
++                        (const void *)srcTarget->texture.get(), (const void *)srcTarget->textureView.get(), (const void *)srcTarget->fbWriteDescSet.get(), (const void *)readBuffer->nativeBuffer.get(), unsigned(readBuffer->nativeBufferSize),
++                        unsigned(readBufferHistoryCount), (const void *)writeBuffer.writeDescSet.get(), dispatchX, dispatchY, rowStart, rowEnd);
++                    fflush(stderr);
++                }
++            }
++        }
+         {   // Each kind of frame write's first dispatch, before it's recorded: the Surface Duo's driver crashed in one (docs/SURFACE_DUO.md).
+             static std::atomic<uint32_t> seen{0};
+             const uint32_t bit = 1u << ((fmt & 7) * 4 + (siz & 3));
+diff --git a/src/render/rt64_native_target.h b/src/render/rt64_native_target.h
+index eb944a4..5d44b3a 100644
+--- a/src/render/rt64_native_target.h
++++ b/src/render/rt64_native_target.h
+@@ -32,6 +32,11 @@ namespace RT64 {
+ 
+         struct WriteBuffer {
+             std::unique_ptr<FramebufferWriteDescriptorBufferSet> writeDescSet;
++            // Blitz: what writeDescSet points at. A set is never rewritten for another buffer: a new one is made and the old kept
++            // a while, since a submitted frame may still use it (the Surface Duo's driver crashed at the dispatch after a rewrite).
++            const void *boundView = nullptr;
++            uint32_t boundSize = 0;
++            std::vector<std::unique_ptr<FramebufferWriteDescriptorBufferSet>> retiredSets;
+             std::unique_ptr<RenderBuffer> nativeReadbackBuffer;
+             uint32_t nativeReadbackBufferSize = 0;
+         };

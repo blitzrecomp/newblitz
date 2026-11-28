@@ -1,12 +1,12 @@
 <!doctype html>
 <html lang="en">
-<!--page title="Privacy" description="What New Blitz 2027 connects to, in plain words: no accounts, no analytics, no ads, no logs sent. Only the optional 2026 Season download, roster updates (on by default) and player photos go online." -->
+<!--page title="Privacy" description="What New Blitz 2027 connects to, in plain words: no accounts, no analytics, no ads, no logs sent. Only the optional 2026 Season download, roster updates (on by default), player photos and Cloud Sync (off unless you turn it on) go online." -->
 <head>
 <!--@head-->
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Privacy · New Blitz 2027</title>
-<meta name="description" content="What New Blitz 2027 connects to, in plain words: no accounts, no analytics, no ads, no logs sent. Only the optional 2026 Season download, roster updates (on by default) and player photos go online.">
+<meta name="description" content="What New Blitz 2027 connects to, in plain words: no accounts, no analytics, no ads, no logs sent. Only the optional 2026 Season download, roster updates (on by default), player photos and Cloud Sync (off unless you turn it on) go online.">
 <link rel="canonical" href="https://newblitz.com/privacy">
 <meta name="theme-color" content="#020712">
 <meta name="color-scheme" content="dark">
@@ -17,7 +17,7 @@
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="New Blitz 2027">
 <meta property="og:title" content="Privacy · New Blitz 2027">
-<meta property="og:description" content="What New Blitz 2027 connects to, in plain words: no accounts, no analytics, no ads, no logs sent. Only the optional 2026 Season download, roster updates (on by default) and player photos go online.">
+<meta property="og:description" content="What New Blitz 2027 connects to, in plain words: no accounts, no analytics, no ads, no logs sent. Only the optional 2026 Season download, roster updates (on by default), player photos and Cloud Sync (off unless you turn it on) go online.">
 <meta property="og:url" content="https://newblitz.com/privacy">
 <meta property="og:image" content="https://newblitz.com/assets/img/og_image.jpg">
 <meta property="og:image:width" content="1200">
@@ -26,7 +26,7 @@
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:site" content="@blitzrecomp">
 <meta name="twitter:title" content="Privacy · New Blitz 2027">
-<meta name="twitter:description" content="What New Blitz 2027 connects to, in plain words: no accounts, no analytics, no ads, no logs sent. Only the optional 2026 Season download, roster updates (on by default) and player photos go online.">
+<meta name="twitter:description" content="What New Blitz 2027 connects to, in plain words: no accounts, no analytics, no ads, no logs sent. Only the optional 2026 Season download, roster updates (on by default), player photos and Cloud Sync (off unless you turn it on) go online.">
 <meta name="twitter:image" content="https://newblitz.com/assets/img/og_image.jpg">
 <meta name="nb-shots" content="baked">
 <link rel="preload" href="/assets/fonts/barlow-condensed-800i.woff2" as="font" type="font/woff2" crossorigin>
@@ -52,7 +52,7 @@
   <div class="wrap">
     <span class="eyebrow">Privacy</span>
     <h1>What goes where</h1>
-    <p class="lead">Short version: New Blitz has no accounts, no analytics, no ads and no tracking, and it never sends your logs anywhere. It goes online only for the optional season and what comes with it.</p>
+    <p class="lead">Short version: New Blitz has no accounts, no analytics, no ads and no tracking, and it never sends your logs anywhere. It goes online only for the optional season and what comes with it, and for Cloud Sync if you turn it on.</p>
   </div>
 </section>
 
@@ -78,16 +78,27 @@
         <p><strong>What the server keeps.</strong> A count per day of how many of each request it answered (roster checks, season downloads, crash reports), so we can see that people use it. Just the totals: not your address, not who asked.</p>
       </div>
 
+      <h3>4. Cloud Sync</h3>
+      <p>Off unless you turn it on, in <strong>Settings → Saves → Cloud Sync</strong> (setup asks once, and an update may ask again; you can say Don't Ask Again). It keeps your saves the same on all your devices through a second small service of ours on Cloudflare.</p>
+      <ul class="ticks">
+        <li><strong>Only your Controller Pak and season saves</strong> go up (a season's league settings travel with it). Never your ROM, your save states, or your controls, graphics and sound settings.</li>
+        <li><strong>Locked before they leave.</strong> They're encrypted on your device with a key made from your sync code, and only then uploaded, so the server holds data it can't read. The code stays on your devices; when you add a device with a 6-digit number, the code is passed over locked with that number and deleted as soon as it's taken, or after two minutes.</li>
+        <li><strong>No account, no name, no email.</strong> The server sees a random-looking id, the encrypted saves, their size and when they were written. It doesn't know whose they are.</li>
+        <li><strong>Adding a device with a 6-digit number:</strong> to limit guesses, the server counts pairing tries per connection, using your connection's address. The address is used only for that count and is never stored.</li>
+        <li><strong>Deleted after 90 days</strong> without an update, or straight away when you choose <strong>Turn Off and Delete</strong>.</li>
+      </ul>
+
       <h3>On your own network</h3>
       <p>Some features talk only to devices on your Wi-Fi or a cable, never to the internet:</p>
       <ul class="ticks">
         <li><strong>Phone controllers:</strong> when you turn them on (Settings → Players), the app serves the controller page itself, on your local network. Anyone on that network can join while it's on, so turn it off when you're done.</li>
         <li><strong>The Roster Room:</strong> a page the app serves itself. On a computer it's on that computer only; on a phone or the PS5, it's on your local network so another device can open it.</li>
         <li><strong>The Builder</strong> sends the game, your ROM and your setup straight to your own device: a PS5 over your network (etaHEN's FTP server), an Android device over USB (adb), an iPhone through your own signing tools.</li>
+        <li><strong>Sync over Wi-Fi</strong> (Settings → Saves) sends your saves from one of your devices to another on your own network, locked with the code the first one shows. Nothing goes through our server.</li>
       </ul>
 
       <h3>On your device</h3>
-      <p>Your ROM copy, settings, saves, save states, tournaments, replays, screenshots and logs stay on your device, in the app's own folder (screenshots and clips in your Pictures).</p>
+      <p>Your ROM copy, settings, saves, save states, tournaments, replays, screenshots and logs stay on your device, in the app's own folder (screenshots and clips in your Pictures). The one exception is Cloud Sync, if you turn it on: a locked copy of your saves, as above.</p>
       <ul class="ticks">
         <li><strong>Settings → General → Save Logs</strong> writes a zip of the app's logs on your device. It's never uploaded; you decide whether to share it.</li>
         <li><strong>Crash reports</strong> are off unless you turn them on in Settings → General, which shows exactly what one contains. If you do, a short report goes to our server after a crash: what crashed and the last lines of the log, with your home folder, account name, file names and network addresses removed. Never your ROM, saves or settings. Reports are kept for 30 days.</li>
@@ -105,7 +116,7 @@
 
       <h2>Questions</h2>
       <p>Ask on <a data-link="discord" href="https://discord.gg/AtcKN9dY5">Discord</a> or open an issue on <a data-link="repo:/issues" href="https://github.com/blitzrecomp/newblitz/issues">GitHub</a>. The source is public, so you can check all of this yourself.</p>
-      <p class="small muted">Last updated 15 November 2026.</p>
+      <p class="small muted">Last updated 27 November 2026.</p>
 
     </div>
   </div>

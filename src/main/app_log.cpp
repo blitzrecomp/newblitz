@@ -260,6 +260,21 @@ namespace {
         signal(sig, SIG_DFL);
         raise(sig);
     }
+
+#if defined(__ANDROID__) && defined(__aarch64__)
+    void on_crash_info(int sig, siginfo_t* info, void* context) {
+        const ucontext_t* uc = static_cast<const ucontext_t*>(context);
+        const auto& r = uc->uc_mcontext.regs;
+        char line[320];
+        int n = snprintf(line, sizeof(line), "\n[crash] fault address %p, pc %llx, lr %llx, sp %llx, x0 %llx x1 %llx x2 %llx x3 %llx x8 %llx x19 %llx x20 %llx\n",
+            info != nullptr ? info->si_addr : nullptr, (unsigned long long)uc->uc_mcontext.pc, (unsigned long long)r[30], (unsigned long long)uc->uc_mcontext.sp,
+            (unsigned long long)r[0], (unsigned long long)r[1], (unsigned long long)r[2], (unsigned long long)r[3], (unsigned long long)r[8], (unsigned long long)r[19], (unsigned long long)r[20]);
+        for (int fd : {log_fd, terminal_fd}) {
+            if (fd >= 0 && n > 0) write_all(fd, line, (size_t)n);
+        }
+        on_crash(sig);
+    }
+#endif
 }
 
 namespace blitz {
@@ -299,7 +314,19 @@ namespace blitz {
         char when[64];
         strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", localtime(&now));
         fprintf(stderr, "[log] %s %s started %s\n", app_folder.filename().c_str(), version.c_str(), when);
+#if defined(__ANDROID__) && defined(__aarch64__)
+        // Android: the fault address and the registers that say what was read, ahead of the call stack (a driver crash with
+        // no symbols, the Surface Duo's, needs them).
+        for (int sig : {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT}) {
+            struct sigaction sa = {};
+            sa.sa_sigaction = on_crash_info;
+            sa.sa_flags = SA_SIGINFO;
+            sigemptyset(&sa.sa_mask);
+            sigaction(sig, &sa, nullptr);
+        }
+#else
         for (int sig : {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT}) signal(sig, on_crash);
+#endif
         log_up = true;
     }
 

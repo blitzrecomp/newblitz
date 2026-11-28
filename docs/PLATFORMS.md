@@ -53,7 +53,7 @@ A change to the core reaches every platform at its next build. Platform code is 
 Save states need the resumable copy of the recompiled code (`SAVESTATES=1`, the default), which every platform's
 targets build since 2026-10-22. Keys (F5 save, F7 load, F6 slot, F8 Redo) and controllers (hold R3: L1 save, R1 load,
 D-pad left/right slot, D-pad down Redo) work everywhere; a phone played by touch has SAVE, LOAD and REDO pills, shown
-when Settings → General → Save State Buttons / Redo Play are on. Tested on the Mac; the others build.
+when Settings → Saves → Save State Buttons and Rules → Redo Play are on. Tested on the Mac; the others build.
 
 ### Adding a platform
 

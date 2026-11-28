@@ -104,10 +104,11 @@ namespace {
         using namespace ultramodern::renderer;
         recomp::config::Config& g = recompui::config::get_config(recompui::config::graphics::id);
         namespace opt = recompui::config::graphics::options;
-        g.set_option_value(opt::wm_option, (uint32_t)(on ? WindowMode::Fullscreen : WindowMode::Windowed));
+        // update_option_value: TV Mode is on the Graphics tab (1.0.5), whose rows show the change at once.
+        g.update_option_value(opt::wm_option, (uint32_t)(on ? WindowMode::Fullscreen : WindowMode::Windowed));
         if (on) {
-            g.set_option_value(opt::ar_option, (uint32_t)AspectRatio::Expand);
-            g.set_option_value(opt::hr_option, (uint32_t)HUDRatioMode::Clamp16x9);
+            g.update_option_value(opt::ar_option, (uint32_t)AspectRatio::Expand);
+            g.update_option_value(opt::hr_option, (uint32_t)HUDRatioMode::Clamp16x9);
         }
         g.save_config();
         GraphicsConfig c = get_graphics_config();
@@ -135,14 +136,21 @@ namespace blitz {
     void host_set_potato(bool on);
     void host_set_potato_two_screens(bool on);
     void tall_set(const std::string& name, float value);  // tall_view.cpp
+    void two_screens_apply(bool all);           // settings_tabs.cpp: the camera and Custom Layout's dials
+    void two_screens_found();
+    void two_screens_tab_visible(bool visible);
+    void settings_hold_redraw();                // settings_hold.cpp: shown on the moment held under Settings
+    extern std::atomic<bool> settings_freeze_on;
     std::atomic<bool> ds_screens_step{false};
     void ds_screens_next() { ds_screens_step = true; }  // controllers.cpp, the game thread: done in ds_screens_update
     // Every UI tick (ds_view.cpp).
     void ds_screens_update() {
         if (!ds_screens_step.exchange(false)) return;
-        static const char* names[3] = {"Both Screens", "Game + Companion", "Stylus"};
+        static const char* names[4] = {"Both Screens", "Game + Companion", "Stylus", "Controller"};
         recomp::config::Config& g = recompui::config::get_general_config();
-        uint32_t next = (std::get<uint32_t>(g.get_option_value("ds_screens")) + 1) % 3;
+        uint32_t next = (std::get<uint32_t>(g.get_option_value("ds_screens")) + 1) % 4;
+        // With a controller in hand the touch controller isn't needed: skip it (team, 2026-11-27). Still in Settings.
+        if (next == 3 && SDL_NumJoysticks() > 0) next = 0;
         g.update_option_value("ds_screens", next);
         g.save_config();
         blitz_ds_screen_mode = (int)next;
@@ -157,6 +165,7 @@ namespace blitz {
     // show, even while Two Screens is off, so it can be turned back on.
     void ds_second_seen() {
         if (second_screen_seen.exchange(true)) return;
+        two_screens_tab_visible(true);  // Settings → Two Screens
         show_development(std::get<bool>(recompui::config::get_general_config().get_option_value(recompui::config::general::options::debug_mode)));
     }
     // Two screens found (ds_view.cpp): their settings show, and take hold.
@@ -166,8 +175,7 @@ namespace blitz {
         g.update_option_hidden("ds_zoom", false);
         g.update_option_hidden("ds_screens", false);
         blitz_ds_screen_mode = (int)std::get<uint32_t>(g.get_option_value("ds_screens"));
-        tall_set("tilt", 0.40f + 0.05f * (float)std::get<uint32_t>(g.get_option_value("ds_tilt")));
-        tall_set("zoom", ds_zoom_for(std::get<uint32_t>(g.get_option_value("ds_zoom"))));
+        two_screens_found();  // Field Ahead and Camera Zoom Out, or Custom Layout (settings_tabs.cpp)
     }
     bool potato_two_screens() {
 #if defined(__ANDROID__)
@@ -256,6 +264,7 @@ namespace blitz {
         // Potato Mode has its own Two Screens row); the Mac's test windows.
         g.update_option_hidden("two_screens", !((android && !lean && second) || on));
         g.update_option_hidden("swap_screens", !((android && second) || on));
+        two_screens_tab_visible(second || on);  // Settings → Two Screens: a second screen's, or the Development rows'
         recomp::config::Config& gfx = recompui::config::get_graphics_config();
         gfx.update_option_hidden(recompui::config::graphics::options::api_option, !on);
         gfx.update_option_hidden(recompui::config::graphics::options::hpfb_option, !on);
@@ -362,9 +371,10 @@ namespace blitz {
     }
 
     void phone_pads_enable(bool on);  // phone_pads.cpp
+    void save_sync_now();  // save_sync.cpp: Settings → Saves → Sync Now
     void firstrun_settings_row(int which);  // firstrun.cpp: 1 Blitz Builder, 2 Main Menu, 3 What Crash Reports Send,
                                             // 4 Change ROM, 5 Switch Game, 8 Reset Data, 9 Restore a Backup,
-                                            // 10 Controller Pak Backups
+                                            // 10 Controller Pak Backups, 11 Save Sync
     void firstrun_builder_done_seen();      // firstrun.cpp
     bool reset_backups_exist();             // reset_data.cpp
     bool pak_backups_exist();               // controller_pak.cpp
@@ -375,6 +385,10 @@ namespace blitz {
     void create_export_tab();  // export_rom.cpp
 
     void create_season_tab();       // season_settings.cpp
+    void create_two_screens_tab();  // settings_tabs.cpp
+    void create_saves_tab();
+    void apply_settings_layout();
+    void two_screens_loaded();
     void create_controllers_tab();  // controllers_tab.cpp
     void create_rules_tab();        // house_rules.cpp
     void original_settings_visibility();  // adv_mode.cpp
@@ -458,6 +472,12 @@ void blitz::init_config() {
     general.add_bool_option("setup_updates_asked", "Updates Asked", "First run's updates and reports were answered.", false, true);
     // Set up from a computer (builder_done): this device still asks updates and reports once (§2.2).
     general.add_bool_option("setup_ask_updates", "Ask Updates", "First run asks updates and reports only.", false, true);
+    // "Playing on multiple devices? Turn on Cloud Sync?" (firstrun.cpp, src/game/cloud_ask.h): how many times it was
+    // asked (the first run's and after updates, 3 at most), Don't Ask Again, and the version it was last asked at.
+    general.add_number_option("cloud_ask_count", "Cloud Sync Asked", "Times the multiple-devices question was asked.", 0, 3, 1, 0,
+                              false, 0, true);
+    general.add_bool_option("cloud_ask_never", "Cloud Sync Never Ask", "Don't Ask Again on the multiple-devices question.", false, true);
+    general.add_string_option("cloud_ask_version", "Cloud Sync Asked At", "The app version the question was last asked at.", "", true);
     // When this install's setup began (seconds): a stored ROM older than that is "a ROM saved earlier".
     general.add_string_option("setup_started", "Setup Started", "When first run began.", "", true);
     // Sound folded in here (team): the Sound tab held this one slider. It stays the real setting (sound.json, what the
@@ -504,6 +524,19 @@ void blitz::init_config() {
         "Brings back the hints you've already seen.",
         false);
     general.add_string_option("hints_seen", "Hints Seen", "The hints already shown.", "", true);
+    // The game held under Settings (settings_hold.cpp). Off on a potato with little memory unless turned on: its live
+    // redraw needs an 8 MB copy of the moment (never made there; the hold alone costs nothing).
+    general.add_bool_option(
+        "settings_freeze",
+        "Freeze Game in Settings",
+        "Opening Settings during a game stops it where it is, so no play runs on and no clock runs down while you're "
+        "here. A change to the picture or the two screens is drawn on that moment behind the menu. Closing Settings "
+        "carries on from there.",
+        !(getenv("BLITZ_LEAN") != nullptr && SDL_GetSystemRAM() < 1500));
+    general.add_option_change_callback("settings_freeze", [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant,
+                                                             recomp::config::OptionChangeContext) {
+        blitz::settings_freeze_on = std::get<bool>(cur);
+    });
     // The last day the "This install expires" toast showed (install_expiry.cpp): once a day.
     general.add_string_option("install_notice_day", "Install Notice Day", "The last day the install expiry toast showed.", "", true);
     // The frame counter (src/main/fps_counter.cpp): for chasing stutter, on any device.
@@ -550,13 +583,13 @@ void blitz::init_config() {
     general.add_enum_option(
         "button_icon_mode",
         "Button Icons",
-        "Which buttons the game's screens and these menus show. <b>Each Player's Controller</b>: in the game, every "
+        "Which buttons the game's screens and these menus show. <b>Each Player's</b>: in the game, every "
         "player sees their own controller's buttons (PlayStation, Xbox or Switch; any other controller shows "
-        "PlayStation), and these menus follow player 1. Or one style for everyone: <b>PlayStation</b>, <b>Xbox</b>, "
+        "PlayStation), and these menus follow player 1. Or one style for everyone: <b>PS</b> (PlayStation), <b>Xbox</b>, "
         "<b>Switch</b> (by position: B passes, Y tackles) or <b>N64</b> (the game's own icons). These menus have no "
         "Switch or N64 style: they show Xbox letters for Switch and PlayStation for N64.",
         std::vector<recomp::config::ConfigOptionEnumOption>{
-            {0, "Each", "Each Player's Controller"}, {1, "PlayStation", "PlayStation"}, {2, "Xbox", "Xbox"}, {3, "Switch", "Switch"}, {4, "N64", "N64"}},
+            {0, "Each", "Each Player's"}, {1, "PlayStation", "PS"}, {2, "Xbox", "Xbox"}, {3, "Switch", "Switch"}, {4, "N64", "N64"}},
         0u);
     general.add_enum_option(
         "fullscreen_button",
@@ -708,27 +741,33 @@ void blitz::init_config() {
         "How far the camera looks up the field across both screens. Higher keeps the play low on the bottom screen and shows "
         "more of what's ahead on the top one.",
         std::vector<recomp::config::ConfigOptionEnumOption>{{0, "T40", "0.40"}, {1, "T45", "0.45"}, {2, "T50", "0.50"}, {3, "T55", "0.55"}, {4, "T60", "0.60"}, {5, "T65", "0.65"}},
-        2u, true);  // 0.50: the team's pick on an RG DS, 2026-11-02 (0.65 looked too far up the field)
+        2u);  // 0.50: the team's pick on an RG DS, 2026-11-02 (0.65 looked too far up the field)
+    general.update_option_hidden("ds_tilt", true);  // until two screens are found (ds_settings_found): added hidden, it could never show
     general.add_enum_option("ds_zoom", "Camera Zoom Out",
         "How much further back than the game's own camera, to keep the receivers on the ends in view.",
         std::vector<recomp::config::ConfigOptionEnumOption>{{0, "Z0", "0%"}, {1, "Z5", "5%"}, {2, "Z10", "10%"}, {3, "Z125", "12.5%"}, {4, "Z15", "15%"}, {5, "Z20", "20%"}, {6, "Z25", "25%"}, {7, "Z30", "30%"}},
-        3u, true);  // 12.5%: the team's pick on an RG DS. Saved by name, so adding it moved no one's setting
+        3u);  // 12.5%: the team's pick on an RG DS. Saved by name, so adding it moved no one's setting
+    general.update_option_hidden("ds_zoom", true);  // until two screens are found (ds_settings_found): added hidden, it could never show
     general.add_enum_option("ds_screens", "DS Screens",
-        "<b>Both Screens</b>: the field across the two. <b>Game + Companion</b>: the game on the lower screen and the drive "
-        "board above it. <b>Stylus</b>: the game above and a wheel below, to throw to a receiver by touch, with receiver icons on. L3 steps through them.",
-        std::vector<recomp::config::ConfigOptionEnumOption>{{0, "Both", "Both Screens"}, {1, "Companion", "Game + Companion"}, {2, "Stylus", "Stylus"}},
-        0u, true);
+        "<b>Both</b>: the field across the two. <b>Companion</b>: the game on one screen and the drive "
+        "board on the other. <b>Stylus</b>: the game above and a wheel below, to throw to a receiver by touch, with receiver icons on. "
+        "<b>Controller</b>: the game above and the lower screen a touch controller. L3 steps through them.",
+        std::vector<recomp::config::ConfigOptionEnumOption>{{0, "Both", "Both"}, {1, "Companion", "Companion"}, {2, "Stylus", "Stylus"}, {3, "Controller", "Controller"}},
+        0u);
+    general.update_option_hidden("ds_screens", true);  // until two screens are found (ds_settings_found): added hidden, it could never show
     general.add_option_change_callback("ds_screens", [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant,
                                                         recomp::config::OptionChangeContext) {
         blitz_ds_screen_mode = (int)std::get<uint32_t>(cur);
+        blitz::settings_hold_redraw();
     });
-    general.add_option_change_callback("ds_tilt", [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant,
+    // Field Ahead and Camera Zoom Out: the camera's presets (two_screens.h), unless Custom Layout sets it.
+    general.add_option_change_callback("ds_tilt", [](recomp::config::ConfigValueVariant, recomp::config::ConfigValueVariant,
                                                      recomp::config::OptionChangeContext) {
-        blitz::tall_set("tilt", 0.40f + 0.05f * (float)std::get<uint32_t>(cur));
+        blitz::two_screens_apply(false);
     });
-    general.add_option_change_callback("ds_zoom", [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant,
+    general.add_option_change_callback("ds_zoom", [](recomp::config::ConfigValueVariant, recomp::config::ConfigValueVariant,
                                                      recomp::config::OptionChangeContext) {
-        blitz::tall_set("zoom", blitz::ds_zoom_for(std::get<uint32_t>(cur)));
+        blitz::two_screens_apply(false);
     });
     general.add_option_change_callback("swap_screens", [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant,
                                                           recomp::config::OptionChangeContext) {
@@ -737,6 +776,7 @@ void blitz::init_config() {
 #else
         blitz::ds_set_swapped(std::get<bool>(cur));  // the Mac's test windows
 #endif
+        blitz::settings_hold_redraw();
     });
 #if defined(__ANDROID__) && !defined(BLITZ_PUBLIC_BUILD)  // the public app has no developer's address to send to
     general.add_bool_option("send_logs", "Send Logs",
@@ -801,15 +841,41 @@ void blitz::init_config() {
                             false, !blitz::reset_backups_exist());
     recompui::config::set_option_action("general", "restore_backup", "Restore");
     // Controller Pak Backups (pak_backups.cpp): the dated copies of the pak controller_pak.cpp keeps, one put back.
-    general.add_bool_option("pak_backups", "Controller Pak Backups",
+    general.add_bool_option("pak_backups", "Backups",
                             "Your Controller Pak is copied each time it changes. Pick a copy to put your seasons and records back "
                             "as they were then.",
                             // Always shown (team, 2026-11-26: "didn't see" it): Settings is built before the game first opens the pak,
                             // so the first run's copy didn't exist yet. With none to choose, Restore says so in a toast.
                             false, false);
     recompui::config::set_option_action("general", "pak_backups", "Restore");
+    // Saves (save_sync.cpp, docs/SAVE_SYNC.md): Cloud Sync, Sync over Wi-Fi (BLITZ_SAVE_SYNC_NET builds) and Export /
+    // Import Save File, on their own screens. The option's id stays "save_sync" (saved settings and the routing below).
+    general.add_bool_option("save_sync", "Saves",
+#if defined(BLITZ_SAVE_SYNC_NET)
+                            "Your Controller Pak saves and Advanced seasons on your other devices: Cloud Sync, Sync over Wi-Fi, "
+                            "or a save file you copy over. Save states stay on each device.",
+#else
+                            "Move your Controller Pak saves and Advanced seasons to another device: Export Save File makes one "
+                            "file, Import Save File takes one in. Save states stay on each device.",
+#endif
+                            false);
+    recompui::config::set_option_action("general", "save_sync", "Open");
+#if defined(BLITZ_SAVE_SYNC_NET)
+    // Sync Now (team, 2026-11-27): Cloud Sync at once from Settings, first in the Controller Pak section.
+    general.add_bool_option("sync_now", "Sync Now",
+                            "Cloud Sync right now: this device's newer saves go up, newer ones from your other devices come down "
+                            "(those wait for the next start if the game has its pak open). Off: Saves \xE2\x86\x92 Open turns it on.",
+                            false);
+    recompui::config::set_option_action("general", "sync_now", "Sync");
+    general.add_option_change_callback("sync_now", [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant,
+                                                      recomp::config::OptionChangeContext ctx) {
+        if (ctx != recomp::config::OptionChangeContext::Permanent || !std::get<bool>(cur)) return;
+        recompui::config::get_config("general").update_option_value("sync_now", false);
+        blitz::save_sync_now();
+    });
+#endif
     for (const auto& [id, which] : {std::pair<const char*, int>{"reset_data", 8}, std::pair<const char*, int>{"restore_backup", 9},
-                                    std::pair<const char*, int>{"pak_backups", 10}}) {
+                                    std::pair<const char*, int>{"pak_backups", 10}, std::pair<const char*, int>{"save_sync", 11}}) {
         std::string option = id;
         int w = which;
         general.add_option_change_callback(id, [option, w](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant,
@@ -836,6 +902,7 @@ void blitz::init_config() {
     });
 
     recompui::config::create_graphics_tab();
+    blitz::create_two_screens_tab();  // Two Screens: shown on a device with a second screen
     // What each N64 button does in Blitz, shown on the Controls tab (docs/PLAYING.md). L and the C buttons
     // have no known job, so they stay bare.
     {
@@ -856,6 +923,7 @@ void blitz::init_config() {
     // No Mods tab: Blitz has no mod support (content packs and the art drop-in are folders instead).
     blitz::create_season_tab();
     blitz::create_rules_tab();
+    blitz::create_saves_tab();  // Saves: save states, the Controller Pak, Save Sync's rows, Reset Data
 #if BLITZ_MODERN
     blitz::original_settings_visibility();  // adv_mode.cpp: Original 1999 hides the 2026-only settings
 #endif
@@ -865,6 +933,9 @@ void blitz::init_config() {
     // Folded away (the team's settings pass): Sound into General's Volume, and Export, whose options the Export screen has too.
     recompui::config::set_tab_visible(recompui::config::sound::id, false);
     if (blitz::export_available) recompui::config::set_tab_visible("export", false);
+    // 1.0.5's layout (settings_layout.h, docs/SETTINGS_LAYOUT.md): General's rows drawn on Graphics, Controls, Two Screens,
+    // Rules and Saves, Bracket's on Teams. Only where they're drawn: each keeps its config and file.
+    blitz::apply_settings_layout();
 
     recompui::config::finalize();
     {
@@ -875,6 +946,8 @@ void blitz::init_config() {
         g.update_option_hidden(recompui::config::general::options::background_input_mode, !blitz::platform::desktop);
         recompui::config::get_graphics_config().update_option_hidden(recompui::config::graphics::options::wm_option, !blitz::platform::desktop);
         blitz::show_development(std::get<bool>(g.get_option_value(recompui::config::general::options::debug_mode)));
+        blitz::settings_freeze_on = std::get<bool>(g.get_option_value("settings_freeze"));  // a first launch has no Load to set it
+        blitz::two_screens_loaded();
     }
 #if defined(__ANDROID__)
     // The callbacks don't run on a first launch, with no settings file to load, and a recipe has to hold there too.

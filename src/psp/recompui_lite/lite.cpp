@@ -140,6 +140,7 @@ bool recompui::config::close() { return true; }
 void recompui::config::set_option_section(const std::string&, const std::string&, const std::string&, std::function<std::string()>) {}
 void recompui::config::set_option_action(const std::string&, const std::string&, const std::string&) {}
 void recompui::config::describe_header_button(const std::string&, const std::string&) {}
+void recompui::config::place_option(const std::string&, const std::string&, const std::string&, bool) {}
 
 namespace {
     template <typename T>

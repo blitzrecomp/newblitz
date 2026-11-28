@@ -16,7 +16,7 @@
 >   - a real game in both apps, where the clock and score return to the saved values;
 >   - 17 restores in one session without leaking threads;
 >   - save, quit, relaunch, load.
-> - **Controller:** the hotkey (L3 or R3) + R1 saves, + L1 loads (the RetroArch handheld way; L1 saved before 2026-11-02), + □ / ○ (or D-pad left / right) step the slot and + △ (or D-pad up) is Redo Play (Settings → General → Save State Buttons). On an RG DS, where L1/R1 are turbo, + R2 saves and + L2 loads, and its L2/R2 aren't turbo any more (2026-11-03). A combo counts only when its button goes down after the hotkey is held, so holding turbo and then pushing a stick in does nothing. A phone controller's ··· menu sends the same commands.
+> - **Controller:** the hotkey (L3 or R3) + R1 saves, + L1 loads (the RetroArch handheld way; L1 saved before 2026-11-02), + □ / ○ (or D-pad left / right) step the slot and + △ (or D-pad up) is Redo Play (Settings → Saves → Save State Buttons). On an RG DS, where L1/R1 are turbo, + R2 saves and + L2 loads, and its L2/R2 aren't turbo any more (2026-11-03). A combo counts only when its button goes down after the hotkey is held, so holding turbo and then pushing a stick in does nothing. A phone controller's ··· menu sends the same commands.
 > - **Statuses** (saved, loaded, the slot, why not) show as a toast at the bottom right for about 2.5 s (`src/main/toast.cpp`), and on phone controllers.
 > - **Host-side state** (`include/blitz_savestate.h`): modules register what follows the game, and it is stored and restored with each state:
 >   - the resume checkpoint's in-progress flags;
@@ -30,12 +30,12 @@
 >   to date ("The Controller Pak's view" below), so the game never acts on the pak as it was. `controller_pak.cpp` also
 >   guards what a bad write could cost: in Advanced a write keeps every season stub on disk unless it's the player's own
 >   Save to that slot (or the note was deleted), and `pak_history/` keeps a dated copy before each burst of writes,
->   which Settings → General → Controller Pak Backups puts back (docs/ADVANCED_SEASON.md §3.6).
+>   which Settings → Saves → Backups puts back (docs/ADVANCED_SEASON.md §3.6).
 > - **Tournaments need nothing:** the bracket lives in RDRAM and `tournament.bin` is rewritten from it after each result. Replaying a game after a load replaces that result rather than adding a second one.
 > - **Redo Play:** built on the same machinery. The checkpoint hook at the top of the per-play loop asks for a snapshot, which is taken at the next quiescent loop head and kept in memory (the last 8). A play's end (the plays.log hook) and play select's header being drawn (PLYTOP.WMS, gfx_ext.cpp) decide whether a redo goes back to this play or the one before. Game init and game over clear the history. Snapshots stay in memory, about 67 MB at most.
 > - **Slots:** three, at `savestates/slot<N>.state` (the old `quick.state` becomes slot 1). F6 (Shift+F6 for the previous one) or R3 + D-pad right/left picks the slot.
 > - **Save & Quit:** quitting during a game asks only Quit Blitz? (Quit / Keep Playing); Quit writes `savestates/quit.state` plus a one-line `quit.txt` (score and situation), then quits. A save that can't happen (it gave up, or nothing after 15 s) asks Quit Anyway / Keep Playing. The next start shows a non-blocking toast, Pick up your last game? with the score, for 12 s: C-left (△ by position) or a click/tap on it loads it (and deletes both files once its frames show); □, Start or an A pick in the menus puts it away. Offered once: ignored or put away, both files go aside as `quit.declined.state` / `quit.declined.txt` and aren't offered again. (Before 1.0.3: Save this game? / Don't Save / Quit without saving?, and a Pick up your game? prompt with Resume / Discard.)
-> - **Option B below is built too:** Settings → General → Resume Interrupted Games (Experimental, off by default; `src/game/checkpoint.cpp`).
+> - **Option B below is built too:** Settings → Saves → Resume Interrupted Games (Experimental, off by default; `src/game/checkpoint.cpp`).
 
 Everything below is the original study, written before save states or checkpoints were built. A read-only study of the generated code and the runtime. "Verified" means read in the generated C, the runtime source or `blitz2000.toml`; the rest is inferred. Scratch tools are in `build/analysis/savestates/`.
 

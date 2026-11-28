@@ -134,8 +134,11 @@ public class BlitzActivity extends SDLActivity {
             // An upper screen with no touch of its own (an RG DS's): its Settings and Replay come to the lower one (ds_touch.cpp).
             // A mapper's virtual panel could count as a second, so Potato Mode doesn't ask. The stacked test's two screens are one
             // panel, both of it touchable.
+            // A Surface Duo's two panels are one display and one touch panel, both of it touchable (BlitzHinge).
+            duo = BlitzHinge.present(this);
+            if (duo) Os.setenv("BLITZ_DUO", "1", true);
             int panels = touchPanels();
-            if (BlitzLauncher.lean(this) || (panels < 2 && !stacked())) Os.setenv("BLITZ_ONE_TOUCH", String.valueOf(panels), true);
+            if (BlitzLauncher.lean(this) || (panels < 2 && !stacked() && !duo)) Os.setenv("BLITZ_ONE_TOUCH", String.valueOf(panels), true);
         } catch (Exception e) {
             Log.e(TAG, "setup failed", e);
         }
@@ -149,8 +152,37 @@ public class BlitzActivity extends SDLActivity {
         watchLaunch();
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         hideSystemBars();
+        if (duo) {
+            // Laid out behind the status and navigation bars, always: spanned again after one panel while unfocused, the window
+            // was sized around the bars, which were then hidden without the space coming back (1740x2724 at 0,60: the game
+            // shifted left with an empty strip on the right; the team's Duo, 2026-11-27).
+            if (android.os.Build.VERSION.SDK_INT >= 30) getWindow().setDecorFitsSystemWindows(false);
+            // The orientation is layoutForHinge's (team, 2026-11-26): landscape on one panel, so the other is free for another app;
+            // spanned, the DS hold. SDL's own request (main.cpp's hint) is ignored, as when a tall surface frees it.
+            orientationFreed = true;
+            super.setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+            if (mLayout != null) mLayout.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+                if (r - l != or - ol || b - t != ob - ot || l != ol || t != ot) ui.post(this::layoutForHinge);
+            });
+        }
         setupTwoScreens();
         startReporting();
+        // The touch stick and buttons sit near the game window's sides: a thumb there set off the system's edge swipe (back, or a
+        // Surface Duo's move-to-the-other-screen). Android keeps those edges for the game over the lower part of the window, at
+        // most 200 dp a side, which is where the thumbs are (touch_controls.cpp: stick at 0.70 of the height, A at 0.68).
+        if (mSurface != null && Build.VERSION.SDK_INT >= 29) {
+            mSurface.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+                int w = r - l, h = b - t;
+                if (w <= 0 || h <= 0) return;
+                int band = Math.min(h, Math.round(200 * getResources().getDisplayMetrics().density));
+                int top = Math.max(0, Math.min(h - band, Math.round(h * 0.45f)));
+                int edge = Math.round(48 * getResources().getDisplayMetrics().density);
+                List<android.graphics.Rect> rects = new ArrayList<>();
+                rects.add(new android.graphics.Rect(0, top, edge, top + band));
+                rects.add(new android.graphics.Rect(w - edge, top, w, top + band));
+                v.setSystemGestureExclusionRects(rects);
+            });
+        }
     }
 
     @Override
@@ -251,7 +283,7 @@ public class BlitzActivity extends SDLActivity {
     // surface has never been ready: waking a running game, on a device whose panel is tall by nature (a Retroid), has a tall
     // surface for a while too, and that lock has to stay. And the moment only counts awake, unlocked and with the activity up.
     private static final long TALL_WAIT_MS = 2000, TALL_RECHECK_MS = 500;
-    private boolean orientationFreed, surfaceWasReady;
+    private boolean orientationFreed, surfaceWasReady, duo;
     private long tallWaitFrom;  // 0: the moment hasn't begun
     private final Runnable tallCheck = this::freeOrientationIfStillTall;
 
@@ -426,6 +458,72 @@ public class BlitzActivity extends SDLActivity {
         } finally {
             if (c != null) c.disconnect();
         }
+    }
+
+    // --- Secure storage for one small secret (Cloud Sync's code; platform_android.cpp secure_put/get/erase) ---------
+    // AES-GCM with a key made in the Android Keystore that never leaves it; the sealed value (IV:ciphertext, base64) sits
+    // in the app's private preferences. A copied or backed-up preferences file can't be opened on another device.
+    private static final String SECRET_KEY_ALIAS = "newblitz_secrets";
+
+    private static javax.crypto.SecretKey secretKey() throws Exception {
+        java.security.KeyStore ks = java.security.KeyStore.getInstance("AndroidKeyStore");
+        ks.load(null);
+        java.security.Key k = ks.getKey(SECRET_KEY_ALIAS, null);
+        if (k instanceof javax.crypto.SecretKey) return (javax.crypto.SecretKey) k;
+        javax.crypto.KeyGenerator g = javax.crypto.KeyGenerator.getInstance(
+            android.security.keystore.KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
+        g.init(new android.security.keystore.KeyGenParameterSpec.Builder(SECRET_KEY_ALIAS,
+                android.security.keystore.KeyProperties.PURPOSE_ENCRYPT | android.security.keystore.KeyProperties.PURPOSE_DECRYPT)
+            .setBlockModes(android.security.keystore.KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(android.security.keystore.KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setKeySize(256)
+            .build());
+        return g.generateKey();
+    }
+
+    private static android.content.SharedPreferences secretPrefs() {
+        BlitzActivity a = current;
+        return a == null ? null : a.getSharedPreferences("secure", Context.MODE_PRIVATE);
+    }
+
+    public static boolean secretPut(String name, String value) {
+        try {
+            android.content.SharedPreferences p = secretPrefs();
+            if (p == null) return false;
+            javax.crypto.Cipher c = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");
+            c.init(javax.crypto.Cipher.ENCRYPT_MODE, secretKey());
+            byte[] ct = c.doFinal(value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            String sealed = android.util.Base64.encodeToString(c.getIV(), android.util.Base64.NO_WRAP) + ":"
+                + android.util.Base64.encodeToString(ct, android.util.Base64.NO_WRAP);
+            return p.edit().putString(name, sealed).commit();
+        } catch (Exception e) {
+            Log.w(TAG, "secretPut: " + e);
+            return false;
+        }
+    }
+
+    /** The secret, or null (none kept, or it can't be opened). */
+    public static String secretGet(String name) {
+        try {
+            android.content.SharedPreferences p = secretPrefs();
+            String sealed = p == null ? null : p.getString(name, null);
+            if (sealed == null) return null;
+            int colon = sealed.indexOf(':');
+            if (colon < 0) return null;
+            byte[] iv = android.util.Base64.decode(sealed.substring(0, colon), android.util.Base64.NO_WRAP);
+            byte[] ct = android.util.Base64.decode(sealed.substring(colon + 1), android.util.Base64.NO_WRAP);
+            javax.crypto.Cipher c = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");
+            c.init(javax.crypto.Cipher.DECRYPT_MODE, secretKey(), new javax.crypto.spec.GCMParameterSpec(128, iv));
+            return new String(c.doFinal(ct), java.nio.charset.StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            Log.w(TAG, "secretGet: " + e);
+            return null;
+        }
+    }
+
+    public static void secretErase(String name) {
+        android.content.SharedPreferences p = secretPrefs();
+        if (p != null) p.edit().remove(name).commit();
     }
 
     /** The system file picker; the picks are copied into the cache and handed to nativeFilesPicked. */
@@ -655,6 +753,107 @@ public class BlitzActivity extends SDLActivity {
         report("[ds] DualStack " + w + "x" + m.heightPixels + ": " + (two ? "the game's window below, the picture above" : "one screen, on the upper half"));
     }
 
+    // A Surface Duo (BlitzHinge, docs/SURFACE_DUO.md), laid out again whenever the window changes: spanned and held like a DS
+    // (hinge across), the panel above the hinge is the upper screen and the one below the game's window, as DualStack's halves;
+    // spanned like a book, the game in the left panel, 4:3; on one panel, the whole of it, or 4:3 across it held upright.
+    // Nothing is drawn in the hinge's band. One Duo screen (Two Screens off, or a safe start): the game above the hinge.
+    private String hingeLayout = "";
+    private int hingeOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE;
+    private boolean squishSaid;
+    private void layoutForHinge() {
+        if (mLayout == null || mSurface == null || !started) return;
+        final int W = mLayout.getWidth(), H = mLayout.getHeight();
+        if (W <= 0 || H <= 0) return;
+        int[] at = new int[2];
+        mLayout.getLocationOnScreen(at);
+        Display d = getWindowManager().getDefaultDisplay();
+        android.graphics.Rect onScreen = BlitzHinge.onScreen(this, d), h = null;
+        if (onScreen != null) {
+            h = new android.graphics.Rect(onScreen);
+            h.offset(-at[0], -at[1]);
+            if (!h.intersect(0, 0, W, H)) h = null;
+        }
+        String kind = "one";
+        if (h != null && h.width() >= W * 9 / 10 && h.top > H / 4 && h.bottom < H * 3 / 4) kind = "stacked";
+        else if (h != null && h.height() >= H * 9 / 10 && h.left > W / 4 && h.right < W * 3 / 4) kind = "book";
+        // Spanned is always two screens (team, 2026-11-26): one screen is what one panel is for. A safe start stays one.
+        final boolean two = !safeStart;
+        // One panel: landscape (a Duo letterboxes it in an upright panel and leaves the other to another app). Spanned: upright,
+        // so the hinge runs across and the panels are the DS's two screens; spanned like a book turns into that.
+        final int wanted = kind.equals("one") ? android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                : android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT;
+        if (wanted != hingeOrientation) {
+            hingeOrientation = wanted;
+            super.setRequestedOrientation(wanted);
+            report("[duo] orientation: " + (kind.equals("one") ? "landscape (one panel)" : "upright (spanned: the DS hold)"));
+        }
+        String key = kind + " " + W + "x" + H + " at " + at[0] + "," + at[1] + " hinge " + (h == null ? "none" : h.toShortString()) + (two ? "" : " one screen");
+        if (key.equals(hingeLayout)) return;
+        hingeLayout = key;
+        mLayout.setBackgroundColor(android.graphics.Color.BLACK);
+        android.widget.RelativeLayout.LayoutParams game;
+        String what;
+        if (kind.equals("stacked") && two) {
+            game = box(W, H - h.bottom, 0, h.bottom);
+            android.widget.RelativeLayout.LayoutParams upper = box(W, h.top, 0, 0);
+            if (stackedView == null) {
+                stackedView = makeSecondView(this);
+                mLayout.addView(stackedView, upper);
+            } else stackedView.setLayoutParams(upper);
+            what = "two screens: the picture above the hinge (" + W + "x" + h.top + "), the game's window below (" + W + "x" + (H - h.bottom) + ")";
+        } else if (kind.equals("stacked")) {
+            dropStacked();
+            game = box(W, h.top, 0, 0);
+            what = "one screen, above the hinge";
+        } else if (kind.equals("book")) {
+            dropStacked();
+            int gh = Math.min(H, h.left * 3 / 4);
+            game = box(h.left, gh, 0, (H - gh) / 2);
+            what = "spanned like a book, for a moment: the game 4:3 in the left panel until it turns upright";
+        } else {
+            dropStacked();
+            if (H > W) {
+                int gh = W * 3 / 4;
+                game = box(W, gh, 0, (H - gh) / 2);
+                what = "one panel, upright: the game 4:3 across it";
+            } else {
+                game = new android.widget.RelativeLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
+                what = "one panel, the whole of it";
+            }
+        }
+        // Squished: one panel held upright beside another app, where Android won't turn the display for us and boxes the
+        // game in (1350x1013 in a 1350x1800 panel). Boxed, the app is told the box's size for the display too, so it's against
+        // the Duos' panels: their long side is 1800 (Duo 2: 1892), and a landscape window under 1600 wide is boxed. Said
+        // once until it's turned (team, 2026-11-27).
+        final boolean squished = duo && kind.equals("one") && W > H && W < 1600;
+        if (squished && !squishSaid) {
+            squishSaid = true;
+            ui.postDelayed(() -> { if (squishSaid) status("Turn your device sideways to fill the screen"); }, 2500);
+            what += " (squished: the reminder to turn it)";
+        } else if (!squished) squishSaid = false;
+        mSurface.setLayoutParams(game);
+        hideSystemBars();  // spanning or turning brought the status bar back over the upper screen (the team's Duo, 2026-11-26)
+        report("[duo] " + key + " (display rotation " + d.getRotation() + ", hinge on screen " + BlitzHinge.describe(onScreen) + "): " + what);
+    }
+
+    private static android.widget.RelativeLayout.LayoutParams box(int w, int h, int x, int y) {
+        android.widget.RelativeLayout.LayoutParams p = new android.widget.RelativeLayout.LayoutParams(w, h);
+        p.addRule(android.widget.RelativeLayout.ALIGN_PARENT_LEFT);
+        p.addRule(android.widget.RelativeLayout.ALIGN_PARENT_TOP);
+        p.leftMargin = x;
+        p.topMargin = y;
+        return p;
+    }
+
+    /** The upper screen's view, gone: its surface's end tells the renderer (nativeDsSurface(null)). */
+    private void dropStacked() {
+        if (stackedView == null) return;
+        SurfaceView v = stackedView;
+        stackedView = null;
+        if (secondView == v) secondView = null;
+        mLayout.removeView(v);
+    }
+
     /** Touch panels on this device. Touch can't be tied to a display from here, so a count is what there is. */
     static int touchPanels() {
         int panels = 0;
@@ -724,6 +923,7 @@ public class BlitzActivity extends SDLActivity {
 
     private void showSecondScreen() {
         if (secondScreen != null || secondActivity != null || secondActivityOpening || displays == null || !started) return;
+        if (duo) { layoutForHinge(); return; }
         if (dualStack()) { showDualStack(); return; }
         if (stacked()) { showStacked(); return; }
         final Display d = findSecond();
@@ -1120,30 +1320,42 @@ public class BlitzActivity extends SDLActivity {
         final boolean upper = name.startsWith("top-") && stackedView != null;
         final android.view.SurfaceView view = upper ? stackedView : mSurface;
         if (view == null || view.getWidth() <= 0 || !view.getHolder().getSurface().isValid()) {  // not on screen: PixelCopy would throw
-            new Thread(() -> {
-                try {
-                    BlitzRemote.post(BlitzRemote.base(this) + "/res/" + name, "not on screen".getBytes());
-                } catch (Exception e) {
-                    report("[remote] shot: " + e);
-                }
-            }, "BlitzShotSend").start();
+            sendShot(name, null, "not on screen".getBytes(), null);
             return;
         }
         final android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(view.getWidth(), view.getHeight(), android.graphics.Bitmap.Config.ARGB_8888);
-        android.os.HandlerThread thread = new android.os.HandlerThread("BlitzShot");
+        final android.os.HandlerThread thread = new android.os.HandlerThread("BlitzShot");
         thread.start();
-        android.view.PixelCopy.request(view, bitmap, result -> {
-            new Thread(() -> {
-                try {
+        final Handler handler = new Handler(thread.getLooper());
+        // The copy is asked for on the shot's own thread: below Android 14 PixelCopy makes it before returning, waiting on the
+        // game's last frame and the GPU, and the UI thread mustn't wait on the renderer (an "isn't responding" on the team's Surface
+        // Duo, 2026-11-27, as a state loaded).
+        handler.post(() -> {
+            try {
+                android.view.PixelCopy.request(view, bitmap, result -> sendShot(name, result == android.view.PixelCopy.SUCCESS ? bitmap : null,
+                    ("copy failed: " + result).getBytes(), thread), handler);
+            } catch (IllegalArgumentException e) {  // the surface went since the check
+                sendShot(name, null, "not on screen".getBytes(), thread);
+            }
+        });
+    }
+
+    /** A remote shot's answer, from a thread of its own: the picture as a JPEG, or else what went wrong. */
+    private void sendShot(String name, android.graphics.Bitmap bitmap, byte[] otherwise, android.os.HandlerThread done) {
+        new Thread(() -> {
+            try {
+                byte[] body = otherwise;
+                if (bitmap != null) {
                     ByteArrayOutputStream jpeg = new ByteArrayOutputStream();
                     bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, jpeg);
-                    BlitzRemote.post(BlitzRemote.base(this) + "/res/" + name, result == android.view.PixelCopy.SUCCESS ? jpeg.toByteArray() : ("copy failed: " + result).getBytes());
-                } catch (Exception e) {
-                    report("[remote] shot: " + e);
+                    body = jpeg.toByteArray();
                 }
-                thread.quitSafely();
-            }, "BlitzShotSend").start();
-        }, new android.os.Handler(thread.getLooper()));
+                BlitzRemote.post(BlitzRemote.base(this) + "/res/" + name, body);
+            } catch (Exception e) {
+                report("[remote] shot: " + e);
+            }
+            if (done != null) done.quitSafely();
+        }, "BlitzShotSend").start();
     }
 
     // gzip: a log, of which only the last 2 MB go: a device may have little memory to spare, and this runs during play. With the
@@ -1388,28 +1600,36 @@ public class BlitzActivity extends SDLActivity {
         if (views.isEmpty()) return;
         final android.graphics.Bitmap[] got = new android.graphics.Bitmap[views.size()];
         final int[] left = {views.size()};
-        android.os.HandlerThread thread = new android.os.HandlerThread("BlitzScreenshot");
+        final android.os.HandlerThread thread = new android.os.HandlerThread("BlitzScreenshot");
         thread.start();
-        Handler handler = new Handler(thread.getLooper());
+        final Handler handler = new Handler(thread.getLooper());
+        final Runnable oneDone = () -> {
+            if (--left[0] > 0) return;
+            thread.quitSafely();
+            new Thread(() -> writeScreenshot(got), "BlitzScreenshotSave").start();
+        };
+        final android.graphics.Bitmap[] into = new android.graphics.Bitmap[views.size()];
         for (int i = 0; i < views.size(); i++) {
-            final int k = i;
             SurfaceView v = views.get(i);
-            final android.graphics.Bitmap b = android.graphics.Bitmap.createBitmap(v.getWidth(), v.getHeight(), android.graphics.Bitmap.Config.ARGB_8888);
-            try {
-                android.view.PixelCopy.request(v, b, result -> {
-                    if (result == android.view.PixelCopy.SUCCESS) got[k] = b;
-                    if (--left[0] > 0) return;
-                    thread.quitSafely();
-                    new Thread(() -> writeScreenshot(got), "BlitzScreenshotSave").start();
-                }, handler);
-            } catch (IllegalArgumentException x) {  // the surface went away since the check
-                handler.post(() -> {
-                    if (--left[0] > 0) return;
-                    thread.quitSafely();
-                    new Thread(() -> writeScreenshot(got), "BlitzScreenshotSave").start();
-                });
-            }
+            into[i] = android.graphics.Bitmap.createBitmap(v.getWidth(), v.getHeight(), android.graphics.Bitmap.Config.ARGB_8888);
         }
+        // The copies are asked for on the screenshot's own thread, as a remote shot's (screenshot): below Android 14 each one
+        // waits on the game's frame and the GPU before PixelCopy returns.
+        handler.post(() -> {
+            for (int i = 0; i < views.size(); i++) {
+                final int k = i;
+                SurfaceView v = views.get(i);
+                final android.graphics.Bitmap b = into[i];
+                try {
+                    android.view.PixelCopy.request(v, b, result -> {
+                        if (result == android.view.PixelCopy.SUCCESS) got[k] = b;
+                        oneDone.run();
+                    }, handler);
+                } catch (IllegalArgumentException x) {  // the surface went away since the check
+                    handler.post(oneDone);
+                }
+            }
+        });
     }
 
     private void writeScreenshot(android.graphics.Bitmap[] parts) {

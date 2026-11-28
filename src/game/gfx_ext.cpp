@@ -30,6 +30,7 @@
 #include "rt64_extended_gbi.h"
 
 extern "C" int blitz_tall_2d(void);  // tall_view.cpp
+extern "C" int blitz_play_select_on_screen(void);  // below
 
 namespace {
     constexpr uint32_t gameplay_camera = 0x80318CB0;  // ovl_a camera callback while a game is on
@@ -69,6 +70,7 @@ namespace {
     struct SpriteInfo {
         uint32_t group;
         float x;          // object position in the game's 512-wide space
+        float y;          // and up its 384, from the bottom
         float left, right;  // screen extent
     };
 
@@ -77,6 +79,7 @@ namespace {
         info.group = (uint32_t)MEM_W(node_group, node);
         int32_t obj = MEM_W(node_obj, node);
         info.x = read_float(rdram, obj + obj_x);
+        info.y = read_float(rdram, obj + obj_x + 4);  // obj_y, after obj_x
         float scale = read_float(rdram, obj + obj_scale_x);
         int16_t anchor = MEM_H(obj_anchor_x, obj);
         int32_t image = MEM_W(obj_image, obj);
@@ -133,6 +136,13 @@ namespace {
             case 5:
             case 6:
                 return G_EX_ORIGIN_LEFT;  // scoreboard plate and its text
+            case 0x800:  // a call's frames
+            case 0x34:   // and words
+                // The play's result (14 YARD RETURN over 1ST DOWN AND 30), high on the screen, kept by the right edge: it
+                // mirrors the scoreboard by the left one, as it does on a 4:3 screen (team, 2026-11-26). The big messages
+                // (TOUCHDOWN, 1ST DOWN at y 247-271) and the sparks (283) stay in the middle, and so does play select's PAGE.
+                if (s.y >= 300.0f && !blitz_play_select_on_screen()) return G_EX_ORIGIN_RIGHT;
+                return G_EX_ORIGIN_NONE;
             case group_player_bars:
                 // Spread the bar row: each element keeps its distance from a point that sits at the
                 // same fraction of the widened screen as the element does of the 4:3 one.
@@ -187,10 +197,19 @@ namespace {
     uint32_t scene_id() { return 0xB3000000u | (epoch & 0xFFFFFF); }
 }
 
+extern "C" void blitz_play_art_camera(uint8_t* rdram, int32_t gp, int32_t cam, int call);  // play_art.cpp
+extern "C" void blitz_play_art_list(int32_t dl);
+
 // gfx_load_camera (0x8000FABC), after the projection and look-at loads: gp = the display-list cursor,
-// cam = the camera {eye[3], at[3], up[3]} on its stack. Runs 2-3 times a frame with the same camera.
+// cam = the camera {eye[3], at[3], up[3]} on its stack. Runs 2-3 times a frame with the same camera: in play, the
+// field's pass (F3DEX2), then the players' (after the switch to F3DLX2.Rej), then the ball and effects (F3DEX2 again).
 extern "C" void blitz_camera_tag(uint8_t* rdram, int32_t gp, int32_t cam) {
-    if (!tags_on) return;
+    const int call = camera_calls;
+    if (!tags_on) {
+        camera_calls++;
+        blitz_play_art_camera(rdram, gp, cam, call);  // Play Art: at the players' load, after the field
+        return;
+    }
     if (camera_calls++ == 0) {
         float eye[3], at[3];
         for (int i = 0; i < 3; i++) {
@@ -224,6 +243,7 @@ extern "C" void blitz_camera_tag(uint8_t* rdram, int32_t gp, int32_t cam) {
     }
     group(rdram, gp, 0xB1000000u | ((epoch & 0xFFF) << 4) | (uint32_t)std::min(camera_calls - 1, 15), true);
     group(rdram, gp, scene_id(), false);  // everything that isn't a player
+    blitz_play_art_camera(rdram, gp, cam, call);  // Play Art: at the players' load, after the field
 }
 
 // func_8027139C / func_80273084, before each player's draw pass (s0 = the player's record).
@@ -441,6 +461,65 @@ namespace {
     }
 }
 
+// Jersey numbers read backwards (the team's "the players get their numbers reversed sometimes", open since 2026-10-18): the
+// far players' model (the low-detail body the game draws past a distance: receivers at the snap, the far side of the
+// field) has a flat torso: two cards in the same plane, one mapped to read from the front, one from the back, wound
+// opposite ways so back-face culling would show each from its own side. The game draws that whole body with culling
+// off (main 0x80271264, its single-sided arms and legs need it), so both cards draw over each other at the same depth
+// and the later one, the back's, wins from both sides: a far player facing the camera wears his number mirrored. It's
+// the game's own data and commands, so Original 1999 does it too (the RDP also passes equal depth, so likely the N64).
+//
+// The fix, in the body's own list in RDRAM, the same length: the torso's side plane is listed twice (both windings, for
+// culling), so its four unique triangles take two commands, leaving room to turn culling on around the two cards and
+// off again after them. Arms and legs draw as before. Only a list the game calls right after its culling-off command,
+// and only the exact commands the game's models have (both body types), so nothing else is touched. Models can come back
+// unpatched (the game's own loads, a save state), so each frame looks again: a few compares per far player.
+// BLITZ_JERSEY_FIX=0 leaves them as the game has them.
+namespace {
+    constexpr uint32_t torso_was[16] = {
+        0x06000204, 0x00020004, 0x06000406, 0x00040006, 0x06020804, 0x00080204, 0x06020A08, 0x000A0208,  // side plane, twice
+        0x060C0E10, 0x00100E12, 0x06140C10, 0x00160C14,  // front card
+        0x06181A1C, 0x00181C1E, 0x061A201C, 0x001A2220,  // back card
+    };
+    constexpr uint32_t torso_now[16] = {
+        0x06000204, 0x00000406, 0x06020804, 0x00020A08,  // side plane: (0,1,2) (0,2,3), (1,4,2) (1,5,4)
+        0xD9FFFFFF, 0x00000400,                          // culling on
+        0x060C0E10, 0x00100E12, 0x06140C10, 0x00160C14,
+        0x06181A1C, 0x00181C1E, 0x061A201C, 0x001A2220,
+        0xD9FFFBFF, 0x00000000,                          // culling off again, as the game had it
+    };
+
+    void fix_far_torsos(uint8_t* rdram, int32_t dl, uint32_t used) {
+        static const bool on = !getenv("BLITZ_JERSEY_FIX") || getenv("BLITZ_JERSEY_FIX")[0] != '0';
+        if (!on || used == 0 || used > frame_list_capacity) return;
+        auto w = [&](int32_t a) { return (uint32_t)MEM_W(0, a); };
+        for (int32_t a = dl + 8; a + 8 <= dl + (int32_t)used; a += 8) {
+            if (w(a) != 0xDE000000u || w(a - 8) != 0xD9FFFBFFu || w(a - 4) != 0) continue;  // G_DL after culling off
+            uint32_t body = w(a + 4);
+            if (body < 0x80000000u || body >= 0x80800000u - 0x60 || (body & 7) != 0) continue;
+            int32_t b = (int32_t)body;
+            // G_SETOTHERMODE_H (bilinear), G_TEXTURE on tile 0 (the jersey's), G_MTX, G_VTX of 18, then the torso.
+            if (w(b) != 0xE3001201u || w(b + 4) != 0x00002000u || w(b + 8) != 0xD7000002u || w(b + 12) != 0x14001400u ||
+                w(b + 16) != 0xDA380003u || w(b + 24) != 0x01012024u) {
+                continue;
+            }
+            bool was = true;
+            for (int i = 0; i < 16 && was; i++) was = w(b + 32 + 4 * i) == torso_was[i];
+            if (!was) continue;
+            for (int i = 0; i < 16; i++) MEM_W(32 + 4 * i, b) = (int32_t)torso_now[i];
+            static uint32_t logged[4] = {};
+            for (uint32_t& l : logged) {
+                if (l == body) break;
+                if (l == 0) {
+                    l = body;
+                    fprintf(stderr, "[jersey] far body 0x%08X: torso cards culled\n", body);
+                    break;
+                }
+            }
+        }
+    }
+}
+
 extern "C" int blitz_force_color_clear(void);  // widescreen.cpp: Aspect Ratio is Expand
 
 extern "C" void blitz_gfx_prologue(uint8_t* rdram, int32_t task) {
@@ -454,6 +533,8 @@ extern "C" void blitz_gfx_prologue(uint8_t* rdram, int32_t task) {
     mirror_ranges.clear();
     gfx_frames++;
     int32_t dl = MEM_W(0x30, task);
+    fix_far_torsos(rdram, dl, (uint32_t)MEM_W(0x34, task));
+    blitz_play_art_list(dl);
     if ((uint32_t)MEM_W(0, dl) == 0xDB060000 && (uint32_t)MEM_W(4, dl) == 0) {
         GfxCommand enable;
         gEXEnable(&enable);

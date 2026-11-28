@@ -421,7 +421,7 @@ stub` line says when and in which block.
 changing writes (one copy, not one per block: a burst ends after 3 s without a write), skipping a copy equal to the
 newest. The newest 20 are kept, plus the newest of each of the last 14 days (about 1 MB at most). `.bak`/`.bak2`
 stay as they were. Pruning a season (after a Save) keeps every generation a stub in the pak, `.bak`, `.bak2` or any
-history copy points at. Settings → General → **Controller Pak Backups** (`src/main/pak_backups.cpp`) lists the
+history copy points at. Settings → Saves → **Backups** (`src/main/pak_backups.cpp`) lists the
 copies (the ones equal to the pak now left out) and restores one: at once if the game hasn't opened that pak this run,
 otherwise through `pak_restore` in the pak's folder and a restart, applied at the next start's first pak access. The
 pak as it was goes into the history first.

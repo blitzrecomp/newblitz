@@ -23,5 +23,12 @@
     <string>@BLITZ_MIN_MACOS@</string>
     <key>GCSupportsGameMode</key>
     <true/>
+    <!-- Plain http on the local network only: a sync server on this computer for testing (BLITZ_SYNC_SERVER,
+         tools/save_sync_worker/test/local_server.mjs). Everything on the internet stays https. -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
 </dict>
 </plist>

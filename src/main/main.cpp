@@ -105,10 +105,12 @@ namespace blitz {
     void fps_update();
     void receiver_targets_update(SDL_Window* window);  // receiver_targets.cpp
     void tall_view_update(SDL_Window* window);  // tall_view.cpp
+    void widescreen_update(SDL_Window* window);  // widescreen.cpp: how wide the 3D picture is, for the players' cull
     void ds_update(SDL_Window* window);  // ds_view.cpp
     void stylus_update(SDL_Window* window);  // ds_stylus.cpp
     void ds_window_created(SDL_Window* window);
     void window_size_update(SDL_Window* window);
+    void ds_stack_apply(SDL_Window* first);  // ds_view.cpp: DSSTACK
     void register_overlays();
     void on_init(uint8_t* rdram, recomp_context* ctx);
     void dev_input_game_started();
@@ -141,6 +143,9 @@ ultramodern::gfx_callbacks_t::gfx_data_t create_gfx() {
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_SWITCH_PLAYER_LED, "1");
     SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    // The phone's accelerometer isn't a controller: SDL listed it as one ("Android Accelerometer"), so with two screens a
+    // Surface Duo hid its touch controls as if a pad were in hand, and phones showed pad behaviour before a first touch.
+    SDL_SetHint(SDL_HINT_ACCELEROMETER_AS_JOYSTICK, "0");
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK | SDL_INIT_HAPTIC) < 0) {
         exit_error("Failed to initialize SDL2: %s\n", SDL_GetError());
@@ -327,6 +332,7 @@ namespace blitz {
     int take_status_hold();                       // notices.cpp
     void toast_update();
     void replay_update();              // replay_screen.cpp
+    void settings_hold_update();       // settings_hold.cpp: the game held under Settings
     void checkpoint_startup_prompt();  // checkpoint.cpp
     void savestate_startup_prompt();   // savestate.cpp
     bool savestate_quit_prompt();
@@ -388,13 +394,16 @@ void update_gfx(void*) {
     if (int h = blitz::take_status_hold(); h != 0) blitz::toast_hold(h == 1);  // a load's notice stays up (notices.cpp)
     blitz::toast_update();
     blitz::replay_update();
+    blitz::settings_hold_update();
     blitz::touch_controls_update(window);
     blitz::fps_update();
     blitz::ds_update(window);
     blitz::stylus_update(window);
     blitz::tall_view_update(window);
+    blitz::widescreen_update(window);
     blitz::receiver_targets_update(window);
     blitz::window_size_update(window);
+    blitz::ds_stack_apply(window);
     blitz::ui_step("notice");
     std::string notice = blitz::take_notice();
     // BLITZ_QUIET_NOTICES=1 (dev/test runs): log only, no dialog on the desktop.
@@ -792,6 +801,7 @@ namespace blitz {
     void log_init(const std::filesystem::path& app_folder, const std::string& version);  // app_log.cpp
     void firstrun_app_up(const std::filesystem::path& app_folder, const std::string& version);  // firstrun.cpp
     void reset_data_pending(const std::filesystem::path& app_folder, const char* when);  // reset_data.cpp
+    void save_sync_at_start(const std::filesystem::path& app_folder);  // save_sync.cpp
     void firstrun_settings_loaded();
     void style_launcher(recompui::LauncherMenu* menu, recompui::GameOptionsMenu* options);
     bool skip_launcher();  // config.cpp: Settings → General → Launcher at Start off (phones' default)
@@ -1045,6 +1055,8 @@ int main(int argc, char** argv) {
     BOOT_CRUMB("after log_init");
     // A Reset Data or Restore that didn't finish on the way out last time (reset_data.cpp): before anything reads the folder.
     blitz::reset_data_pending(recompui::file::get_app_folder_path(), "start");
+    // League settings a Save Sync import brought (save_sync.cpp): before the settings are read.
+    blitz::save_sync_at_start(recompui::file::get_app_folder_path());
     blitz::firstrun_app_up(recompui::file::get_app_folder_path(), version_string);  // [firstrun] line 1
 
     BOOT_CRUMB("SDL audio");

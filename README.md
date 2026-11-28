@@ -74,7 +74,7 @@ The downloads aren't signed with a developer certificate, so your device asks fi
 6. **Play,** or the device's last step: the iPhone or Android file, the send to a PS5, or the `.z64` export.
 
 The Builder runs again from **Settings → General → Blitz Builder** whenever you want another device or an export.
-To start over, **Settings → General → Reset Data** clears the settings, saves and setup (it can keep your ROM and back
+To start over, **Settings → Saves → Reset Data** clears the settings, saves and setup (it can keep your ROM and back
 everything up first, to Documents → New Blitz Backups); **Restore a Backup** puts a backup back.
 
 ## Sending to your devices
@@ -146,7 +146,8 @@ choose **Allow access** when Windows asks to let New Blitz use your network.
 
 Save states: F5 saves, F7 loads, F6 picks a slot. On a controller, hold the right stick pressed in (R3; L3 too on
 one-stick handhelds) as the hotkey: + R1 saves, + L1 loads, + □ / ○ picks the slot. Redo Play runs the last play again: hotkey + △ (or D-pad up), or F8.
-Fullscreen: F11, or L3 + R3. Screenshots: F12. More, including tournaments, phones as controllers and playing on a TV:
+Playing on more than one device: Settings → Saves → **Cloud Sync** keeps your Controller Pak and season saves the
+same on each (encrypted, no account; not save states). Fullscreen: F11, or L3 + R3. Screenshots: F12. More, including tournaments, phones as controllers and playing on a TV:
 [docs/PLAYING.md](docs/PLAYING.md).
 
 ## How it's made

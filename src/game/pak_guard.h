@@ -34,6 +34,7 @@ namespace blitz::pakimg {
         uint64_t id = 0;
         uint32_t gen = 0;
         uint8_t team = 0, week = 0;    // display team index, week (0-based; the game shows week + 1)
+        uint32_t crc = 0;              // the season file's CRC, which the file must match (adv_save.cpp load_sidecar)
         uint32_t pak[0x20] = {};       // pak offset of each of the stub's 32 bytes (a slot can cross a page)
     };
 

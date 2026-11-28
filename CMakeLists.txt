@@ -388,6 +388,8 @@ target_sources(BlitzRecompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/src/main/crash_report.cpp
     ${CMAKE_SOURCE_DIR}/src/main/reset_data.cpp
     ${CMAKE_SOURCE_DIR}/src/main/pak_backups.cpp
+    ${CMAKE_SOURCE_DIR}/src/main/save_sync.cpp
+    ${CMAKE_SOURCE_DIR}/src/main/save_sync_wifi.cpp
     ${CMAKE_SOURCE_DIR}/src/main/device_send.cpp
     ${CMAKE_SOURCE_DIR}/src/main/capture.cpp
     ${CMAKE_SOURCE_DIR}/src/main/toast.cpp
@@ -400,12 +402,16 @@ target_sources(BlitzRecompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/src/main/experience.cpp
     ${CMAKE_SOURCE_DIR}/src/main/ui_kit.cpp
     ${CMAKE_SOURCE_DIR}/third_party/qrcodegen/qrcodegen.cpp
+    ${CMAKE_SOURCE_DIR}/third_party/monocypher/monocypher.c
     ${CMAKE_SOURCE_DIR}/src/main/dev_monitor.cpp
     ${CMAKE_SOURCE_DIR}/src/main/audio.cpp
     ${CMAKE_SOURCE_DIR}/src/game/config.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/settings_tabs.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/settings_hold.cpp
     ${CMAKE_SOURCE_DIR}/src/game/known_roms.cpp
     ${CMAKE_SOURCE_DIR}/src/game/uniform_picker.cpp
     ${CMAKE_SOURCE_DIR}/src/game/receiver_targets.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/play_art.cpp
     ${CMAKE_SOURCE_DIR}/src/game/portraits.cpp
     ${CMAKE_SOURCE_DIR}/src/game/addons.cpp
     ${CMAKE_SOURCE_DIR}/src/game/export_rom.cpp
@@ -418,6 +424,8 @@ target_sources(BlitzRecompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/src/game/debug_print.cpp
     ${CMAKE_SOURCE_DIR}/src/game/controller_pak.cpp
     ${CMAKE_SOURCE_DIR}/src/game/pak_guard.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/save_sync_core.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/save_sync_cloud.cpp
     ${CMAKE_SOURCE_DIR}/src/game/ai.cpp
     ${CMAKE_SOURCE_DIR}/src/game/widescreen.cpp
     ${CMAKE_SOURCE_DIR}/src/game/tall_view.cpp
@@ -477,9 +485,15 @@ elseif (ANDROID)
 elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_sources(BlitzRecompiled PRIVATE ${CMAKE_SOURCE_DIR}/src/main/platform_linux.cpp)
 endif()
+# Secure storage on Apple platforms (blitz_host.h secure_put): the Keychain, through the Security framework.
+if (APPLE)
+    target_sources(BlitzRecompiled PRIVATE ${CMAKE_SOURCE_DIR}/src/main/secure_store_apple.cpp)
+    target_link_libraries(BlitzRecompiled PRIVATE "-framework Security")
+endif()
 
 target_include_directories(BlitzRecompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/qrcodegen
+    ${CMAKE_SOURCE_DIR}/third_party/monocypher
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/lib/RecompFrontend/recompui/src  # widgets for our own settings tabs (controllers_tab.cpp)
     ${FUNCS_DIR}
@@ -499,6 +513,15 @@ target_include_directories(BlitzRecompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/lib/rt64/src/contrib/nativefiledialog-extended/src/include
     ${CMAKE_CURRENT_BINARY_DIR}
 )
+
+# Cloud Sync and Sync over Wi-Fi (Settings → Saves; docs/SAVE_SYNC.md §7). On in every build, the public one too, since
+# 1.0.5 (the owner's call, 2026-11-27; private builds only before it). Off (-DBLITZ_SAVE_SYNC_NET=OFF), Settings → Saves
+# has only Export and Import Save File. Cloud Sync also needs the server's address (Resources/sync/server, which the
+# Makefile's save_sync_server_file writes from build/save_sync_server).
+option(BLITZ_SAVE_SYNC_NET "Cloud Sync and Sync over Wi-Fi in Settings → Saves" ON)
+if (BLITZ_SAVE_SYNC_NET)
+    target_compile_definitions(BlitzRecompiled PRIVATE BLITZ_SAVE_SYNC_NET=1)
+endif()
 
 # icon_bytes.c: the app icon embedded for the launcher thumbnail.
 add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/icon_bytes.c ${CMAKE_CURRENT_BINARY_DIR}/icon_bytes.h

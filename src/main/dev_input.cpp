@@ -11,12 +11,17 @@
 // Live control: with BLITZ_INPUT_LIVE=<file>, lines appended to that file while the game runs are
 // pressed as soon as they are read: "<what> [hold seconds]" (no time). tools/live.sh drives it.
 // More live commands: "GFX key=value ..." changes a graphics option for this session only
-// (ar=Original|Expand, hr=Original|Clamp16x9|Full, rr=Original|Display|Manual, rr_manual=N),
+// (ar=Original|Expand, hr=Original|Clamp16x9|Full, rr=Original|Display|Manual, rr_manual=N, res=Original|2x|Auto, msaa=None|2|4, dsmax=N),
 // "DUMP" writes an RDRAM dump (see BLITZ_DUMP_RDRAM_AT), "PAD -2" / "PAD +2" unplugs / plugs in
 // virtual controller 2 (BLITZ_VIRTUAL_PADS), "RESTART" does what Settings → Restart does, and "HANG [seconds]" stops the
 // game's thread at its next controller read, for good or for that long (the freeze rescue's tests, savestate.cpp).
 // On a PS5 the live file is /data/blitzrecomp/live.txt, if it's there when the title starts (lines appended over FTP).
 #include <atomic>
+extern "C" volatile int blitz_ds_res_max;  // lib/rt64 rt64_workload_queue.cpp: GFX dsmax
+extern "C" void blitz_savestate_mark(int op, const char* name);  // savestate.cpp: MARK
+extern "C" void blitz_board_flip(int end);  // board_digits.cpp: BOARD
+extern "C" int blitz_savestate_busy(void);    // savestate.cpp: HOLD
+extern "C" void blitz_savestate_quiet(int on);
 #include <chrono>
 #include <filesystem>
 #ifdef __ANDROID__
@@ -69,11 +74,15 @@ namespace blitz {
     void export_rom_now_dev();                   // export_rom.cpp
     void export_screen_dev();                    // export_rom.cpp
     void request_window_size(int w, int h, bool centre = false);  // main.cpp (the window is the main thread's)
+    void port_layout_set(int port, int v);  // controllers.cpp: PADLAYOUT
+    void ds_stack_request(int width);  // ds_view.cpp: DSSTACK, done on the main thread
+    void release_status();  // notices.cpp: the held toast goes
     void dev_set_option(const std::string& tab, const std::string& option, const std::string& value);  // controllers.cpp
     void dev_virtual_pad(bool attach, int number);  // controllers.cpp
     void dev_open_menu(const std::string& tab);
     void roster_room_open();  // roster_room.cpp (Modern; Classic has a stub)
     void tall_set(const std::string& name, float value);  // tall_view.cpp
+    void play_art_live(const std::string& args);          // play_art.cpp
 }
 
 namespace {
@@ -132,7 +141,27 @@ namespace {
     int64_t steady_ms() {
         return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
     }
-    void dev_hang() {
+    // The live command HOLD (the dev kit): one moment kept on screen to tune against. "HOLD on [frames]" saves it (the mark
+    // "hold") and the game freezes that many frames later; "HOLD refresh" loads it again, runs the same frames with whatever
+    // changed (dials, graphics, a setting) and freezes again; "HOLD off" lets the game go. Its save-state toasts stay quiet.
+    std::atomic<bool> hold_on{false};
+    std::atomic<int> hold_frames{6}, hold_left{0};
+    // (savestate.cpp's freeze rescue doesn't count a held game as stuck.)
+    void dev_hold(int port) {  // at each controller read; port 0's are the frames counted
+        if (!hold_on.load()) return;
+        if (blitz_savestate_busy()) return;  // the save or load happens at the game's next safe moment: let it run to it
+        if (hold_left.load() > 0) {
+            if (port == 0) hold_left--;
+            return;
+        }
+        static bool said = false;
+        if (!said) fprintf(stderr, "[dev] HOLD: frozen\n");
+        said = true;
+        while (hold_on.load() && hold_left.load() == 0) std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        said = false;
+    }
+    void dev_hang(int port) {
+        dev_hold(port);
         const int64_t until = hang_until_ms.exchange(0);
         if (until == 0) return;
         fprintf(stderr, "[dev] HANG: the game's thread stops at this controller read%s\n", until < 0 ? ", for good" : "");
@@ -191,6 +220,18 @@ namespace {
         }
         else if (key == "rr_manual") {
             cfg.rr_manual_value = atoi(value.c_str());
+        }
+        // res=Original|2x|Auto, msaa=None|2|4: for finding a device's best on the spot (the Surface Duo's two screens).
+        else if (key == "res") {
+            cfg.res_option = value == "Original" ? Resolution::Original : value == "2x" ? Resolution::Original2x : Resolution::Auto;
+        }
+        else if (key == "dsmax") {  // the tall picture's most over two screens, Auto only (rt64_workload_queue.cpp); 0: no limit
+            blitz_ds_res_max = atoi(value.c_str());
+            fprintf(stderr, "[dev] gfx dsmax=%d\n", blitz_ds_res_max);
+            return;
+        }
+        else if (key == "msaa") {
+            cfg.msaa_option = value == "4" ? Antialiasing::MSAA4X : value == "2" ? Antialiasing::MSAA2X : Antialiasing::None;
         }
         else {
             fprintf(stderr, "[dev] unknown gfx key '%s'\n", key.c_str());
@@ -281,6 +322,56 @@ namespace {
             blitz::tall_set(name, value);
             return true;
         }
+        if (word == "HOLD") {  // "HOLD on [frames]", "HOLD refresh", "HOLD off": one moment held to tune against (dev kit)
+            std::string what;
+            int frames = 0;
+            ss >> what >> frames;
+            if (what == "on") {
+                if (frames > 0) hold_frames = frames;
+                blitz::release_status();  // a load's "warming up" toast (MARK load just before) would freeze on screen
+                blitz_savestate_quiet(1);
+                blitz_savestate_mark(1, "hold");
+                hold_left = hold_frames.load();
+                hold_on = true;
+            }
+            else if (what == "refresh" && hold_on.load()) {
+                blitz_savestate_mark(2, "hold");
+                hold_left = hold_frames.load();
+            }
+            else if (what == "off") {
+                hold_on = false;
+                hold_left = 0;
+                blitz_savestate_quiet(0);
+            }
+            fprintf(stderr, "[dev] HOLD %s (%d frames)\n", what.c_str(), hold_frames.load());
+            return true;
+        }
+        if (word == "PADLAYOUT") {  // "PADLAYOUT 1 1": player 1's controller's buttons: 0 Auto, 1 PlayStation, 2 Xbox, 3 Switch
+            int player = 1, v = 0;
+            ss >> player >> v;
+            blitz::port_layout_set(player - 1, v);
+            fprintf(stderr, "[input] PADLAYOUT %d %d\n", player, v);
+            return true;
+        }
+        if (word == "DSSTACK") {  // "DSSTACK [width]": BLITZ DS's two Mac windows one above the other, as the Duo is held
+            int width = 0;
+            ss >> width;
+            blitz::ds_stack_request(width);
+            return true;
+        }
+        if (word == "BOARD") {  // "BOARD 1": which end's stadium board gets its image turned (-1, 1, 0 neither; board_digits.cpp)
+            int end = 1;
+            ss >> end;
+            blitz_board_flip(end);
+            fprintf(stderr, "[input] BOARD %d\n", end);
+            return true;
+        }
+        if (word == "PLAYART") {  // "PLAYART off|first|full|auto", "PLAYART width 2.2": Play Art for this run (play_art.cpp)
+            std::string rest;
+            std::getline(ss, rest);
+            blitz::play_art_live(rest);
+            return true;
+        }
         if (word == "PEEK") {  // "PEEK 0x80720E80 10": that many words, to the log
             std::string a;
             int n = 1;
@@ -337,6 +428,12 @@ namespace {
         }
         if (word == "PARTY") {
             blitz::request_blitz_party();
+            return true;
+        }
+        if (word == "MARK") {  // "MARK save kickoff", "MARK load kickoff": named test states, apart from the slots
+            std::string op, name;
+            ss >> op >> name;
+            blitz_savestate_mark(op == "load" ? 2 : 1, name.c_str());
             return true;
         }
         if (word == "SAVESTATE" || word == "LOADSTATE") {  // as F5 / F7, in the current slot
@@ -559,7 +656,7 @@ namespace blitz {
             return false;
         }
         std::call_once(parsed, parse);
-        if (live_mode) dev_hang();
+        if (live_mode) dev_hang(controller_num);
         pregame_input_filter(controller_num, buttons);  // season_pregame.cpp: what closed that screen stays its own
         if (controller_num >= 0 && controller_num < 4) {
             std::lock_guard lock{inject_mutex};
@@ -575,3 +672,6 @@ namespace blitz {
         return true;
     }
 }
+
+// The dev kit has the game held (HOLD on): its stall isn't a freeze (savestate.cpp rescue_watch).
+extern "C" int blitz_dev_holding(void) { return hold_on.load() ? 1 : 0; }

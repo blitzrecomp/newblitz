@@ -20,7 +20,7 @@ meets the bar yet. See "Tested so far".
   brackets (`BRCKTTOP.WMS`) as they're drawn, since its place in memory isn't stable. If the help page is up, the tap
   presses A once and waits for the grid. Only player 1's half responds. The tile header turns the page. During a live
   play, a receiver's icon on either screen throws to him.
-- **Stylus (Settings → DS Screens):** the game on the second window and big tiles on the first, for the right hand. Receiver
+- **Stylus (Settings → DS → DS Screens):** the game on the second window and big tiles on the first, for the right hand. Receiver
   Buttons stays off by default, and Stylus has it on for player 1 whatever the setting says: the fan's three wedges, each wearing
   its button's icon, throw with those buttons (Jump and Pass sit under it; two-tile moments stack them, narrow, with room on the
   right), and the icons over the receivers, on the game's window, say who's who. On one screen a saved Stylus is
@@ -47,7 +47,7 @@ meets the bar yet. See "Tested so far".
 - **Drive log:** every play of every drive also goes to `blitz.log` as `[drive]` lines. The score and the next snap are read
   live, so they're right at a game's first play select and after a save state. Time running backwards (a new game, a save
   state, Redo Play) starts the list over.
-- **Settings → General:** Two Screens (on by default), Swap Screens (Android: from the next launch), Send Logs (Android).
+- **Settings → DS:** Two Screens (on by default), DS Screens (Both, Companion, Stylus, Controller), Swap Screens (Android: from the next launch), the camera presets (Field Ahead, Camera Zoom Out) and Custom Layout. **Settings → General:** Send Logs (Android).
 
 ## How it's built
 
@@ -108,7 +108,7 @@ not (`<screens> <lean> <antialiasing off> <resolution>`), with no expiry. A line
 counts as one screen out of Potato Mode. In Potato Mode two screens never step, and a run that's had them doesn't for the rest of
 it; elsewhere they step as above, saved under two screens.
 
-**Potato Mode's two screens** go by Settings → Two-Screen Sharpness, exactly: 1x (the original resolution, and the default),
+**Potato Mode's two screens** go by Settings → Graphics → Two-Screen Sharpness, exactly: 1x (the original resolution, and the default),
 1.25x, 1.5x, 1.75x or 2x. Above, 1x is called too few lines; on an RG DS Plus it's still the setup the team called almost there.
 Above 1x it's also what 2x draws at if one screen runs at 2x in Potato Mode (a Retroid forced into it); at 1x, 2x stays 2x.
 

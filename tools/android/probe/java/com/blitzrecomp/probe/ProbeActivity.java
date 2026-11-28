@@ -71,6 +71,32 @@ public class ProbeActivity extends Activity {
         ui.post(() -> { text.append(line + "\n"); scroll.post(() -> scroll.fullScroll(View.FOCUS_DOWN)); });
     }
 
+    // A Surface Duo's hinge (docs/SURFACE_DUO.md): Microsoft's DisplayMask for every rotation, and the window now. Fold it,
+    // span it, turn it: each change logs again.
+    private void hinge(String when) {
+        section("hinge, " + when);
+        log("model " + Build.MANUFACTURER + " " + Build.MODEL + " (" + Build.DEVICE + "), feature " + getPackageManager().hasSystemFeature("com.microsoft.device.display.displaymask"));
+        Display d = getWindowManager().getDefaultDisplay();
+        android.util.DisplayMetrics m = new android.util.DisplayMetrics();
+        d.getRealMetrics(m);
+        String window = "?";
+        if (Build.VERSION.SDK_INT >= 30) window = getWindowManager().getCurrentWindowMetrics().getBounds().toShortString();
+        log("display " + m.widthPixels + "x" + m.heightPixels + " rotation " + d.getRotation() + ", window " + window);
+        try {
+            Class<?> mask = Class.forName("com.microsoft.device.display.DisplayMask");
+            Object o = mask.getMethod("fromResourcesRectApproximation", Context.class).invoke(null, this);
+            for (int r = 0; r < 4; r++) log("DisplayMask rotation " + r + ": " + mask.getMethod("getBoundingRectsForRotation", int.class).invoke(o, r));
+        } catch (Throwable t) {
+            log("DisplayMask: " + t);
+        }
+    }
+
+    @Override
+    public void onConfigurationChanged(android.content.res.Configuration c) {
+        super.onConfigurationChanged(c);
+        ui.postDelayed(() -> hinge("after a change"), 300);
+    }
+
     private void section(String name) { log("\n== " + name + " =="); }
 
     private void toggleBars() {
@@ -146,6 +172,7 @@ public class ProbeActivity extends Activity {
         for (Display d : dm.getDisplays()) log(describe(d));
         Display here = getWindowManager().getDefaultDisplay();
         log("this activity is on display " + here.getDisplayId());
+        hinge("at launch");
         Display[] presentable = dm.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION);
         log("presentation displays: " + presentable.length + " (a Presentation needs FLAG_PRESENTATION, flags bit 0x8; the game falls back to an activity)");
         for (Display d : dm.getDisplays()) {

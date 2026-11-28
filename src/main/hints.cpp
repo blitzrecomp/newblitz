@@ -10,6 +10,9 @@
 // Moments come from what the app already tracks: the launcher, the game's menus (0x802EA420 phase 1), team select
 // (the uniform picker's per-frame hook), play select / a play / offense or defense (savestate.cpp's play mode),
 // and Settings being open. Main thread only (update_gfx in main.cpp); the team-select mark comes from the game thread.
+#include <atomic>
+#include <mutex>
+extern "C" int blitz_ds_active(void);  // ds_view.cpp
 #include "game_moment.h"
 #include "../game/season_pak.h"
 
@@ -56,6 +59,10 @@ namespace {
     int64_t now_ms() {
         return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
     }
+
+    std::mutex ds_hint_mutex;
+    std::string ds_hint_title, ds_hint_body;
+    std::atomic<bool> ds_hint_shown{false};
 
     // What the game is showing, as far as the hints care.
     enum class Moment { None, LauncherRom, LauncherReady, Intro, Menus, TeamSelect, PlaySelect, Offense, Defense, Settings };
@@ -387,6 +394,24 @@ namespace {
         if (blitz::ui::touch_only()) {
             if (const char* t = touch_body(h.id, season)) text = t;
         }
+        {   // The same words for BLITZ DS's upper screen, which shows a hint there instead of over the lower one's tiles.
+            auto esc = [](const std::string& in) {
+                std::string o;
+                for (char c : in) o += c == '<' ? "&lt;" : c == '>' ? "&gt;" : c == '&' ? "&amp;" : std::string(1, c);
+                return o;
+            };
+            std::string rml;
+            bool glyph_before = false;
+            for (const Piece& p : pieces(text)) {
+                const bool tight = glyph_before && !p.glyph && p.text.size() == 1 && std::string(".,;:)").find(p.text[0]) != std::string::npos;
+                if (!rml.empty() && !tight) rml += " ";
+                rml += p.glyph ? "<span style=\"font-family:promptfont;font-style:normal;font-weight:400;\">" + esc(p.text) + "</span>" : esc(p.text);
+                glyph_before = p.glyph;
+            }
+            std::lock_guard lock{ds_hint_mutex};
+            ds_hint_title = esc(t);
+            ds_hint_body = rml;
+        }
         for (const Piece& p : pieces(text)) {
             Label* l = context.create_element<Label>(body, p.text, theme::Typography::Body);
             if (after_glyph && !p.glyph && p.text.size() == 1 && std::string(".,;:)").find(p.text[0]) != std::string::npos) {
@@ -410,6 +435,10 @@ namespace {
     }
 
     void set_look(float o, float dx) {
+        // Two screens: the card goes to the upper screen's drive board (ds_view.cpp, hints_for_upper_screen), not over the
+        // lower one's play tiles and header (team, 2026-11-26).
+        ds_hint_shown = o > 0.05f;
+        if (blitz_ds_active()) o = 0.0f;
         if (o == opacity && dx == shift) return;
         opacity = o;
         shift = dx;
@@ -471,12 +500,30 @@ namespace blitz {
         return true;
     }
 
+    // Any touch on either of BLITZ DS's screens (ds_view.cpp): the tip goes, as a button press sends it (team, 2026-11-26:
+    // with the card on the upper screen, a touch-only player needs a way). The touch still does what it does.
+    void hints_touched() {
+        if (!up || leaving || showing == nullptr) return;
+        if (Clock::now() - shown_at <= dismissable) return;
+        if (!preview) mark_seen(showing->id);
+        begin_leave();
+    }
+
     // Team select's selection loop, each frame (uniform_picker.cpp, game thread).
     void hints_mark_team_select() {
         team_select_at = now_ms();
     }
 
     // Dev: "HINT <id>" shows that hint now, whatever the moment (and doesn't mark it seen).
+    // BLITZ DS: the hint that's up now, for the upper screen's board (ds_view.cpp); false when none is.
+    bool hints_for_upper_screen(std::string& title, std::string& body_rml) {
+        if (!ds_hint_shown.load()) return false;
+        std::lock_guard lock{ds_hint_mutex};
+        title = ds_hint_title;
+        body_rml = ds_hint_body;
+        return !title.empty();
+    }
+
     void hints_preview(const std::string& id) {
         for (const Hint& h : hints()) {
             if (id == h.id) {

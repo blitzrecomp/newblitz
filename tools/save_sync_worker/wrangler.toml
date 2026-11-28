@@ -1,0 +1,36 @@
+# New Blitz's save sync server (src/index.js; docs/SAVE_SYNC.md §7). Deploy steps: DEPLOY.md.
+# Its own Worker and its own R2 bucket, apart from the rosters hub and the season server. No secrets: each device makes
+# its write token from its sync code, and the server keeps only the token's SHA-256. Nothing here names the account:
+# wrangler deploys to the account it is logged in to, and the address becomes
+# https://newblitz-saves.<account's workers.dev subdomain>.workers.dev/
+name = "newblitz-saves"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+workers_dev = true
+
+# The saves: v1/<id> (current), v1/<id>.prev (the one before), meta/new-<day> (the new-ids-a-day counter),
+# pair/<pid> (a pairing number's sealed code, two minutes).
+# Created by `npx wrangler@4 r2 bucket create newblitz-saves` (DEPLOY.md step 3).
+[[r2_buckets]]
+binding = "SAVES"
+bucket_name = "newblitz-saves"
+
+[vars]
+MAX_NEW_PER_DAY = "2000"          # new sync codes a day, all players together (abuse cap; 429 past it)
+MAX_PAIRS = "500"                 # pairing numbers live at once, all players together (429 past it)
+
+# Pairing's guess limit (src/index.js pair_try): 5 creates or lookups a minute per connection, so about 10 tries in a
+# number's two minutes. Keyed by a salted SHA-256 of CF-Connecting-IP (never stored or logged). Without this binding the
+# pairing routes answer 503. namespace_id: any positive integer not used by another rate limiter in the account
+# (DEPLOY.md step 5); the period can only be 10 or 60 seconds.
+[[ratelimits]]
+name = "PAIR_LIMITER"
+namespace_id = "7301"
+  [ratelimits.simple]
+  limit = 5
+  period = 60
+
+# The daily sweep (src/index.js sweep): ids with no write for 90 days go, with their previous copies; day counters
+# after a week. 04:17 UTC.
+[triggers]
+crons = ["17 4 * * *"]

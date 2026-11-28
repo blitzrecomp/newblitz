@@ -2,12 +2,17 @@
 // screen (export_screen.cpp): a framed panel over a dark veil, the eyebrow, the title on a flame rule, the body, and
 // the buttons with the default one big and focused. Back and Exit sit at the bottom; the hints under the panel show
 // their buttons (Back: □ or ○, Backspace, Esc; Exit: Select, or the on-screen button).
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cstdint>
+#include <cstdlib>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #include "SDL2/SDL.h"
+#include "blitz_platform.h"
 #include "recompui/recompui.h"
 #include "core/ui_context.h"
 #include "elements/ui_element.h"
@@ -19,6 +24,8 @@
 #include "firstrun_screen.h"
 
 namespace {
+    bool tearing_down = false;  // show() is removing the last screen (its focus callbacks stand down)
+    recompui::Label* note_label = nullptr;  // this screen's note (update_note changes it without drawing the screen again)
     using namespace recompui;
     using blitz::firstrun_ui::Screen;
 
@@ -38,12 +45,29 @@ namespace {
 
     // When Esc was last pressed: Esc and a controller's Select both arrive as the Toggle action.
     std::atomic<Uint32> escape_at{0};
+    // A screen's digit keys (a number pad's, typed on a computer's keyboard).
+    std::mutex typed_mutex;
+    std::function<void(char)> typed_now;
     int watch_keys(void*, SDL_Event* e) {
         if (e->type == SDL_KEYDOWN && e->key.keysym.scancode == SDL_SCANCODE_ESCAPE) escape_at = SDL_GetTicks() | 1;
+        if (e->type == SDL_KEYDOWN && e->key.repeat == 0) {
+            const SDL_Keycode k = e->key.keysym.sym;
+            char d = 0;
+            if (k >= SDLK_0 && k <= SDLK_9) d = (char)('0' + (k - SDLK_0));
+            else if (k >= SDLK_KP_1 && k <= SDLK_KP_9) d = (char)('1' + (k - SDLK_KP_1));
+            else if (k == SDLK_KP_0) d = '0';
+            if (d != 0) {
+                std::lock_guard lock{typed_mutex};
+                if (typed_now) typed_now(d);
+            }
+        }
         return 0;
     }
+    // Select (or Esc, when it's taken as the menu key): Exit where the screen has one (setup), else Back (the Saves
+    // screens: Select closes them as it closes Settings).
     void go_exit() {
         if (current.exit) current.exit();
+        else if (current.back) current.back();
     }
 
     class Root : public Element {
@@ -152,8 +176,29 @@ namespace {
         state->set_color(on ? Color{246, 212, 0, 255} : Color{184, 196, 218, 255});
     }
 
+    // A button with its own label, so a large screen can size the words (a Button's own label has a fixed size).
+    Button* sized_button(Element* parent, const std::string& label, ButtonStyle style, float font, theme::Typography t) {
+        Button* b = context.create_element<Button>(parent, "", style, ButtonSize::Card);
+        b->hide_focus_ring();
+        b->set_display(Display::Flex);
+        b->set_align_items(AlignItems::Center);
+        b->set_justify_content(JustifyContent::Center);
+        b->set_height_auto();
+        // In capitals like every button's own label, and in the button's colour (so focus turns it yellow too).
+        std::string upper = label;
+        for (char& c : upper) c = (char)std::toupper((unsigned char)c);
+        Label* l = context.create_element<Label>(b, upper, t);
+        l->set_font_size(blitz::ui::px(font));
+        l->set_white_space(WhiteSpace::Normal);
+        l->set_text_align(TextAlign::Center);
+        return b;
+    }
+
     void build() {
         const Screen& s = current;
+        const float f = s.large ? blitz::firstrun_ui::large_scale() : 1.0f;
+        const bool phone_sized = f > 1.5f;
+        auto z = [f](float v) { return blitz::ui::px(v * f); };
         root = context.create_element<Root>(context.get_root_element());
         root->set_position(Position::Absolute);
         root->set_top(0);
@@ -166,7 +211,8 @@ namespace {
         root->set_background_color(Color{4, 10, 26, 245});
         Element* card = context.create_element<Element>(root);
         card->set_position(Position::Relative);
-        card->set_width(blitz::ui::px(720));
+        if (s.large && phone_sized) card->set_width(90.0f, Unit::Percent);  // a phone: most of the width, for bigger words, with room at the sides (team)
+        else card->set_width(blitz::ui::px(s.large ? 860 : 720));
         card->set_max_width(96.0f, Unit::Percent);  // a narrow window: the card narrows, the buttons wrap
         card->set_margin_bottom(blitz::ui::px(30));  // clear of the hints
         blitz::ui::PanelOptions o;
@@ -176,30 +222,78 @@ namespace {
         content->set_flex_direction(FlexDirection::Column);
         content->set_gap(blitz::ui::px(8));
         content->set_padding(blitz::ui::px(20));
+        if (s.large) {  // the big screens' words and buttons kept in from the card's sides (the team's iPhone, 2026-11-27)
+            content->set_padding_left(blitz::ui::px(40));
+            content->set_padding_right(blitz::ui::px(40));
+        }
         content->set_as_navigation_container(NavigationType::GridCol);
+        if (s.large) {
+            // Still too tall (a long body on a phone): the card scrolls (touch drag, the wheel, or focus moving down).
+            content->set_max_height(1080.0f - 64.0f - blitz::ui::px(30) - blitz::ui::px(24));
+            content->set_overflow_y(Overflow::Auto);
+        }
 
-        if (!s.eyebrow.empty()) text(content, s.eyebrow, theme::Typography::LabelXS, 11, teal);
+        if (!s.eyebrow.empty()) text(content, s.eyebrow, theme::Typography::LabelXS, 11 * f, teal);
         Label* title = context.create_element<Label>(content, s.title, theme::Typography::Header2);
         title->set_color(theme::color::SecondaryL);
+        if (s.large) title->set_font_size(52.0f * std::min(f, 1.45f));
         Element* rule = context.create_element<Element>(content, 0, "div", false);
         rule->set_height(blitz::ui::px(4));
         rule->set_position(Position::Relative);
         blitz::ui::stretch(context, rule, "rule_flame");
+
+        // With a number pad: the words and buttons on the left, the pad on the right (under them when it's narrow).
+        Element* main = content;
+        Element* pad_side = nullptr;
+        if (!s.pad.empty()) {
+            Element* split = context.create_element<Element>(content, 0, "div", false);
+            split->set_display(Display::Flex);
+            split->set_flex_direction(FlexDirection::Row);
+            split->set_flex_wrap(FlexWrap::Wrap);
+            split->set_align_items(AlignItems::Center);
+            split->set_justify_content(JustifyContent::Center);
+            split->set_gap(z(16));
+            split->set_as_navigation_container(NavigationType::Auto);
+            main = context.create_element<Element>(split, 0, "div", false);
+            main->set_display(Display::Flex);
+            main->set_flex_direction(FlexDirection::Column);
+            main->set_gap(blitz::ui::px(8));
+            main->set_flex_grow(1.0f);
+            main->set_flex_basis(40.0f);
+            main->set_min_width(z(180));
+            main->set_as_navigation_container(NavigationType::GridCol);
+            pad_side = context.create_element<Element>(split, 0, "div", false);
+            pad_side->set_display(Display::Flex);
+            pad_side->set_flex_direction(FlexDirection::Column);
+            pad_side->set_gap(z(6));
+            pad_side->set_flex_shrink(0.0f);
+            pad_side->set_as_navigation_container(NavigationType::GridCol);
+        }
+
         size_t from = 0;
         while (!s.body.empty() && from <= s.body.size()) {
             size_t nl = s.body.find('\n', from);
             std::string line = s.body.substr(from, nl == std::string::npos ? std::string::npos : nl - from);
             if (line.empty()) {
-                Element* gap = context.create_element<Element>(content, 0, "div", false);
-                gap->set_height(blitz::ui::px(4));
+                Element* gap = context.create_element<Element>(main, 0, "div", false);
+                gap->set_height(blitz::ui::px(4) * f);
             }
-            else para(content, line, 15, white);
+            else para(main, line, 15 * f, white);
             if (nl == std::string::npos) break;
             from = nl + 1;
         }
 
+        if (!s.big.empty()) {
+            Label* big = text(main, s.big, theme::Typography::Header1, 56 * f, gold);
+            big->set_white_space(WhiteSpace::Nowrap);
+            big->set_text_align(TextAlign::Center);
+            big->set_letter_spacing(blitz::ui::px(4) * f);
+            big->set_margin_top(blitz::ui::px(4) * f);
+            big->set_margin_bottom(blitz::ui::px(4) * f);
+        }
+
         if (!s.qr_url.empty()) {
-            Element* row = context.create_element<Element>(content, 0, "div", false);
+            Element* row = context.create_element<Element>(main, 0, "div", false);
             row->set_display(Display::Flex);
             row->set_flex_direction(FlexDirection::Row);
             row->set_align_items(AlignItems::Center);
@@ -207,16 +301,16 @@ namespace {
             row->set_gap(blitz::ui::px(24));
             row->set_margin_top(blitz::ui::px(6));
             draw_qr(row, s.qr_url);
-            Label* cap = text(row, s.qr_caption, theme::Typography::Header3, 20, teal);
+            Label* cap = text(row, s.qr_caption, theme::Typography::Header3, 20 * f, teal);
             cap->set_white_space(WhiteSpace::Nowrap);
         }
 
         for (const auto& c : s.checks) {
-            Button* b = context.create_element<Button>(content, "", ButtonStyle::Secondary, ButtonSize::Small);
+            Button* b = context.create_element<Button>(main, "", ButtonStyle::Secondary, ButtonSize::Small);
             b->hide_focus_ring();
-            b->set_height(blitz::ui::px(64));
-            b->set_min_height(blitz::ui::px(64));
-            b->set_max_height(blitz::ui::px(64));
+            b->set_height(z(64));
+            b->set_min_height(z(64));
+            b->set_max_height(z(64));
             b->set_padding(blitz::ui::px(10));
             b->set_display(Display::Flex);
             b->set_flex_direction(FlexDirection::Row);
@@ -224,9 +318,9 @@ namespace {
             b->set_justify_content(JustifyContent::FlexStart);
             b->set_gap(blitz::ui::px(12));
             Element* box = context.create_element<Element>(b, 0, "div", false);
-            box->set_width(blitz::ui::px(24));
-            box->set_height(blitz::ui::px(24));
-            box->set_min_width(blitz::ui::px(24));
+            box->set_width(z(24));
+            box->set_height(z(24));
+            box->set_min_width(z(24));
             box->set_border_width(blitz::ui::px(2));
             box->set_border_radius(blitz::ui::px(3));
             box->set_border_color(gold);
@@ -238,13 +332,13 @@ namespace {
             words->set_flex_direction(FlexDirection::Column);
             words->set_align_items(AlignItems::FlexStart);
             words->set_gap(blitz::ui::px(2));
-            text(words, c.label, theme::Typography::Header3, 17, white);
-            Label* about = text(words, c.about, theme::Typography::Body, 12, dim);
+            text(words, c.label, theme::Typography::Header3, 17 * f, white);
+            Label* about = text(words, c.about, theme::Typography::Body, 12 * f, dim);
             about->set_white_space(WhiteSpace::Normal);
             about->set_text_align(TextAlign::Left);
             words->set_flex_grow(1.0f);
-            Label* tick = text(b, "", theme::Typography::LabelXS, 12, dim);
-            tick->set_min_width(blitz::ui::px(34));
+            Label* tick = text(b, "", theme::Typography::LabelXS, 12 * f, dim);
+            tick->set_min_width(z(34));
             restyle_check(box, tick, c.get());
             auto get = c.get;
             auto set = c.set;
@@ -253,13 +347,14 @@ namespace {
                 set(v);
                 restyle_check(box, tick, v);
             });
+            if (s.large) b->set_focus_callback([b](bool on) { if (on && !tearing_down) b->scroll_into_view(); });
         }
 
         Button* first_block = nullptr;
         if (!s.long_text.empty()) {
             // A long text (what a crash report holds) in blocks the D-pad can step through: focusing one scrolls the
             // box to it. The mouse wheel and touch drag scroll it too.
-            Element* scroll = context.create_element<Element>(content, 0, "div", false);
+            Element* scroll = context.create_element<Element>(main, 0, "div", false);
             scroll->set_position(Position::Relative);
             scroll->set_height(blitz::ui::px(300));
             scroll->set_min_height(blitz::ui::px(300));
@@ -310,24 +405,74 @@ namespace {
             }
         }
 
-        if (!s.note.empty()) para(content, s.note, 13, gold);
+        note_label = s.note.empty() ? nullptr : para(main, s.note, 13 * f, gold);
 
         Button* first = first_block;
-        Element* acts = context.create_element<Element>(content, 0, "div", false);
+        Element* acts = context.create_element<Element>(main, 0, "div", false);
         acts->set_display(Display::Flex);
-        acts->set_flex_direction(FlexDirection::Column);
-        acts->set_gap(blitz::ui::px(6));
+        acts->set_gap(blitz::ui::px(6) * f);
         acts->set_margin_top(blitz::ui::px(6));
-        acts->set_as_navigation_container(NavigationType::GridCol);
+        if (s.large) {
+            // Two to a row where there's room (a phone held sideways), one where there isn't: each at least so wide.
+            acts->set_flex_direction(FlexDirection::Row);
+            acts->set_flex_wrap(FlexWrap::Wrap);
+            acts->set_as_navigation_container(NavigationType::Auto);
+        }
+        else {
+            acts->set_flex_direction(FlexDirection::Column);
+            acts->set_as_navigation_container(NavigationType::GridCol);
+        }
         for (size_t i = 0; i < s.actions.size(); i++) {
-            Button* b = context.create_element<Button>(acts, s.actions[i].label, i == 0 ? ButtonStyle::Primary : ButtonStyle::Secondary,
-                                                       ButtonSize::Card);
-            b->hide_focus_ring();
-            b->set_min_height(blitz::ui::px(i == 0 ? 46 : 38));
+            const ButtonStyle style = i == 0 && s.pad.empty() ? ButtonStyle::Primary : ButtonStyle::Secondary;
+            Button* b = nullptr;
+            if (s.large) {
+                b = sized_button(acts, s.actions[i].label, style, 18 * f, theme::Typography::LabelMD);
+                // A fixed height (room for a label wrapped to two lines): a min-height in a wrapping row let the next
+                // block overlap the taller first button.
+                b->set_height(z(44));
+                b->set_min_height(z(44));
+                b->set_max_height(z(44));
+                b->set_flex_grow(1.0f);
+                b->set_flex_basis(40.0f);
+                b->set_min_width(z(170));
+                b->set_padding_left(blitz::ui::px(10));
+                b->set_padding_right(blitz::ui::px(10));
+                b->set_focus_callback([b](bool on) { if (on && !tearing_down) b->scroll_into_view(); });
+            }
+            else {
+                b = context.create_element<Button>(acts, s.actions[i].label, style, ButtonSize::Card);
+                b->hide_focus_ring();
+                b->set_min_height(blitz::ui::px(i == 0 ? 46 : 38));
+            }
             auto pressed = s.actions[i].pressed;
             b->add_pressed_callback([pressed] { if (pressed) pressed(); });
             if ((int)i == s.focus || first == nullptr || first == first_block) first = b;
         }
+
+        // The number pad: 1-9 in threes, then whatever the screen puts last (Clear, 0, Delete).
+        Button* first_key = nullptr;
+        for (size_t i = 0; pad_side != nullptr && i < s.pad.size(); i += 3) {
+            Element* row = context.create_element<Element>(pad_side, 0, "div", false);
+            row->set_display(Display::Flex);
+            row->set_flex_direction(FlexDirection::Row);
+            row->set_gap(z(6));
+            row->set_as_navigation_container(NavigationType::GridRow);
+            for (size_t j = i; j < i + 3 && j < s.pad.size(); j++) {
+                const bool digit = s.pad[j].label.size() == 1;
+                Button* b = sized_button(row, s.pad[j].label, ButtonStyle::Secondary, digit ? 26 * f : 15 * f,
+                                         digit ? theme::Typography::Header3 : theme::Typography::LabelMD);
+                b->set_width(z(80));
+                b->set_min_width(z(80));
+                b->set_height(z(46));
+                b->set_min_height(z(46));
+                b->set_max_height(z(46));
+                auto pressed = s.pad[j].pressed;
+                b->add_pressed_callback([pressed] { if (pressed) pressed(); });
+                if (s.large) b->set_focus_callback([b](bool on) { if (on && !tearing_down) b->scroll_into_view(); });
+                if (first_key == nullptr) first_key = b;
+            }
+        }
+        if (first_key != nullptr && s.focus == 0) first = first_key;
 
         if ((s.back && s.back_button) || s.exit) {
             Element* bar = context.create_element<Element>(content, 0, "div", false);
@@ -358,7 +503,22 @@ namespace {
     }
 }
 
+// RecompFrontend's ui_state.cpp (patch 0054): while one of these screens is up over a running game, Esc and Select don't
+// open Settings; they're the screen's own Back (Root above). Before, Esc on Settings → Saves → Cloud Sync opened Settings
+// over it and seemed to do nothing (the 1.0.5 sweep, 2026-11-27).
+extern "C" int blitz_own_screen_up(void) { return blitz::firstrun_ui::shown() ? 1 : 0; }
+
 namespace blitz::firstrun_ui {
+    // The note's words only (a countdown ticking), without drawing the screen again: drawn again, focus went back to the
+    // default button each second, lighting it up (the team's Surface Duo, 2026-11-27). False when the screen has no note.
+    bool update_note(const std::string& text) {
+        if (note_label == nullptr || context == ContextId::null()) return false;
+        context.open();
+        note_label->set_text(text);
+        context.close();
+        return true;
+    }
+
     void show(const Screen& screen) {
         static bool watching = false;
         if (!watching) {
@@ -373,17 +533,39 @@ namespace blitz::firstrun_ui {
         // The last screen goes (clear_children also takes it out of the root's child list, which destroy_resource
         // alone doesn't: navigation then walked a freed element).
         if (root != nullptr) {
+            // While the old buttons go, RmlUi hands focus from one dying element to the next: their scroll-into-view
+            // callbacks mustn't run then (a crash just after Cloud Sync's join, the team's Surface Duo, 2026-11-27).
+            tearing_down = true;
+            note_label = nullptr;
             context.clear_children();
+            tearing_down = false;
             root = nullptr;
         }
         current = screen;
+        {
+            std::lock_guard lock{typed_mutex};
+            typed_now = current.typed;
+        }
         build();
         context.close();
         recompui::show_context(context, "");
         up = true;
     }
 
+    float large_scale() {
+        static const float scale = [] {
+            const char* e = getenv("BLITZ_PHONE_UI");
+            if (blitz::platform::phone || (e != nullptr && e[0] == '1')) return 1.9f;
+            return 1.3f;
+        }();
+        return scale;
+    }
+
     void hide() {
+        {
+            std::lock_guard lock{typed_mutex};
+            typed_now = nullptr;
+        }
         if (!up) return;
         up = false;
         if (context != ContextId::null() && recompui::is_context_shown(context)) recompui::hide_context(context);

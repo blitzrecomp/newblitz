@@ -108,6 +108,7 @@ namespace {
     int speed = 0;           // an index into speeds
     constexpr double speeds[] = {1.0, 0.5, 0.25};
     constexpr const char* speed_names[] = {"FULL SPEED", "1/2 SPEED", "1/4 SPEED"};
+    constexpr const char* speed_short[] = {"1X", "1/2X", "1/4X"};  // a narrow panel's (compact, below)
     int play_from = 0;       // the frame the loop starts at: this play's first
     Clock::time_point last_tick, opened_at, last_input, end_reached;
     bool at_end = false;
@@ -134,6 +135,13 @@ namespace {
     Label* speed_label = nullptr;
     Label* play_label = nullptr;
     Label* save_label = nullptr;
+    Element* button_row = nullptr;
+    Element* step_chips[2] = {};
+    std::vector<Element*> chips;
+    // The bar's row at a phone's or a Duo panel's width (4:3 is about 1340 dp across the panel): FULL SPEED wrapped inside
+    // its chip and SAVING 45% ran out of its own (the team's Duo, 2026-11-27). Every label stays on one line and its chip never
+    // shrinks below it; a narrow panel takes short words (1X, 45%) and tighter chips, a very narrow one drops < and >.
+    int look_compact = -1;  // 0 wide, 1 compact, 2 compact without the step buttons
     constexpr int max_ticks = 16;
     Element* ticks[max_ticks] = {};
     struct Glyph {
@@ -177,8 +185,12 @@ namespace {
     }
 
     // A chip with the press's glyph and a word: not focusable, so the controller's keys stay this file's.
-    Label* button(Element* row, SDL_GameControllerButton pad, SDL_Scancode key, const std::string& text, std::function<void()> action) {
+    Label* button(Element* row, SDL_GameControllerButton pad, SDL_Scancode key, const std::string& text, std::function<void()> action,
+                  Element** chip = nullptr) {
         Clickable* b = context.create_element<Clickable>(row, false);
+        if (chip != nullptr) *chip = b;
+        chips.push_back(b);
+        b->set_flex_shrink(0.0f);  // as wide as its glyph and word, always
         b->set_position(Position::Relative);
         b->set_display(Display::Flex);
         b->set_flex_direction(FlexDirection::Row);
@@ -197,7 +209,10 @@ namespace {
             g->set_font_family("promptfont");
             glyphs.push_back({g, pad, key});
         }
-        return label(b, text, 38.0f, Color{242, 242, 242, 255});
+        Label* l = label(b, text, 38.0f, Color{242, 242, 242, 255});
+        l->set_white_space(WhiteSpace::Nowrap);
+        l->set_flex_shrink(0.0f);
+        return l;
     }
 
     void track_moved(float x) {
@@ -342,14 +357,15 @@ namespace {
             }
 
             Element* row = context.create_element<Element>(inside);
+            button_row = row;
             row->set_display(Display::Flex);
             row->set_flex_direction(FlexDirection::Row);
             row->set_align_items(AlignItems::Center);
             row->set_gap(18.0f);
             {
                 play_label = button(row, SDL_CONTROLLER_BUTTON_A, SDL_SCANCODE_SPACE, "PAUSE", [] { press_play = true; });
-                button(row, SDL_CONTROLLER_BUTTON_INVALID, SDL_SCANCODE_UNKNOWN, "<", [] { press_step = -1; });
-                button(row, SDL_CONTROLLER_BUTTON_INVALID, SDL_SCANCODE_UNKNOWN, ">", [] { press_step = 1; });
+                button(row, SDL_CONTROLLER_BUTTON_INVALID, SDL_SCANCODE_UNKNOWN, "<", [] { press_step = -1; }, &step_chips[0]);
+                button(row, SDL_CONTROLLER_BUTTON_INVALID, SDL_SCANCODE_UNKNOWN, ">", [] { press_step = 1; }, &step_chips[1]);
                 speed_label = button(row, SDL_CONTROLLER_BUTTON_B, SDL_SCANCODE_V, "FULL SPEED", [] { press_speed = true; });
                 Element* gap = context.create_element<Element>(row);
                 gap->set_flex_grow(1.0f);
@@ -709,13 +725,29 @@ namespace {
             play_label->set_text(playing ? "PAUSE" : "PLAY");
             look_playing = playing;
         }
-        if (speed != look_speed) {
-            speed_label->set_text(speed_names[speed]);
+        // The panel's width in dp (last layout's): under 1500 (a 4:3 screen, a Duo panel) the compact row, under 1150 without
+        // the step buttons (the D-pad and the scrubber still step).
+        const float ratio = controls->get_dp_to_pixel_ratio();
+        const float panel_dp = ratio > 0.0f ? controls->get_client_width() / ratio : 0.0f;
+        const int compact = panel_dp <= 0.0f ? std::max(look_compact, 0) : panel_dp < 1150.0f ? 2 : panel_dp < 1500.0f ? 1 : 0;
+        const bool compact_changed = compact != look_compact;
+        if (compact_changed) {
+            const float pad_side = compact ? 14.0f : 20.0f;
+            for (Element* c : chips) {
+                c->set_padding_left(pad_side);
+                c->set_padding_right(pad_side + (compact ? 0.0f : 2.0f));
+            }
+            button_row->set_gap(compact ? 12.0f : 18.0f);
+            for (Element* c : step_chips) c->set_display(compact == 2 ? Display::None : Display::Flex);
+            look_compact = compact;
+        }
+        if (speed != look_speed || compact_changed) {
+            speed_label->set_text(compact ? speed_short[speed] : speed_names[speed]);
             look_speed = speed;
         }
         const int percent = saving.load() ? save_percent.load() : -1;
-        if (percent != look_percent) {
-            save_label->set_text(percent >= 0 ? "SAVING " + std::to_string(percent) + "%" : "SAVE");
+        if (percent != look_percent || compact_changed) {
+            save_label->set_text(percent < 0 ? "SAVE" : compact ? std::to_string(percent) + "%" : "SAVING " + std::to_string(percent) + "%");
             look_percent = percent;
         }
         context.close();
@@ -830,7 +862,7 @@ namespace blitz {
                 want_save = false;
                 if (want_open.exchange(false)) {
                     if (blitz_replay_count() < 8) {
-                        post_status(blitz_replay_enabled ? "Replay: nothing to show yet" : "Replay: off (Settings, General)");
+                        post_status(blitz_replay_enabled ? "Replay: nothing to show yet" : "Replay: off (Settings, Rules)");
                         break;
                     }
                     if (saving.load()) {

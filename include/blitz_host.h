@@ -29,6 +29,14 @@ namespace blitz {
     // A blocking HTTP POST of a body (call it off the main thread): true when the server answers 2xx. Crash reports
     // (crash_report.cpp). The PS5 has none (false).
     bool http_post(const std::string& url, const std::string& content_type, const std::string& body, int& status);
+    // One small secret kept by name in the platform's secure storage (Cloud Sync's code, save_sync.cpp): the Keychain on
+    // macOS and iOS, the Android Keystore (an AES key that never leaves it), DPAPI on Windows, the Secret Service
+    // (libsecret, when the desktop has it) on Linux. False when there's none or it failed: the caller then keeps a file
+    // only this user can read. secure_kind says which, for the log and the docs. The PS5 has none (false).
+    bool secure_put(const std::string& name, const std::string& value);
+    bool secure_get(const std::string& name, std::string& value);
+    void secure_erase(const std::string& name);
+    const char* secure_kind();
     // Where a ROM, pack or add-on put on the device by hand is picked up (BLITZ_HAS_ROM_DROP_FOLDER): iOS's Documents
     // (Files app, Finder), Android's app files folder (adb, file managers), the PS5's /data/blitzrecomp (FTP).
     // Empty on a computer, which has file dialogs.

@@ -1,0 +1,46 @@
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index 69cb8d7..e6ea344 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -3744,11 +3744,19 @@ namespace plume {
+ 
+         if (clearRectsCount > 0) {
+             for (uint32_t i = 0; i < clearRectsCount; i++) {
++                // Blitz: inside the render area, as the spec requires. RT64 asks for 321x241 on a 320x241 target, and a tiling
++                // driver (the Surface Duo's Adreno 640, 512.502) sizes its bins by the rect; the next dispatch crashed it.
++                const int32_t left = std::max(clearRects[i].left, 0), top = std::max(clearRects[i].top, 0);
++                const int32_t right = std::min(clearRects[i].right, int32_t(width)), bottom = std::min(clearRects[i].bottom, int32_t(height));
++                if ((right <= left) || (bottom <= top)) {
++                    continue;
++                }
++
+                 VkClearRect clearRect;
+-                clearRect.rect.offset.x = clearRects[i].left;
+-                clearRect.rect.offset.y = clearRects[i].top;
+-                clearRect.rect.extent.width = clearRects[i].right - clearRects[i].left;
+-                clearRect.rect.extent.height = clearRects[i].bottom - clearRects[i].top;
++                clearRect.rect.offset.x = left;
++                clearRect.rect.offset.y = top;
++                clearRect.rect.extent.width = uint32_t(right - left);
++                clearRect.rect.extent.height = uint32_t(bottom - top);
+                 clearRect.baseArrayLayer = 0;
+                 clearRect.layerCount = 1;
+                 rectVector.emplace_back(clearRect);
+@@ -3784,7 +3792,7 @@ namespace plume {
+         rgba[3] = colorValue.a;
+         attachment.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+         attachment.colorAttachment = attachmentIndex;
+-        vkCmdClearAttachments(vk, 1, &attachment, uint32_t(rectVector.size()), rectVector.data());
++        if (!rectVector.empty()) vkCmdClearAttachments(vk, 1, &attachment, uint32_t(rectVector.size()), rectVector.data());
+     }
+ 
+     void VulkanCommandList::clearDepthStencil(bool clearDepth, bool clearStencil, float depthValue, uint32_t stencilValue, const RenderRect *clearRects, uint32_t clearRectsCount) {
+@@ -3807,7 +3815,7 @@ namespace plume {
+             attachment.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
+         }
+ 
+-        vkCmdClearAttachments(vk, 1, &attachment, uint32_t(rectVector.size()), rectVector.data());
++        if (!rectVector.empty()) vkCmdClearAttachments(vk, 1, &attachment, uint32_t(rectVector.size()), rectVector.data());
+     }
+ 
+     void VulkanCommandList::copyBufferRegion(RenderBufferReference dstBuffer, RenderBufferReference srcBuffer, uint64_t size) {

@@ -1,0 +1,20 @@
+diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
+index f4ce2ef..aa4f4c1 100644
+--- a/src/hle/rt64_state.cpp
++++ b/src/hle/rt64_state.cpp
+@@ -638,7 +638,14 @@ namespace RT64 {
+         {
+             framebufferManager.storeRAM(workload.fbStorage, RDRAM, fbPairIndex);
+             framebufferManager.checkRAM(RDRAM, differentFbs, true);
+-            if (!differentFbs.empty()) {
++            // Blitz test switch BLITZ_SKIP_RAM_UPLOAD (test_env.txt): the game's own writes into a framebuffer aren't put back on
++            // the GPU copy. A Surface Duo test, to see if that path is what precedes its driver crash (docs/SURFACE_DUO.md).
++            static const bool skipUpload = getenv("BLITZ_SKIP_RAM_UPLOAD") != nullptr;
++            if (!differentFbs.empty() && skipUpload) {
++                static bool said = false;
++                if (!said) { said = true; fprintf(stderr, "[rt64] skipping a RAM upload (BLITZ_SKIP_RAM_UPLOAD), %zu framebuffer(s)\n", differentFbs.size()); }
++            }
++            else if (!differentFbs.empty()) {
+                 RenderWorkerExecution execution(ext.framebufferGraphicsWorker);
+                 framebufferManager.uploadRAM(ext.framebufferGraphicsWorker, differentFbs.data(), differentFbs.size(), workload.fbChangePool, RDRAM, true, drawFbOperations, drawFbDiscards, ext.shaderLibrary);
+             }

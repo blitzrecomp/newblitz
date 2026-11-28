@@ -28,6 +28,14 @@ void blitz_on_sp_task(uint8_t* rdram, int32_t task);
 
 // Widescreen (src/game/widescreen.cpp): non-zero while gfx_build_frame should clear the colour buffer.
 int blitz_force_color_clear(void);
+// Players at the widescreen sides (widescreen.cpp): the cull process's wider answer, given only to the draws.
+void blitz_ws_cull_begin(void);
+uint32_t blitz_ws_draw_flags(uint8_t* rdram, int32_t player, uint32_t flags);
+#ifdef __RECOMP_H__
+void blitz_ws_cull_test(uint8_t* rdram, recomp_context* ctx);
+void blitz_ws_cull_hidden(recomp_context* ctx);
+void blitz_ws_cull_done(uint8_t* rdram, recomp_context* ctx);
+#endif
 // COP0 Count for the 2026 flavour's patched mfc0 reads (src/game/ultra_extras.cpp).
 uint64_t blitz_cop0_count(void);
 // Content packs (src/game/content_pack.cpp): called when dma_read finishes.

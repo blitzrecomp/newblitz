@@ -464,8 +464,8 @@ namespace {
 
     // A save state keeps the season it was taken in and that season's newest generation on disk at the time. Loading
     // one from before a later Season save is a rollback, as switching the N64 off without saving is: the season files
-    // stay as they are, and saving the season from here replaces the later save. Say so once per load
-    // (docs/SAVE_STATES.md, "Seasons").
+    // stay as they are, and saving the season from here replaces the later save. The player is asked before it loads,
+    // Load It or Cancel (team, 2026-11-27: it was said after, with only OK) (docs/SAVE_STATES.md, "Seasons").
     [[maybe_unused]] const bool gen_registered = (blitz::savestate_register(
         "adv_season_gen",
         [] {
@@ -487,9 +487,17 @@ namespace {
             if (now > then) {
                 fprintf(stderr, "[adv] state from season %s gen %lld; the newest on disk is gen %lld\n", hex(id).c_str(),
                         (long long)then, (long long)now);
-                blitz::post_notice("This save state is from before your last season save. Saving the season from here "
-                                   "takes it back to this point.");
             }
+        },
+        [](const blitz::StateBlob& b) -> std::string {
+            if (b.size() != sizeof(uint64_t) + sizeof(int64_t)) return "";
+            uint64_t id = 0;
+            int64_t then = -1;
+            std::memcpy(&id, b.data(), sizeof id);
+            std::memcpy(&then, b.data() + sizeof id, sizeof then);
+            if (id == 0 || newest_gen(id) <= then) return "";
+            return "?This save state is from before your last season save. If you load it and then save the season, "
+                   "your later season save is replaced.";
         }), true);
 }
 #endif

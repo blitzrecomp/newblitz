@@ -176,6 +176,15 @@ public class BlitzLauncher extends Activity {
         game.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         if (askRecipe) game.putExtra(BlitzRecipe.LAUNCHER_ASKED, true);  // the screen's been chosen from this answer: it stands
         Bundle options = BlitzActivity.isRunning() ? null : launchOptions(this);  // running: launch options could move it
+        // Surface Duo AutoSpan (docs/SURFACE_DUO.md): the Surface shell spans a listed app's new task only while no task is in
+        // either panel or spanned (services.jar TaskPositioningAutoSpan: display areas 10001, 10002 and 10003 all empty). It
+        // spans this launcher's task, which is still there, finishing, when the game's own task (singleInstance) is placed:
+        // "NOT applied", and the game lands on one panel. So on a Duo the game starts once this has gone (onDestroy).
+        if (options == null && !BlitzActivity.isRunning() && BlitzHinge.present(this)) {
+            duoGame = game;
+            finish();
+            return;
+        }
         try {
             startActivity(game, options);
         } catch (Exception e) {
@@ -183,5 +192,26 @@ public class BlitzLauncher extends Activity {
             startActivity(game);
         }
         finish();
+    }
+
+    private Intent duoGame;
+    private static final long DUO_START_MS = 150;  // the finished task's removal reaches the system just after onDestroy
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        final Intent game = duoGame;
+        if (game == null) return;
+        duoGame = null;
+        // From the application, as an activity of this app finished a moment ago (Android allows that start for 10 s).
+        final Context app = getApplicationContext();
+        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+            try {
+                app.startActivity(game);
+                Log.i("BlitzRecomp", "[duo] game started after the launcher's task closed, for AutoSpan");
+            } catch (Exception e) {
+                Log.w("BlitzRecomp", "[duo] couldn't start the game after the launcher: " + e);
+            }
+        }, DUO_START_MS);
     }
 }

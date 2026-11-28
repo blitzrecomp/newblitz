@@ -1,0 +1,24 @@
+diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
+index d0f5c0a..07e6b81 100644
+--- a/src/hle/rt64_workload_queue.cpp
++++ b/src/hle/rt64_workload_queue.cpp
+@@ -15,6 +15,9 @@
+ // VIRenderer::render puts its two halves at the window's top and bottom.
+ extern "C" { extern volatile int blitz_ds_mode; extern volatile float blitz_ds_split; extern volatile int blitz_ds_second_on_top; }
+ extern "C" { volatile float blitz_ds_second_ratio = 0.0f; volatile float blitz_tall_aspect_on = 0.0f; volatile float blitz_tall_ratio = 2.0f / 3.0f; }
++// Blitz: the most Auto may scale the tall picture over two screens (0: no limit). Auto takes both panels' lines, 12x on a Surface
++// Duo (2700 lines), too much to hold its frame rate; ds_view.cpp sets it from the device's limits, GFX dsmax=N live.
++extern "C" { volatile int blitz_ds_res_max = 0; }
+ 
+ #include <atomic>
+ #include <chrono>
+@@ -225,6 +228,9 @@ namespace RT64 {
+                 }
+ 
+                 resolutionMultiplier = std::max(float((displayHeight + referenceHeight - 1) / referenceHeight), 1.0f);
++                if ((blitz_tall_aspect_on != 0.0f) && (blitz_ds_mode == 1) && (blitz_ds_res_max > 0)) {
++                    resolutionMultiplier = std::min(resolutionMultiplier, float(blitz_ds_res_max));
++                }
+             }
+             else {
+                 resolutionMultiplier = 1.0f;

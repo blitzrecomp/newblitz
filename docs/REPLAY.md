@@ -15,7 +15,7 @@ game mode, New Blitz and Original 1999, one screen and BLITZ DS. Built 2026-11-0
 - The controls go away after three seconds of playing untouched, leaving a small REPLAY mark.
 - **BLITZ DS:** each frame plays back where it was kept: over both screens, or on the upper one alone (a Stylus play), so a
   play that switched screens mid-way still comes out right. Saved replays go to the gallery (Pictures/New Blitz) on Android.
-- **Settings → General → Instant Replay** turns it off, memory and all.
+- **Settings → Rules → Instant Replay** turns it off, memory and all.
 
 ## How it's built
 

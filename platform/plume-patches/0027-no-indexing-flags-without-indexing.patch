@@ -1,0 +1,34 @@
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index 14325ba..69cb8d7 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -1511,7 +1511,10 @@ namespace plume {
+         
+         thread_local std::vector<VkDescriptorBindingFlags> bindingFlags;
+         VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo = {};
+-        if (descriptorSetDesc.lastRangeIsBoundless && (descriptorSetDesc.descriptorRangesCount > 0)) {
++        // Blitz: the flags only where the driver has descriptor indexing. Without it (a Surface Duo's Adreno 640, driver 512.502,
++        // Vulkan 1.1) they're invalid, and that driver crashed at the first dispatch using such a set; the last range is then
++        // a plain binding of its full size, which the pool is sized for (0006).
++        if (descriptorSetDesc.lastRangeIsBoundless && (descriptorSetDesc.descriptorRangesCount > 0) && device->capabilities.descriptorIndexing) {
+             bindingFlags.clear();
+             bindingFlags.resize(descriptorSetDesc.descriptorRangesCount, 0);
+             bindingFlags[descriptorSetDesc.descriptorRangesCount - 1] = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT;
+@@ -2359,7 +2362,7 @@ namespace plume {
+         allocateInfo.descriptorSetCount = 1;
+ 
+         VkDescriptorSetVariableDescriptorCountAllocateInfo countInfo = {};
+-        if (desc.lastRangeIsBoundless) {
++        if (desc.lastRangeIsBoundless && device->capabilities.descriptorIndexing) {
+             countInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO;
+             countInfo.pDescriptorCounts = &boundlessRangeSize;
+             countInfo.descriptorSetCount = 1;
+@@ -2498,7 +2501,7 @@ namespace plume {
+         poolInfo.pPoolSizes = !poolSizes.empty() ? poolSizes.data() : nullptr;
+         poolInfo.poolSizeCount = uint32_t(poolSizes.size());
+ 
+-        if (lastRangeIsBoundless) {
++        if (lastRangeIsBoundless && device->capabilities.descriptorIndexing) {
+             poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
+         }
+ 

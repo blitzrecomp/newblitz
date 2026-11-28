@@ -1,0 +1,98 @@
+diff --git a/src/hle/rt64_blitz_replay.cpp b/src/hle/rt64_blitz_replay.cpp
+index e987ade..e2b96b3 100644
+--- a/src/hle/rt64_blitz_replay.cpp
++++ b/src/hle/rt64_blitz_replay.cpp
+@@ -17,6 +17,7 @@
+ extern "C" {
+     extern volatile int blitz_ds_mode;
+     extern volatile float blitz_ds_split;
++    extern volatile float blitz_ds_first_width;
+     extern volatile int blitz_ds_second_on_top;
+ 
+     volatile int blitz_replay_enabled = 0;         // the ring exists; 0 frees its memory
+@@ -213,6 +214,8 @@ namespace RT64 {
+                 p.part = true;
+                 p.partTop = (blitz_ds_second_on_top != 0) ? blitz_ds_split : 0.0f;
+                 p.partBottom = (blitz_ds_second_on_top != 0) ? 1.0f : blitz_ds_split;
++                p.partLeft = 0.5f - blitz_ds_first_width * 0.5f;
++                p.partRight = 0.5f + blitz_ds_first_width * 0.5f;
+             }
+         }
+     }
+diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
+index 0a143c5..a3d41ea 100644
+--- a/src/hle/rt64_present_queue.cpp
++++ b/src/hle/rt64_present_queue.cpp
+@@ -31,6 +31,10 @@ extern "C" {
+     volatile int blitz_ds_mode = 0;
+     volatile int blitz_ds_clip_right = 0;        // 1: the last play's clip in the second screen's top right corner, 4:3; 0: its left third, tall
+     volatile float blitz_ds_split = 0.5f;        // the upper screen's share of the picture's height
++    // Each window's share of the picture's width, centred (BLITZ DS with a wide upper screen: the picture is as wide as the
++    // wider screen and the narrower one shows its middle). 1: the whole width, as when both are the same width.
++    volatile float blitz_ds_first_width = 1.0f;
++    volatile float blitz_ds_second_width = 1.0f;
+     volatile int blitz_ds_second_on_top = 1;     // the second window is the upper screen
+     volatile int blitz_ds_second_icons = 0;      // mode 3 only: the hook's drawing goes over the picture (Stylus's receiver icons)
+     void (*blitz_ds_second_hook)(plume::RenderCommandList *, plume::RenderFramebuffer *) = nullptr;
+@@ -440,6 +444,8 @@ namespace RT64 {
+                     renderParams.part = true;
+                     renderParams.partTop = (blitz_ds_second_on_top != 0) ? blitz_ds_split : 0.0f;
+                     renderParams.partBottom = (blitz_ds_second_on_top != 0) ? 1.0f : blitz_ds_split;
++                    renderParams.partLeft = 0.5f - blitz_ds_first_width * 0.5f;
++                    renderParams.partRight = 0.5f + blitz_ds_first_width * 0.5f;
+                 }
+ 
+                 const bool useDownsampling = (colorTarget->downsampleMultiplier > 1);
+@@ -934,6 +940,8 @@ namespace RT64 {
+             p.part = true;
+             p.partTop = (blitz_ds_second_on_top != 0) ? 0.0f : blitz_ds_split;
+             p.partBottom = (blitz_ds_second_on_top != 0) ? blitz_ds_split : 1.0f;
++            p.partLeft = 0.5f - blitz_ds_second_width * 0.5f;
++            p.partRight = 0.5f + blitz_ds_second_width * 0.5f;
+             commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(p.texture, RenderTextureLayout::SHADER_READ));
+             viRenderer->render(p);
+         }
+diff --git a/src/render/rt64_vi_renderer.cpp b/src/render/rt64_vi_renderer.cpp
+index 8f50e67..bae4139 100644
+--- a/src/render/rt64_vi_renderer.cpp
++++ b/src/render/rt64_vi_renderer.cpp
+@@ -82,10 +82,10 @@ namespace RT64 {
+             const float targetHeight = float((p.targetHeight > 0) ? p.targetHeight : p.swapChain->getHeight());
+             const float pictureWidth = std::max(float(scissor.right - scissor.left), 1.0f);
+             const float pictureHeight = std::max(float(scissor.bottom - scissor.top), 1.0f);
+-            const float scaleX = targetWidth / pictureWidth;
++            const float scaleX = (targetWidth / std::max(p.partRight - p.partLeft, 0.01f)) / pictureWidth;
+             const float scaleY = (targetHeight / std::max(p.partBottom - p.partTop, 0.01f)) / pictureHeight;
+             RenderViewport part;
+-            part.x = (viewport.x - float(scissor.left)) * scaleX;
++            part.x = (viewport.x - float(scissor.left)) * scaleX - p.partLeft * pictureWidth * scaleX;
+             part.width = viewport.width * scaleX;
+             part.y = (viewport.y - float(scissor.top)) * scaleY - p.partTop * pictureHeight * scaleY;
+             part.height = viewport.height * scaleY;
+@@ -98,9 +98,10 @@ namespace RT64 {
+             const float targetWidth = float((p.targetWidth > 0) ? p.targetWidth : p.swapChain->getWidth());
+             const float targetHeight = float((p.targetHeight > 0) ? p.targetHeight : p.swapChain->getHeight());
+             const float canvasHeight = p.part ? (targetHeight / std::max(p.partBottom - p.partTop, 0.01f)) : targetHeight;
+-            const float width = std::min(targetWidth, canvasHeight * p.storedAspect);
++            const float canvasWidth = p.part ? (targetWidth / std::max(p.partRight - p.partLeft, 0.01f)) : targetWidth;
++            const float width = std::min(canvasWidth, canvasHeight * p.storedAspect);
+             const float height = width / p.storedAspect;
+-            const float x = (targetWidth - width) * 0.5f;
++            const float x = (canvasWidth - width) * 0.5f - (p.part ? (p.partLeft * canvasWidth) : 0.0f);
+             const float y = (canvasHeight - height) * 0.5f - (p.part ? (p.partTop * canvasHeight) : 0.0f);
+             viewport = RenderViewport(x, y, width, height);
+             scissor = RenderRect(lround(std::max(x, 0.0f)), lround(std::max(y, 0.0f)), lround(std::min(x + width, targetWidth)), lround(std::min(y + height, targetHeight)));
+diff --git a/src/render/rt64_vi_renderer.h b/src/render/rt64_vi_renderer.h
+index 3afb8c8..c52426a 100644
+--- a/src/render/rt64_vi_renderer.h
++++ b/src/render/rt64_vi_renderer.h
+@@ -33,6 +33,9 @@ namespace RT64 {
+             bool part = false;
+             float partTop = 0.0f;
+             float partBottom = 1.0f;
++            // And this much of its width, 0 left to 1 right (a narrower screen under a wide one shows the middle).
++            float partLeft = 0.0f;
++            float partRight = 1.0f;
+             // The target's size, when it isn't the swap chain (the last-play clip).
+             uint32_t targetWidth = 0;
+             uint32_t targetHeight = 0;

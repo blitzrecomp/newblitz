@@ -57,6 +57,7 @@ extern "C" int plume_narrow_barriers_on();
 #endif
 
 namespace blitz { bool replay_is_open(); }  // replay_screen.cpp
+extern "C" int blitz_settings_holding(void);  // settings_hold.cpp: the game held under Settings, on purpose too
 namespace blitz { void rescue_watch(double frames_away_s); }  // savestate.cpp: the freeze rescue
 using blitz::replay_is_open;
 
@@ -229,7 +230,8 @@ namespace {
             blitz_rt64_watch_read(&w);
             const uint64_t vi = watch_vi_ticks.load(std::memory_order_relaxed), swaps = watch_swaps.load(std::memory_order_relaxed);
             if (vi != vi_seen) { vi_seen = vi; vi_at = now; }
-            if (swaps != swaps_seen || replay_is_open()) { swaps_seen = swaps; swap_at = now; }  // a replay stops the game on purpose
+            // A replay, and Settings' hold, stop the game on purpose.
+            if (swaps != swaps_seen || replay_is_open() || blitz_settings_holding()) { swaps_seen = swaps; swap_at = now; }
             if (w.firstPresents + w.uiSkips != first_seen) { first_seen = w.firstPresents + w.uiSkips; first_at = now; }
 
             for (int i = 0; i < watch_threads; i++) {

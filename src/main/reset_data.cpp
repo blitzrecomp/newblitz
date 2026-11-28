@@ -183,7 +183,7 @@ namespace blitz {
         // What it is, for whoever opens the zip.
         std::string about = std::string("New Blitz ") + BLITZ_VERSION + " (build " BLITZ_BUILD ") on " + blitz::platform::name +
                             ", " + stamp + ".\nSettings, saves and setup from the app folder. The ROM isn't in it.\n"
-                            "Settings > General > Restore a Backup puts it back.\n";
+                            "Settings > Saves > Restore a Backup puts it back.\n";
         ok = ok && mz_zip_writer_add_mem(&zip, "New Blitz Backup.txt", about.data(), about.size(), MZ_DEFAULT_COMPRESSION);
         void* buf = nullptr;
         size_t size = 0;
@@ -376,7 +376,7 @@ namespace {
                     // BRANDING: the backup folder's name
                     where = blitz::platform::desktop ? "Your backup is in Documents \xE2\x86\x92 New Blitz Backups: " + st.backup.filename().string() + "."
                                                      : "Your backup is in New Blitz's folder, in backups: " + st.backup.filename().string() + ".";
-                    where += " Settings \xE2\x86\x92 General \xE2\x86\x92 Restore a Backup brings it back.\n\n";
+                    where += " Settings \xE2\x86\x92 Saves \xE2\x86\x92 Restore a Backup brings it back.\n\n";
                 }
                 s.title = st.restoring ? "Ready to restore" : !st.backup.empty() ? "Backed up" : "Ready to start over";
                 s.body = where + (blitz::restart_available

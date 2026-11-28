@@ -54,6 +54,7 @@
 #include "librecomp/game.hpp"
 #include "ultramodern/ultra64.h"
 #include "pak_guard.h"
+#include "save_sync_core.h"
 #include "blitz_pak_backups.h"
 
 namespace blitz {
@@ -100,6 +101,7 @@ namespace {
     std::map<std::string, std::vector<uint8_t>> history_newest;  // by pak path
     std::chrono::steady_clock::time_point last_change{};
     bool any_change = false;
+    std::atomic<uint64_t> change_bursts{0};                // Cloud Sync (save_sync.cpp): one per burst of changing writes
     constexpr auto burst_gap = std::chrono::seconds(3);
     constexpr const char* restore_mark = "pak_restore";     // in the pak's folder: the history file to put back
 
@@ -313,6 +315,43 @@ namespace {
         }
         fprintf(stderr, "[pak] restored %s from %s (%s)\n", pak_path.filename().string().c_str(), from.filename().string().c_str(),
                 blitz::pakimg::describe_plain(chosen.data()).c_str());
+        // A season file a Save Sync import replaced, that this pak points at: back too (save_sync_core.h).
+        blitz::savesync::restore_replaced_seasons(pak_path.parent_path(), chosen);
+    }
+
+    // Save Sync's import (save_sync_core.h apply_staged) writes the pak through the restore mark above: the incoming image
+    // goes into the history as a dated copy, the mark names it, and apply_restore_mark keeps the pak as it is in the
+    // history and puts the copy in place. True when the pak is the incoming image after.
+    bool restore_through_mark(const std::filesystem::path& pak_path, const std::vector<uint8_t>& image) {
+        std::error_code ec;
+        std::filesystem::path dir = history_dir(pak_path);
+        std::filesystem::create_directories(dir, ec);
+        std::string stem = pak_path.stem().string();
+        std::string name = blitz::pakimg::history_name(stem, time(nullptr));
+        for (int n = 2; std::filesystem::exists(dir / name, ec) && n < 100; n++) {
+            name = blitz::pakimg::history_name(stem, time(nullptr));
+            name = name.substr(0, name.size() - 4) + "-" + std::to_string(n) + ".mpk";
+        }
+        if (!write_image(dir / name, image)) {
+            fprintf(stderr, "[pak] sync: couldn't write %s\n", (dir / name).string().c_str());
+            return false;
+        }
+        {
+            std::ofstream out(pak_path.parent_path() / restore_mark, std::ios::trunc);
+            out << name << "\n";
+            if (!out) return false;
+        }
+        fprintf(stderr, "[pak] sync: the imported pak goes in through %s\n", name.c_str());
+        apply_restore_mark(pak_path);
+        std::vector<uint8_t> now;
+        return read_image(pak_path, now) && now == image;
+    }
+
+    // A Save Sync import staged in this pak's folder: its season files, then the pak. Before the game reads the pak.
+    void apply_sync_import(const std::filesystem::path& pak_path) {
+        if (pak_path.filename() != blitz::savesync::pak_name) return;
+        if (blitz::savesync::apply_staged(pak_path.parent_path(), restore_through_mark) == blitz::savesync::Applied::Failed)
+            blitz::post_notice("Controller Pak: the saves you imported couldn't all be put in place. New Blitz tries again at the next start.");
     }
 
     // Load the port's pak image. Only a missing file gets a fresh blank pak; an existing file that
@@ -330,6 +369,7 @@ namespace {
 #endif
         std::filesystem::create_directories(dir, ec);
         pak.path = dir / ("blitz2000_pak" + std::to_string(channel + 1) + ".mpk");
+        apply_sync_import(pak.path);  // Save Sync (save_sync.cpp): season files first, then the pak by the restore mark
         apply_restore_mark(pak.path);
 
         bool exists = std::filesystem::exists(pak.path, ec);
@@ -460,7 +500,10 @@ extern "C" void blitz_ContRamWrite(uint8_t* rdram, recomp_context* ctx) {
     if (changes) {
         // The history: the image before this burst of writes.
         auto now = std::chrono::steady_clock::now();
-        if (!any_change || now - last_change > burst_gap) save_history(pak.path, pak.data, "before a write");
+        if (!any_change || now - last_change > burst_gap) {
+            save_history(pak.path, pak.data, "before a write");
+            change_bursts++;
+        }
         any_change = true;
         last_change = now;
     }
@@ -702,6 +745,48 @@ namespace blitz {
             if (it->path().filename() == "pak_history" && !std::filesystem::is_empty(it->path(), ec)) return true;
         }
         return false;
+    }
+
+    // Save Sync (save_sync.cpp): true while the game is in the middle of writing the pak (a Save is a burst of about a
+    // thousand block writes), when an export would catch it half written.
+    bool pak_busy() {
+        std::lock_guard lock{paks_mutex};
+        return season_save_slot.load() >= 0 || (any_change && std::chrono::steady_clock::now() - last_change < burst_gap);
+    }
+
+    // Cloud Sync (save_sync.cpp): how many times the game has changed a pak this run (one per Save, not per block),
+    // to send the saves up once the game has finished saving (pak_busy false) and things have been quiet a while.
+    uint64_t pak_change_count() { return change_bursts.load(); }
+
+    // Cloud Sync: whether the game has opened the pak in `folder` this run (an import into it waits for the next start).
+    bool pak_folder_open(const std::filesystem::path& folder) {
+        std::lock_guard lock{paks_mutex};
+        const std::filesystem::path want = folder.lexically_normal();
+        for (const Pak& p : paks) {
+            if (p.loaded && p.path.parent_path().lexically_normal() == want) return true;
+        }
+        return false;
+    }
+
+    // Save Sync (save_sync.cpp): an import staged in `folder` goes in now when the game hasn't opened that folder's pak this
+    // run, else at the next start's first pak access (load above), as pak_restore does. True when done or left for the
+    // next start (needs_restart); else why not.
+    bool pak_sync_apply(const std::filesystem::path& folder, bool& needs_restart, std::string& why) {
+        needs_restart = false;
+        std::lock_guard lock{paks_mutex};
+        const std::filesystem::path want = folder.lexically_normal();
+        bool open = false;
+        for (const Pak& p : paks) open = open || (p.loaded && p.path.parent_path().lexically_normal() == want);
+        if (open) {
+            fprintf(stderr, "[pak] sync: %s is open; its import goes in at the next start\n", folder.string().c_str());
+            needs_restart = true;
+            return true;
+        }
+        if (blitz::savesync::apply_staged(folder, restore_through_mark) == blitz::savesync::Applied::Failed) {
+            why = "Some of your saves couldn't be written.";
+            return false;
+        }
+        return true;
     }
 
     // Puts a backup back. When that pak hasn't been opened this run (the game hasn't touched it yet), at once;

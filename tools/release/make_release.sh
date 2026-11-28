@@ -52,6 +52,11 @@ if [ -z "${RELEASE_NO_ANDROID:-}" ] && { [ -z "${BLITZ_ANDROID_KEYSTORE:-}" ] ||
     echo "and make release from it, or RELEASE_NO_ANDROID=1 to leave Android out"; exit 1
 fi
 
+# Cloud Sync is in every public app since 1.0.5 (docs/SAVE_SYNC.md §7): its server's address goes in from
+# build/save_sync_server (Makefile save_sync_server_file), so a release without it would ship Settings → Saves without
+# Cloud Sync. Checked before the long build.
+[ -s build/save_sync_server ] || { echo "no build/save_sync_server: the public apps would have no Cloud Sync (tools/save_sync_worker/DEPLOY.md step 7)"; exit 1; }
+
 if [ -z "${RELEASE_SKIP_BUILD:-}" ]; then
     # One make: the game's code is generated once for all of them. Device kits first: the Mac app takes them in.
     say "building (log: $LOGS/build.log)"
@@ -98,6 +103,7 @@ for k in $KITS; do
     [ -f "$R/devices/$k" ] || { echo "the Mac app lacks the device kit $k (make app-modern BLITZ_CONTENT=public after device-kits)"; exit 1; }
 done
 grep -q "<string>$V</string>" "$STAGE/mac/New Blitz.app/Contents/Info.plist" || { echo "the Mac app isn't version $V"; exit 1; }
+[ -s "$R/sync/server" ] || { echo "the Mac app has no Cloud Sync server address (Resources/sync/server)"; exit 1; }
 # Ad hoc, as `make dist` signs (no developer's certificate: Gatekeeper asks once; README "Opening it the first time"),
 # with the distribution entitlements (no debugger attach).
 codesign --options=runtime --sign - --entitlements platform/macos/entitlements_dist.plist --deep --force "$STAGE/mac/New Blitz.app"
@@ -113,7 +119,8 @@ stage_folder() {  # build dir, dest, exe name
     mkdir -p "$d"
     cp "$b/$exe" "$d/"
     for f in recompcontrollerdb.txt icon.png; do [ -f "$b/$f" ] && cp "$b/$f" "$d/"; done
-    for f in assets packs art paks; do [ -d "$b/$f" ] && cp -R "$b/$f" "$d/"; done
+    for f in assets packs art paks sync; do [ -d "$b/$f" ] && cp -R "$b/$f" "$d/"; done
+    [ -s "$d/sync/server" ] || { echo "$b has no Cloud Sync server address (sync/server)"; exit 1; }
     ditto build/devices "$d/devices" && rm -f "$d/devices/content.txt"
     [ -n "${RELEASE_NO_ANDROID:-}" ] && rm -rf "$d/devices/android"
     # The public build carries no licensed content, whatever an earlier private build left in the folder.

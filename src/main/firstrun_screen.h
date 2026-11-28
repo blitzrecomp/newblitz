@@ -35,11 +35,22 @@ namespace blitz::firstrun_ui {
         bool back_button = true;           // false: the cancel key only (a Cancel among the actions)
         std::function<void()> exit;        // Exit: leaves setup; always there for setup's screens
         std::string exit_label = "Exit";
+        // The Saves screens (save_sync.cpp): text and buttons sized for a phone held at arm's length (large_scale()), a
+        // wider card, the buttons two to a row where there's room, and the whole card scrolls if it's still too tall.
+        bool large = false;
+        std::string big;                   // one huge line under the body (a pairing number, "482 915")
+        std::vector<Action> pad;           // a number pad, three keys to a row, beside the body (below it when narrow)
+        std::function<void(char)> typed;   // a keyboard's digit keys ('0'..'9') while this screen is up
     };
+
+    // How much bigger a large screen's text and buttons are: about 1.9 on a phone (iPhone landscape: body text ~16 pt),
+    // 1.3 on a computer. BLITZ_PHONE_UI=1 shows a phone's sizes on a computer.
+    float large_scale();
 
     // Shows this screen (in place of the one up). Call from the main thread's UI tick, never from a button's own
     // callback: that rebuilds the button it's running in.
     void show(const Screen& screen);
+    bool update_note(const std::string& text);  // the note's words only, no redraw (a countdown)
     void hide();
     bool shown();
     // Every UI tick (firstrun.cpp): Esc as Back, which the framework keeps for the game's menu.

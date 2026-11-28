@@ -74,10 +74,30 @@ namespace blitz {
     // The macOS app menu; the PS5 has none.
     void install_app_menu(const std::string&) {}
 
-    // No crash reports from the PS5 in 0.9.5 (docs/design/FIRST_RUN_V2.md §2.3): nothing is sent.
-    bool http_post(const std::string&, const std::string&, const std::string&, int& status) {
+    // A blocking HTTP POST of a body (call it off the main thread): true on a 2xx answer. Cloud Sync's writes
+    // (save_sync_cloud.cpp; docs/SAVE_SYNC.md §7). The same library as the GET below: the request is made with the
+    // body's length and the body goes with sceHttp2SendRequest, as the SDK's sceHttp2 does for any method with a body.
+    // Untested on a console (2026-11-27). Crash reports still aren't sent from the PS5 (crash_report.cpp, FIRST_RUN_V2
+    // §2.3): that's decided there, not here.
+    bool http_post(const std::string& url, const std::string& content_type, const std::string& body, int& status) {
+        static std::mutex lock;
+        std::lock_guard guard{lock};
         status = 0;
-        return false;
+        int tmpl = http_template();
+        if (tmpl < 0) return false;
+        int req = sceHttp2CreateRequestWithURL(tmpl, "POST", url.c_str(), (uint64_t)body.size());
+        if (req < 0) {
+            fprintf(stderr, "[http] POST request not made: 0x%08x\n", (unsigned)req);
+            return false;
+        }
+        sceHttp2AddRequestHeader(req, "Content-Type", content_type.c_str(), 0);
+        int sent = sceHttp2SendRequest(req, body.data(), body.size());
+        if (sent != 0) fprintf(stderr, "[http] POST failed: 0x%08x\n", (unsigned)sent);
+        if (sent == 0) sceHttp2GetStatusCode(req, &status);
+        char buf[4096];
+        while (sent == 0 && sceHttp2ReadData(req, buf, sizeof(buf)) > 0) {}  // the answer's body, unread
+        sceHttp2DeleteRequest(req);
+        return status >= 200 && status < 300;
     }
 
     // A blocking HTTP GET (call it off the main thread): true with the body when the server answers 200.
@@ -292,4 +312,16 @@ namespace blitz {
     void early_init() {
         std::thread(ps5_watch).detach();
     }
+}
+
+// Secure storage: the PS5 title has no keystore it may use, so Cloud Sync's code is kept in a file in the app's own
+// folder (save_sync.cpp's fallback); a title's files are reachable only by FTP on a console running homebrew.
+namespace blitz {
+    bool secure_put(const std::string&, const std::string&) { return false; }
+    bool secure_get(const std::string&, std::string& value) {
+        value.clear();
+        return false;
+    }
+    void secure_erase(const std::string&) {}
+    const char* secure_kind() { return "none"; }
 }

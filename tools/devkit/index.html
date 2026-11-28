@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blitz Dev Kit</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --line: #2a313c; --text: #e6e9ee; --dim: #8b95a3;
+    --accent: #f2c14e; --go: #3fb950; --warn: #f0883e; --bad: #f85149; --btn: #222a35; --btn-hi: #2e3846;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  header { position: sticky; top: 0; z-index: 2; display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+           padding: 10px 16px; background: #0b0e12; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 15px; margin: 0 8px 0 0; letter-spacing: .04em; }
+  .chip { padding: 2px 8px; border-radius: 10px; background: var(--btn); color: var(--dim); font-size: 12px; }
+  .chip.on { background: #12361d; color: #7ee787; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; }
+  .seg button.sel { background: var(--accent); color: #111; }
+  main { display: grid; grid-template-columns: minmax(340px, 520px) 1fr; gap: 14px; padding: 14px 16px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  section h2 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--accent); }
+  section h2 small { text-transform: none; letter-spacing: 0; color: var(--dim); font-weight: normal; margin-left: 6px; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 4px 0; }
+  button { background: var(--btn); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px;
+           font: inherit; cursor: pointer; }
+  button:hover { background: var(--btn-hi); }
+  button.go { border-color: #2c6e3a; } button.go:hover { background: #17361f; }
+  button.big { padding: 8px 14px; font-weight: 600; }
+  select, input[type=text], input[type=number] { background: #0d1117; color: var(--text); border: 1px solid var(--line);
+           border-radius: 6px; padding: 4px 6px; font: inherit; }
+  input[type=text] { min-width: 0; flex: 1; }
+  .dial { display: grid; grid-template-columns: 92px 1fr 54px 22px; gap: 6px; align-items: center; margin: 3px 0; }
+  .dial label { color: var(--dim); font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+  .dial label.changed { color: var(--accent); }
+  .dial input[type=range] { width: 100%; }
+  .dial input[type=number] { width: 54px; padding: 2px 4px; }
+  .dial button { padding: 0 4px; font-size: 11px; }
+  .pad { display: grid; grid-template-columns: repeat(3, 44px); gap: 4px; }
+  .pad button { padding: 8px 0; }
+  details summary { cursor: pointer; color: var(--dim); margin: 6px 0 2px; }
+  #shotwrap { position: sticky; top: 58px; }
+  #shot { width: 100%; max-height: calc(100vh - 150px); object-fit: contain; background: #000; border-radius: 6px;
+          border: 1px solid var(--line); display: block; }
+  #shotbar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+  #toast { color: var(--dim); font-size: 12px; min-height: 16px; }
+  pre { margin: 0; max-height: 220px; overflow: auto; font: 11px/1.35 ui-monospace, Menlo, monospace; color: #c9d1d9;
+        white-space: pre-wrap; word-break: break-all; }
+  .hint { color: var(--dim); font-size: 12px; }
+  .marks button { font-family: ui-monospace, Menlo, monospace; }
+</style>
+</head>
+<body>
+<header>
+  <h1>BLITZ DEV KIT</h1>
+  <span class="seg" id="target">
+    <button data-t="mac" class="sel">Mac (two windows)</button>
+    <button data-t="android">Android (USB)</button>
+  </span>
+  <span class="chip" id="macchip">Mac: off</span>
+  <span class="chip" id="adbchip">Android: none</span>
+  <span class="hint" id="job"></span>
+</header>
+
+<main>
+<div class="col">
+
+  <section id="session">
+    <h2>Session <small>Mac</small></h2>
+    <div class="row">
+      <button class="go big" onclick="post('/api/start', {})">Start two-screen test</button>
+      <button onclick="post('/api/stop', {})">Stop</button>
+    </div>
+    <div class="row">
+      <button class="go" onclick="intoGame()">Into a game</button>
+      <select id="gamestadium">
+        <option value="0">stadium: game decides</option><option value="1" selected>Day</option><option value="2">Night</option>
+        <option value="3">Snow</option><option value="4">Old day</option><option value="5">Old night</option>
+        <option value="6">Old snow</option><option value="7">City</option><option value="8">Future</option><option value="9">Roman</option>
+      </select>
+      <label class="hint">plays <input type="number" id="gameplays" value="0" min="0" max="10" style="width:46px"></label>
+    </div>
+    <div class="hint">Into a game drives the menus (about a minute), saves marks <b>ds-kickoff</b> and <b>ds-line</b> on the way, and leaves the game running.</div>
+  </section>
+
+  <section>
+    <h2>Freeze a moment <small>tune against one held frame</small></h2>
+    <div class="row">
+      <button onclick="cmd('DSSTACK')">Stack windows</button>
+      <button class="go big" id="holdbtn" onclick="toggleHold()">Hold this moment</button>
+      <button onclick="refreshHold()">Refresh</button>
+      <label class="hint">frames after load <input type="number" id="holdframes" value="6" min="1" max="120" style="width:52px"></label>
+    </div>
+    <div class="hint">Hold saves the moment and freezes the game a few frames later. While it's held, every change (a dial,
+      graphics, a setting) reloads that moment, runs those frames with the change, and freezes again, so you see it on the
+      same picture. A frame or two of shift is normal. Presses do nothing while held: let go first.</div>
+  </section>
+
+  <section>
+    <h2>Marks <small>named save states: jump straight back to a moment</small></h2>
+    <div class="row marks" id="marks"></div>
+    <div class="row">
+      <input type="text" id="markname" placeholder="name for this moment">
+      <button onclick="saveMark()">Save mark</button>
+      <button onclick="refreshMarks()">↻</button>
+    </div>
+    <div class="row"><button onclick="cmd('SAVESTATE')">Save slot (F5)</button><button onclick="cmd('LOADSTATE')">Load slot (F7)</button></div>
+  </section>
+
+  <section>
+    <h2>Pad <small>player 1</small></h2>
+    <div class="row" style="gap:16px; align-items:flex-start">
+      <div class="pad">
+        <span></span><button onclick="press('UP')">▲</button><span></span>
+        <button onclick="press('LEFT')">◀</button><span></span><button onclick="press('RIGHT')">▶</button>
+        <span></span><button onclick="press('DOWN')">▼</button><span></span>
+      </div>
+      <div>
+        <div class="row"><button class="big" onclick="press('A')">A</button><button class="big" onclick="press('B')">B</button>
+          <button onclick="press('Z')">Z</button><button onclick="press('START')">START</button></div>
+        <div class="row"><button onclick="press('L')">L</button><button onclick="press('R')">R</button>
+          <button onclick="press('CUP')">C▲</button><button onclick="press('CDOWN')">C▼</button>
+          <button onclick="press('CLEFT')">C◀</button><button onclick="press('CRIGHT')">C▶</button></div>
+        <div class="row hint">hold <input type="number" id="hold" value="0.2" step="0.05" min="0.05" style="width:56px"> s</div>
+      </div>
+    </div>
+    <div class="row"><span class="hint">Menu keys (app pages, Pick Your Crew):</span>
+      <button onclick="cmd('KEY Up')">↑</button><button onclick="cmd('KEY Down')">↓</button>
+      <button onclick="cmd('KEY Left')">←</button><button onclick="cmd('KEY Right')">→</button>
+      <button onclick="cmd('KEY Return')">Return</button><button onclick="cmd('KEY Backspace')">Back</button></div>
+  </section>
+
+  <section>
+    <h2>Two-screen layout <small>TALL dials: live, nothing rebuilt</small></h2>
+    <div id="dials2d"></div>
+    <details><summary>Camera</summary><div id="dialscam"></div></details>
+    <div class="row" style="margin-top:8px">
+      <button onclick="copyDials()">Copy changed dials</button>
+      <button onclick="resetAll()">Reset all</button>
+      <span class="hint" id="copied"></span>
+    </div>
+  </section>
+
+  <section>
+    <h2>Stadium and look <small>Rules cheats: the next game</small></h2>
+    <div class="row">
+      <select id="r_stadium" onchange="cmd('CONFIG rules stadium '+this.value)">
+        <option value="0">Stadium: game decides</option><option value="1">Day</option><option value="2">Night</option><option value="3">Snow</option>
+        <option value="4">Old day</option><option value="5">Old night</option><option value="6">Old snow</option><option value="7">City</option>
+        <option value="8">Future</option><option value="9">Roman</option><option value="10">None</option></select>
+      <select onchange="cmd('CONFIG rules weather '+this.value)">
+        <option value="0">Weather: game decides</option><option value="1">Clear</option><option value="2">Rain</option><option value="3">Snow</option></select>
+      <select onchange="cmd('CONFIG rules fog '+this.value)">
+        <option value="0">Fog: game decides</option><option value="1">Fog</option><option value="2">Thick fog</option><option value="3">Lights out</option></select>
+      <select onchange="cmd('CONFIG rules field '+this.value)">
+        <option value="0">Field: game decides</option><option value="1">Grass</option><option value="2">Turf</option><option value="3">Dirt</option>
+        <option value="4">Asphalt</option><option value="5">Snow</option></select>
+    </div>
+    <div class="hint">These save to the dev data's rules. Put them back to "game decides" when you're done.</div>
+    <div class="row"><span class="hint">End boards: turn the</span>
+      <button onclick="cmd('BOARD 1')">+x end (default)</button><button onclick="cmd('BOARD -1')">−x end</button><button onclick="cmd('BOARD 0')">neither</button></div>
+    <div class="row"><span class="hint">Play Art:</span>
+      <button onclick="cmd('PLAYART off')">off</button><button onclick="cmd('PLAYART first')">first break</button>
+      <button onclick="cmd('PLAYART full')">full</button><button onclick="cmd('PLAYART auto')">as the setting</button></div>
+  </section>
+
+  <section>
+    <h2>Screens and graphics</h2>
+    <div class="row"><span class="hint">DS Screens:</span>
+      <button onclick="cmd('CONFIG general ds_screens 0')">Both</button><button onclick="cmd('CONFIG general ds_screens 1')">Game + Companion</button>
+      <button onclick="cmd('CONFIG general ds_screens 2')">Stylus</button><button onclick="cmd('CONFIG general ds_screens 3')">Controller</button></div>
+    <div class="row"><span class="hint">Resolution:</span>
+      <button onclick="cmd('GFX res=1')">1x</button><button onclick="cmd('GFX res=2')">2x</button><button onclick="cmd('GFX res=3')">3x</button><button onclick="cmd('GFX res=4')">4x</button>
+      <span class="hint">MSAA:</span><button onclick="cmd('GFX msaa=0')">off</button><button onclick="cmd('GFX msaa=2')">2x</button><button onclick="cmd('GFX msaa=4')">4x</button>
+      <span class="hint">two-screen cap:</span><button onclick="cmd('GFX dsmax=2')">2</button><button onclick="cmd('GFX dsmax=3')">3</button><button onclick="cmd('GFX dsmax=4')">4</button></div>
+  </section>
+
+  <section>
+    <h2>Pop-ups</h2>
+    <div class="row"><span class="hint">First-time hints:</span>
+      <button onclick="cmd('HINT settings')">settings</button><button onclick="cmd('HINT side')">side</button>
+      <button onclick="cmd('HINT team')">team</button><button onclick="cmd('HINT play')">play</button>
+      <button onclick="cmd('HINT offense')">offense</button><button onclick="cmd('HINT defense')">defense</button>
+      <button onclick="cmd('HINT redo')">redo</button><button onclick="cmd('HINT settings_tour')">settings tour</button></div>
+    <div class="row"><span class="hint">Instant Replay:</span>
+      <button onclick="cmd('REPLAY open')">open</button><button onclick="cmd('REPLAY close')">close</button>
+      <button onclick="cmd('QUITPROMPT')">quit prompt</button></div>
+  </section>
+
+  <section>
+    <h2>Any command <small>dev_input.cpp's live commands</small></h2>
+    <div class="row">
+      <input type="text" id="raw" placeholder="e.g. TALL msg_up 12   ·   PEEK 0x802EA420 4   ·   DSTAP 0 0.5 0.5"
+             onkeydown="if(event.key==='Enter'){cmd(this.value); this.select();}">
+      <button onclick="cmd(document.getElementById('raw').value)">Send</button>
+    </div>
+  </section>
+
+</div>
+
+<div class="col">
+  <div id="shotwrap">
+    <div id="shotbar">
+      <button class="go" onclick="shoot()">Shoot</button>
+      <label class="hint"><input type="checkbox" id="auto" checked> after each click</label>
+      <label class="hint"><input type="checkbox" id="live"> live every <input type="number" id="every" value="1.5" step="0.5" min="0.5" style="width:48px"> s</label>
+      <input type="text" id="keepname" placeholder="label" style="max-width:140px">
+      <button onclick="keep()">Keep this shot</button>
+      <span id="toast"></span>
+    </div>
+    <img id="shot" alt="the game's screens appear here">
+    <section style="margin-top:10px">
+      <h2>Layout log <small>[tall] [board] [playart] [touch] [savestate]</small></h2>
+      <pre id="log"></pre>
+    </section>
+  </div>
+</div>
+</main>
+
+<script>
+// name, default, min, max, step, what it moves
+const DIALS_2D = [
+  ['panel', -29, -80, 40, 1, 'down and distance (1ST AND 30), plate and words, up/down'],
+  ['panel_words', 0, -40, 40, 1, '1ST AND 30\'s words against their plate'],
+  ['card', 0, -120, 120, 1, 'the rules and tip cards (GENERAL HINTS), up/down'],
+  ['score_lift', 8, -40, 60, 1, 'score panel after a score, up/down'],
+  ['msg_up', 10, -40, 80, 1, 'big messages (TOUCHDOWN!), up/down'],
+  ['result_line', 280, 150, 384, 2, 'play results (12 YARD RUN), height'],
+  ['result_dx', 0, -120, 120, 2, 'play results, sideways'],
+  ['pause_up', -3, -60, 60, 1, 'pause menu, up/down'],
+  ['banner', 0.12, 0, 0.4, 0.01, 'other upper-screen 2D, how far down'],
+  ['board', 1.35, 0.8, 2.2, 0.05, 'scoreboard size'],
+  ['score', 0, 0, 1, 1, 'scoreboard on: 0 top, 1 bottom'],
+  ['meter', 0, 0, 2, 1, 'kick meter: 0 upper left, 1 as other 2D, 2 lower left'],
+  ['panel_low', 0, 0, 1, 1, 'down and distance on the lower screen (1)'],
+  ['panel_low_y', -28, -80, 40, 1, '…its height there'],
+];
+const DIALS_CAM = [
+  ['tilt', 0.65, 0, 1, 0.01, 'the game\'s aim, how far down the picture'],
+  ['zoom', 1.15, 0.8, 1.8, 0.01, 'camera further back'],
+  ['shift', 0.4, 0, 1, 0.01, 'the play, how far down (off the hinge)'],
+  ['sky', 28, 0, 60, 1, 'how far above level the top may look'],
+  ['mark', 18, 0, 40, 1, 'player markers\' height'],
+  ['near', 165, 80, 300, 5, 'distance at the line'],
+  ['wide', 320, 150, 500, 5, 'farthest distance'],
+  ['hold', 170, 80, 300, 5, 'distance, ball in the air'],
+  ['pread', 45, 0, 90, 1, 'pitch while the QB reads'],
+  ['pcarry', 35, 0, 90, 1, 'pitch, ball in the air / carrier'],
+];
+let target = 'mac';
+const values = {};
+
+function el(id) { return document.getElementById(id); }
+function toast(t) { el('toast').textContent = t; }
+
+async function post(path, body) {
+  body.target = target;
+  const r = await fetch(path, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+  const j = await r.json().catch(() => ({}));
+  toast(j.result || j.error || '');
+  afterAction();
+  return j;
+}
+let holding = false;
+const NO_REFRESH = /^(HOLD|MARK|SAVESTATE|LOADSTATE|DSSTACK|QUIT|RESTART|DUMP|PEEK)\b/i;
+async function cmd(line) {
+  if (!line || !line.trim()) return;
+  line = line.trim();
+  if (holding && /^MARK load /i.test(line)) {  // another moment: let go, load it, hold that one
+    await post('/api/cmd', {line: 'HOLD off'});
+    await post('/api/cmd', {line});
+    setTimeout(() => post('/api/cmd', {line: 'HOLD on ' + holdFrames()}), 2500);
+    return;
+  }
+  await post('/api/cmd', {line});  // held: the server reloads the moment after it (devkit.py refresh_soon)
+  if (holding && !NO_REFRESH.test(line)) { clearTimeout(shotTimer); shotTimer = setTimeout(shoot, 1400); }
+}
+function holdFrames() { return parseInt(el('holdframes').value) || 6; }
+let refreshTimer = null;
+function refreshHold() {  // a burst of changes (a slider dragged) reloads once
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(() => post('/api/cmd', {line: 'HOLD refresh'}).then(() => setTimeout(shoot, 900)), 120);
+}
+async function toggleHold() {
+  holding = !holding;
+  el('holdbtn').textContent = holding ? 'Let go' : 'Hold this moment';
+  el('holdbtn').classList.toggle('go', !holding);
+  await post('/api/cmd', {line: holding ? 'HOLD on ' + holdFrames() : 'HOLD off'});
+  setTimeout(shoot, 900);
+}
+function press(what) { post('/api/press', {what, hold: parseFloat(el('hold').value) || 0.2}); }
+
+let shotTimer = null;
+function afterAction() {
+  if (!el('auto').checked) return;
+  clearTimeout(shotTimer);
+  shotTimer = setTimeout(shoot, 700);
+  setTimeout(refreshLog, 900);
+}
+let shooting = false;
+async function shoot() {
+  if (shooting) return;
+  shooting = true;
+  try {
+    const r = await fetch(`/api/shot?target=${target}&t=${Date.now()}`);
+    if (r.ok) {
+      const url = URL.createObjectURL(await r.blob());
+      const old = el('shot').src;
+      el('shot').src = url;
+      if (old.startsWith('blob:')) URL.revokeObjectURL(old);
+    } else toast((await r.json().catch(() => ({}))).error || 'no shot');
+  } finally { shooting = false; }
+}
+async function keep() {
+  const r = await fetch(`/api/shot?target=${target}&keep=${encodeURIComponent(el('keepname').value || 'shot')}`);
+  const j = await r.json().catch(() => ({}));
+  toast(j.saved ? 'kept: ' + j.saved : (j.error || 'not kept'));
+}
+let liveTimer = null;
+function setLive() {
+  clearInterval(liveTimer);
+  if (el('live').checked) liveTimer = setInterval(shoot, Math.max(500, parseFloat(el('every').value) * 1000));
+}
+el('live').onchange = setLive; el('every').onchange = setLive;
+
+async function refreshLog() {
+  const r = await fetch(`/api/log?target=${target}`);
+  const lines = await r.json().catch(() => []);
+  const pre = el('log');
+  pre.textContent = lines.join('\n');
+  pre.scrollTop = pre.scrollHeight;
+}
+async function refreshMarks() {
+  const r = await fetch(`/api/marks?target=${target}`);
+  const names = await r.json().catch(() => []);
+  const box = el('marks');
+  box.innerHTML = '';
+  if (!names.length) box.innerHTML = '<span class="hint">' + (target === 'android' ? 'type a name below and Load it' : 'none yet') + '</span>';
+  for (const n of names) {
+    const b = document.createElement('button');
+    b.textContent = n;
+    b.title = 'MARK load ' + n;
+    b.onclick = () => cmd('MARK load ' + n);
+    box.appendChild(b);
+  }
+  if (target === 'android') {
+    const b = document.createElement('button');
+    b.textContent = 'Load typed name';
+    b.onclick = () => cmd('MARK load ' + el('markname').value.trim());
+    box.appendChild(b);
+  }
+}
+function saveMark() {
+  const n = el('markname').value.trim().replace(/\s+/g, '-');
+  if (!n) return toast('name it first');
+  cmd('MARK save ' + n);
+  setTimeout(refreshMarks, 1200);
+}
+function intoGame() {
+  post('/api/game', {stadium: el('gamestadium').value, plays: parseInt(el('gameplays').value) || 0});
+}
+
+function buildDials(list, box) {
+  for (const [name, def, min, max, step, help] of list) {
+    values[name] = def;
+    const d = document.createElement('div');
+    d.className = 'dial';
+    d.title = help;
+    d.innerHTML = `<label>${name}</label><input type="range" min="${min}" max="${max}" step="${step}" value="${def}">` +
+                  `<input type="number" step="${step}" value="${def}"><button title="back to ${def}">↺</button>`;
+    const [label, range, num, reset] = d.children;
+    let t = null;
+    const set = (v, now) => {
+      v = parseFloat(v);
+      if (isNaN(v)) return;
+      range.value = v; num.value = v; values[name] = v;
+      label.classList.toggle('changed', v !== def);
+      clearTimeout(t);
+      t = setTimeout(() => cmd(`TALL ${name} ${v}`), now ? 0 : 150);
+    };
+    range.oninput = () => set(range.value);
+    num.onchange = () => set(num.value, true);
+    reset.onclick = () => set(def, true);
+    d.reset = () => set(def, true);
+    d.dataset.def = def;
+    box.appendChild(d);
+    const hint = document.createElement('div');
+    hint.className = 'hint';
+    hint.style.margin = '-2px 0 4px 98px';
+    hint.textContent = help;
+    box.appendChild(hint);
+  }
+}
+function copyDials() {
+  const all = [...DIALS_2D, ...DIALS_CAM];
+  const lines = all.filter(([n, def]) => values[n] !== def).map(([n]) => `TALL ${n} ${values[n]}`);
+  const text = lines.length ? lines.join('\n') : '(all at their defaults)';
+  navigator.clipboard?.writeText(text).catch(() => {});
+  el('copied').textContent = lines.length ? `copied ${lines.length}: paste it to Claude` : text;
+}
+function resetAll() { document.querySelectorAll('.dial').forEach(d => d.reset()); }
+
+document.querySelectorAll('#target button').forEach(b => b.onclick = () => {
+  target = b.dataset.t;
+  document.querySelectorAll('#target button').forEach(x => x.classList.toggle('sel', x === b));
+  el('session').style.opacity = target === 'mac' ? 1 : 0.4;
+  refreshMarks(); refreshLog(); shoot();
+});
+
+async function status() {
+  const s = await (await fetch('/api/status')).json().catch(() => null);
+  if (!s) return;
+  el('macchip').textContent = 'Mac: ' + (s.mac ? 'running' : 'off');
+  el('macchip').classList.toggle('on', s.mac);
+  el('adbchip').textContent = 'Android: ' + (s.android || 'none');
+  el('adbchip').classList.toggle('on', !!s.android);
+  if (target === 'mac' && s.hold !== holding) {  // held or let go from elsewhere (a reload, Claude)
+    holding = s.hold;
+    el('holdbtn').textContent = holding ? 'Let go' : 'Hold this moment';
+    el('holdbtn').classList.toggle('go', !holding);
+  }
+  const j = s.job;
+  el('job').textContent = j && j.name ? `${j.name}: ${j.running ? 'running · ' : ''}${(j.lines[j.lines.length - 1] || '')}` : '';
+  if (j && !j.running && j.name && !status.done) { status.done = true; refreshMarks(); }
+  if (j && j.running) status.done = false;
+}
+
+buildDials(DIALS_2D, el('dials2d'));
+buildDials(DIALS_CAM, el('dialscam'));
+status(); setInterval(status, 2000);
+refreshMarks(); refreshLog(); shoot();
+</script>
+</body>
+</html>

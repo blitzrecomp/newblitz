@@ -1,5 +1,70 @@
 # Changelog
 
+## 1.0.5 (unreleased)
+
+### Your saves on every device
+
+- **Cloud Sync.** Play a season on your phone and pick it up on your handheld or computer. Settings → **Saves** →
+  Cloud Sync: turn it on, then on your other device choose **Join** and type the **6-digit number** the first one
+  shows (it works once, for 2 minutes). From then on your saves go up after each save the game makes and come down
+  when New Blitz starts. It syncs your Controller Pak and season saves, not save states (those only load in the build
+  and device that made them).
+- **Your saves are locked before they leave the device.** They're encrypted with a key made from your sync code, so
+  our server can't read them. No account, no name, no email. Copies are deleted after 90 days unused, or when you turn
+  Cloud Sync off and delete. The privacy page has the details.
+- **Nothing is replaced behind your back.** A save that doesn't carry on from yours is never taken or sent silently:
+  New Blitz shows both (team, week, when, which device) and asks. Whatever is replaced goes to Backups first.
+- **Cloud Save Slots.** Three slots under one code (Slot 1-3), for separate seasons or a spare.
+- **Sync over Wi-Fi** sends your saves straight to another device on the same network, and **Export / Import Save
+  File** makes a file you can move yourself (Drive, AirDrop, a USB stick). On a PS5, Cloud Sync is the way.
+- New Blitz asks once when you set it up, and after a few updates, whether you play on more than one device. **No**
+  and **Don't Ask Again** are always there.
+
+### Two screens
+
+- **Surface Duo.** Spanned, the game is a two-screen DS: the field across both, play select and your thumbs below.
+  It opens spanned by itself, and turns into the DS hold when it's held like a book. On one panel it's landscape,
+  leaving the other panel for another app (held upright, it reminds you to turn it).
+- **Wide upper screens** (Retroid Pocket Duo, AYN Thor): the top screen fills with field instead of black bars, and
+  the 4:3 lower screen shows the same view at the same scale. Tested on a Mac at their sizes; tell us how it plays on
+  the real thing.
+- **Settings → DS**, a tab of its own on two-screen devices: the modes (Both, Companion, Stylus, Controller), the
+  camera, and a **Custom Layout** with a slider for every piece (the score panel, the big messages, the tip cards, the
+  camera's tilt and zoom...). The drive board's new **Screens** button steps through the modes by touch.
+- **Controller mode** turns the lower screen into a touch controller in the phone controller's style.
+- **The upper screen's pieces sit where they belong:** 1ST AND 30 inside its plate at the bottom; TOUCHDOWN! and the
+  score panel clear of each other and of the hinge, with no jump; FUMBLE in its box; play results whole; the punt and
+  kick meters back; the pause menu centred; tips dismissed by a touch on either screen.
+- **The drive board:** square team logos, end zones in team colours, and how each drive ended (TD, FG, PUNT, INT,
+  FUMBLE, DOWNS, SAFETY, END HALF). The receiver icons show over the game in every mode, never over the board.
+
+### On the field
+
+- **Play Art.** Hold Turbo at the line to see your receivers' routes painted on the turf, Madden style, in their
+  Receiver Buttons' colours. Settings → Rules → Play Art (Off, First Break, Full).
+- **Jersey numbers read the right way.** Players farther from the camera wore their numbers backwards (the original
+  game's own slip); fixed in every mode.
+- **Both stadium end boards read the right way** in the Day, Night and Snow stadiums.
+- **Players stay drawn to the edges of a widescreen picture**, shadows and all.
+
+### Controllers and menus
+
+- **Settings, tidied.** General keeps the app-wide things; graphics settings moved to Graphics, the controller's to the
+  top of Controls, game options to Rules, the bracket to Teams, and a new **Saves** tab has save states, Sync Now,
+  Backups and Reset Data. Nothing you set was reset. Opening Settings in a game holds it still underneath.
+- **A controller's buttons, your way.** Settings → Players → **Buttons** on each player: Auto, PlayStation, Xbox or
+  Switch. A PlayStation-style pad that says it's a Switch controller (some do, on Android) can be told: the bottom
+  button then hikes and OKs, in the game and the menus. Button Icons set to PlayStation does it for any such pad.
+- **START is a ▶** on the touch and phone controllers.
+- **Instant Replay's buttons fit** on phones and handhelds.
+
+### Fixes
+
+- **Loading a save state from before your last season save asks first** (Load It or Cancel), instead of saying so
+  afterwards with only OK.
+- **Android: no "isn't responding" box after loading a save state.**
+- **The on-screen keyboard** no longer opens twice or hides behind the screen that asked for it.
+
 ## 1.0.4 (2026-11-26)
 
 - **Phones: no more pink screens after the app switcher.** Coming back to New Blitz could leave the game, and then

@@ -1,0 +1,28 @@
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index 87d3614..de9b797 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -4706,6 +4706,23 @@ namespace plume {
+             deviceFeatures.features.shaderStorageImageReadWithoutFormat, deviceFeatures.features.shaderStorageImageWriteWithoutFormat, deviceFeatures.features.shaderStorageImageExtendedFormats,
+             layoutFeatures.scalarBlockLayout, indexingFeatures.runtimeDescriptorArray, robustnessFeatures.nullDescriptor,
+             deviceFeatures.features.shaderInt64, deviceFeatures.features.shaderFloat64, deviceFeatures.features.shaderStorageImageMultisample);
++        {   // RT64 writes frames back to the N64's RAM through formatted buffers of these (rt64_native_target.cpp): a driver that can't
++            // store to one may still take the view and then crash at the dispatch (the Surface Duo's, docs/SURFACE_DUO.md).
++            const VkFormat formats[] = { VK_FORMAT_R8_UINT, VK_FORMAT_R16_UINT, VK_FORMAT_R32_UINT };
++            const char *names[] = { "R8_UINT", "R16_UINT", "R32_UINT" };
++            for (int i = 0; i < 3; i++) {
++                VkFormatProperties p = {};
++                vkGetPhysicalDeviceFormatProperties(physicalDevice, formats[i], &p);
++                fprintf(stderr, "[vulkan] %s texel buffer: uniform %d, storage %d, storage atomic %d\n", names[i],
++                    (p.bufferFeatures & VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT) != 0, (p.bufferFeatures & VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT) != 0,
++                    (p.bufferFeatures & VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_ATOMIC_BIT) != 0);
++            }
++            fprintf(stderr, "[vulkan] texel buffers: %u elements at most, offsets aligned to %llu\n", physicalDeviceProperties.limits.maxTexelBufferElements,
++                (unsigned long long)physicalDeviceProperties.limits.minTexelBufferOffsetAlignment);
++            if (physicalDeviceProperties.vendorID == 0x5143) {  // Qualcomm's driver number: 512.502 is Android 11's
++                fprintf(stderr, "[vulkan] Qualcomm driver %u.%u\n", physicalDeviceProperties.driverVersion >> 22, (physicalDeviceProperties.driverVersion >> 12) & 0x3ff);
++            }
++        }
+ 
+         VkResult res = vkCreateDevice(physicalDevice, &createInfo, nullptr, &vk);
+         if (res != VK_SUCCESS) {

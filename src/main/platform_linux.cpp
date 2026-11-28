@@ -142,3 +142,13 @@ namespace blitz {
         return true;
     }
 }
+
+// Secure storage (Cloud Sync's code): the Secret Service through libsecret when the desktop has it
+// (secure_store_linux.h), else false and save_sync.cpp keeps a 0600 file.
+#include "secure_store_linux.h"
+namespace blitz {
+    bool secure_put(const std::string& name, const std::string& value) { return secure_linux::put(name, value); }
+    bool secure_get(const std::string& name, std::string& value) { return secure_linux::get(name, value); }
+    void secure_erase(const std::string& name) { secure_linux::erase(name); }
+    const char* secure_kind() { return secure_linux::lib().ok ? "the desktop's Secret Service" : "none"; }
+}

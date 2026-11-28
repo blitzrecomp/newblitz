@@ -31,6 +31,10 @@
 //   tilt 0.65  how far down the picture the game's own aim sits (0 the middle, 1 the bottom edge)
 //   sky 28     how far above level the picture's top edge may look (degrees)
 //   zoom 1.15  the game's camera, this much further back, always
+//   across 1  two screens of different widths (a wide upper screen over a 4:3 lower one): 1, the narrower screen spans
+//             the game's own view across, as one screen would, and the wider one sees more at its sides; 0, the wider
+//             spans it and the narrower shows only its middle (cutting off wide receivers at the line)
+//   skyfit 0  with across, a view taller than two 4:3 screens' gives its extra height to field, not sky (1; see the camera)
 //   wide_out 0, wide_in 0.025  per frame, how quickly the throw's wide view comes and goes (0: it doesn't; the team, trying
 //              the game's own camera only)
 // The live command "TALL <name> <value>" sets these too (dev_input.cpp).
@@ -63,13 +67,14 @@ extern "C" int blitz_play_select_on_screen(void);  // gfx_ext.cpp
 extern "C" int blitz_ds_active(void);  // ds_view.cpp
 extern "C" volatile int blitz_ds_panel_first;  // ui_state.cpp
 extern "C" volatile int blitz_ds_clip_hold;    // rt64_present_queue.cpp
-extern "C" { volatile int blitz_ds_screen_mode = 0; }  // Settings → General → DS Screens: 0 both, 1 game + companion, 2 stylus
+extern "C" { volatile int blitz_ds_screen_mode = 0; }  // Settings → General → DS Screens: 0 both, 1 game + companion, 2 stylus, 3 controller
 extern "C" { volatile int blitz_field_up = 0; }  // the field's on screen, nothing full width over it (ds_view.cpp's recipe_update)
 extern "C" int blitz_sprite_full_width(uint8_t* rdram, int32_t node);  // gfx_ext.cpp
 extern "C" float blitz_ds_k(void);
 extern "C" void blitz_ds_bracket(float x, float y);
 extern "C" volatile int blitz_ds_second_on_top;
 extern "C" int blitz_ds_first_part(float* top, float* bottom);
+extern "C" float blitz_ds_width_share(int first_window);  // ds_view.cpp
 extern "C" volatile int blitz_ds_mode;  // rt64_present_queue.cpp
 
 namespace {
@@ -117,9 +122,21 @@ namespace {
     float auto_on = 1.0f, pitch_line = 35.0f, pitch_read = 45.0f, pitch_carry = 35.0f, dist_near = 165.0f, dist_wide = 320.0f, dist_hold = 170.0f;
     float board_size = 1.35f;
     float k = 2.0f, shift = 0.4f, eye_lift = 0.0f, back = 0.0f, look = 0.0f, far_plane = 6000.0f, score_bottom = 0.0f, mark_height = 18.0f;
+    // TALL across (see the top): how much of the narrower screen's cut the camera makes up, and the view's widening for it
+    // (1 when the screens are the same width), set each frame from the screens' width shares.
+    float across = 1.0f, widen = 1.0f, sky_fit = 0.0f;
     float tilt = 0.65f, wide_out = 0.0f, wide_in = 0.025f, banner_drop = 0.12f, zoom = 1.15f, sky_limit = 28.0f;
     float log_sprites = 0.0f;
+    // Two-screen banner places, live with TALL result_dx / result_line / panel / msg_up (tuned on a Surface Duo, 2026-11-26).
+    float panel_words = 0.0f, card = 0.0f;  // TALL panel_words: 1ST AND 30's words against its plate; card: the rules and tip cards
+    float result_dx = 0.0f, result_line = 280.0f, panel_lift = -29.0f, msg_up = 10.0f, pause_up = -3.0f, panel_low = 0.0f, panel_low_y = -28.0f, meter_mode = 0.0f, score_lift = 8.0f;
+    bool paused_this_frame = false, paused_last_frame = false;  // the pause menu drew (group 0x5F07)
+    bool score_plates_this_frame = false, score_plates_last_frame = false;  // the score panel's plates drew (group 0x701)
     constexpr uint32_t call_frames = 0x800, tall_frames = 0x810, call_words = 0x34;  // 0x810: the returner's panel
+    // FUMBLE's box (a built image, 186x34 at 256,344 under the word's 10jFUMBLE at 353) is group 0x802, not 0x800: taken for
+    // other 2D, it went down with the banners while its word stayed put, so the word sat over an empty box (the team's Duo,
+    // 2026-11-27). It's a call's box like the others: measured and moved with them.
+    constexpr uint32_t fumble_frames = 0x802;
     float call_range = 70.0f, call_shift = 0.0f, call_y = 0.0f, msg_shift = 0.0f, msg_low = 1e9f, msg_high = -1e9f;
     bool call_up = false;  // a call's panel is up
     std::array<float, 16> frame_ys{};
@@ -172,6 +189,19 @@ namespace {
         else if (!strcmp(name, "log")) log_sprites = value;
         else if (!strcmp(name, "wide_out")) wide_out = value;
         else if (!strcmp(name, "wide_in")) wide_in = value;
+        else if (!strcmp(name, "result_dx")) result_dx = value;
+        else if (!strcmp(name, "result_line")) result_line = value;
+        else if (!strcmp(name, "panel")) panel_lift = value;
+        else if (!strcmp(name, "msg_up")) msg_up = value;
+        else if (!strcmp(name, "pause_up")) pause_up = value;
+        else if (!strcmp(name, "panel_low")) panel_low = value;
+        else if (!strcmp(name, "panel_low_y")) panel_low_y = value;
+        else if (!strcmp(name, "meter")) meter_mode = value;
+        else if (!strcmp(name, "score_lift")) score_lift = value;
+        else if (!strcmp(name, "panel_words")) panel_words = value;
+        else if (!strcmp(name, "card")) card = value;
+        else if (!strcmp(name, "across")) across = value;
+        else if (!strcmp(name, "skyfit")) sky_fit = value;
         else fprintf(stderr, "[tall] no setting %s\n", name);
     }
 
@@ -230,8 +260,8 @@ extern "C" int blitz_tall_carry(float nx, float ny, float height, float lift, fl
     Vec v = point - tall_view.eye;
     float z = dot(v, tall_view.f);
     if (z <= 1.0f) return 0;
-    *tx = dot(v, tall_view.r) / (z * game_tan * game_aspect);
-    *ty = dot(v, tall_view.u) / (z * game_tan * k);
+    *tx = dot(v, tall_view.r) / (z * game_tan * widen * game_aspect);
+    *ty = dot(v, tall_view.u) / (z * game_tan * widen * k);
     return 1;
 }
 
@@ -272,6 +302,12 @@ extern "C" void blitz_tall_frame_begin(uint8_t* rdram) {
     blitz_tall_aspect_on = gameplay && !blitz_play_select_on_screen() && full_art_frames == 0 && screens == 0 ? 1.0f : 0.0f;
     if (blitz_ds_active()) {
         k = blitz_ds_k();
+        // A screen narrower than the picture shows its middle: the view widens so that screen still spans the game's own
+        // view across (TALL across), the same in both directions, so each screen keeps one scale and the halves still meet.
+        // With a wide upper screen over a 4:3 lower one the lower then frames the play as one 4:3 screen does (and as two
+        // screens of one width do), and the upper adds field at its sides. Same widths: 1, as before.
+        const float narrow = std::min(blitz_ds_width_share(1), blitz_ds_width_share(0));
+        widen = (narrow > 0.05f && narrow < 0.999f) ? 1.0f + std::max(across, 0.0f) * (1.0f / narrow - 1.0f) : 1.0f;
         // Over both in play. Otherwise the game on the upper screen, but play select on the lower, where a thumb picks.
         bool want_upper = !blitz_play_select_on_screen();
         blitz_ds_mode = blitz_tall_aspect_on != 0.0f ? 1 : (want_upper == (blitz_ds_second_on_top != 0)) ? 3 : 2;
@@ -280,7 +316,16 @@ extern "C" void blitz_tall_frame_begin(uint8_t* rdram) {
         // Game + companion: with the game on the second window, the first has the drive board. So does play select there,
         // which is only with the first window on top.
         blitz_ds_panel_first = blitz_ds_mode == 3 && (screens == 1 || blitz_play_select_on_screen()) ? 1 : 0;
+        // Controller (team, 2026-11-26): the game always on the upper screen, the lower one the touch controller alone.
+        if (screens == 3) {
+            blitz_ds_mode = blitz_ds_second_on_top != 0 ? 3 : 2;
+            blitz_ds_panel_first = 0;
+        }
     }
+    paused_last_frame = paused_this_frame;
+    paused_this_frame = false;
+    score_plates_last_frame = score_plates_this_frame;
+    score_plates_this_frame = false;
     follow_frame_begin();
 }
 
@@ -311,13 +356,50 @@ extern "C" void blitz_tall_sprite_begin(uint8_t* rdram, int32_t node) {
     uint32_t group = (uint32_t)MEM_W(node_group, node);
     bool scoreboard = false;
     for (uint32_t g : groups_scoreboard) scoreboard = scoreboard || group == g;
-    bool bottom = group == group_player_bars || (scoreboard && score_bottom != 0.0f);
-    // The punt meter (group 0x32B: PUNTGRID, PUNTSTEM, PUNTARROW and the WIND plate, seen 2026-11-04): with the play, in the
-    // bottom screen's lower left corner (team). The kick meter's names are a guess, kept in case they're right.
+    if (group == 0x5F07) paused_this_frame = true;
+    // The down and distance (1ST AND 30 between plays) and the score panel after a score (groups 9 and 0x701): the lower
+    // screen's bottom, where one screen has the down and distance (team, 2026-11-26); TALL panel_low 0 puts them back on the
+    // upper screen's bottom.
+    // The score panel after a score (its SP_ plates, group 0x701) shares group 9 with the down and distance: when the plates
+    // drew last frame, group 9 is the panel's names and scores and goes up with it, out from under the thumbs (team,
+    // 2026-11-27); otherwise it's the down and distance, at the lower screen's bottom as one screen has it.
+    // Only the score panel's own plates (its logo, quarter and clock) say it's up: the down and distance's plate is SP_ALL too,
+    // and counting that sent 1ST AND 30 up with the rules board (team, 2026-11-27).
+    if (group == group_score_panel) {
+        const int32_t sp_img = MEM_W(0x0C, obj);
+        if (sp_img != 0 && (!memcmp_game(rdram, sp_img + 0x0E, "SP_LOGO", 7) || !memcmp_game(rdram, sp_img + 0x0E, "SP_QTR", 6) ||
+                            !memcmp_game(rdram, sp_img + 0x0E, "SP_CLOCK", 8))) score_plates_this_frame = true;
+    }
+    const bool score_panel = group == group_score_panel || group == group_score_words;
+    // Which of the two it is, from the piece itself where it can be: the down and distance's words are the 10j font (10j...1ST
+    // AND 30), the score panel's names and scores 8j and 9j; its plates other than SP_ALL are its own. Only the plate the two
+    // share (SP_ALL) goes by whether the panel's own plates drew last frame.
+    bool down_banner = false;
+    if (score_panel) {
+        const int32_t piece = MEM_W(0x0C, obj);
+        if (piece == 0) down_banner = !score_plates_last_frame;
+        // A text piece's name starts with an escape (1B, then 10j-256c1ST AND 30): read past it. Looked for at +0x0E, "10j"
+        // never matched, so the words went with the score panel's dial, apart from their plate (team, 2026-11-27).
+        else if (group == group_score_words) {
+            const int32_t name = piece + 0x0E + ((uint8_t)MEM_B(0x0E, piece) == 0x1B ? 1 : 0);
+            down_banner = !memcmp_game(rdram, name, "10J", 3);
+        }
+        else down_banner = !memcmp_game(rdram, piece + 0x0E, "SP_ALL", 6) && !score_plates_last_frame;
+    }
+    bool bottom = group == group_player_bars || (scoreboard && score_bottom != 0.0f) || (down_banner && panel_low != 0.0f);
+    // The punt meter (group 0x32B: PUNTGRID, PUNTSTEM, PUNTARROW and the WIND plate, seen 2026-11-04): the upper screen's lower
+    // left corner, clear of the touch controls on the lower one (team, 2026-11-26; it was the lower screen's). The kick meter's
+    // names are a guess, kept in case they're right.
     int32_t meter_img = MEM_W(0x0C, obj);
-    const bool meter = group == group_punt_meter ||
+    // The big messages (TOUCHDOWN!, 1ST DOWN, SAFETY: MSG_ images) and their sparks share the panels' group (0x800). They're
+    // placed from the game's own layout, not measured with the panels: measured, a message showed for a frame where the game
+    // put it and then jumped (team, 2026-11-27).
+    const bool big_message = meter_img != 0 && (!memcmp_game(rdram, meter_img + 0x0E, "MSG_", 4) || !memcmp_game(rdram, meter_img + 0x0E, "SPARK", 5));
+    const bool meter_seen = group == group_punt_meter ||
                        (meter_img != 0 && (!memcmp_game(rdram, meter_img + 0x0E, "K_METER", 7) || !memcmp_game(rdram, meter_img + 0x0E, "K_BALL", 6) || !memcmp_game(rdram, meter_img + 0x0E, "METER", 5)));
-    if (meter) bottom = true;
+    // TALL meter 0: the upper screen's lower left; 1: as any other 2D; 2: the lower screen's lower left (as before 11-26).
+    const bool meter = meter_seen && meter_mode != 1.0f;
+    if (meter && meter_mode == 2.0f) bottom = true;
     float obj_y_now = get_float(rdram, obj + obj_y);
     int anchor_y = (int)MEM_H(0xAA, obj);
     // The narrow panel a kick returner gets (PLAYER 1 HAS BALL: tall, not wide like the rules): the bottom screen, with its
@@ -334,7 +416,8 @@ extern "C" void blitz_tall_sprite_begin(uint8_t* rdram, int32_t node) {
     bool directions = directions_up && (group == call_frames || group == tall_frames || group == call_words) && std::fabs(obj_y_now - directions_y) <= directions_range &&
                       std::fabs(obj_x_now - directions_x) <= directions_half + (group == call_words ? 60.0f : 0.0f);
     // Frames of a call, measured this frame and moved next: one panel, or several images (END OF over 1ST QUARTER).
-    if ((group == call_frames || group == tall_frames) && !directions && frame_count < (int)frame_ys.size()) {
+    const bool call_box = group == call_frames || group == tall_frames || group == fumble_frames;
+    if (call_box && !directions && !big_message && frame_count < (int)frame_ys.size()) {
         frame_ys[(size_t)frame_count++] = obj_y_now;
         frame_anchor = std::max(frame_anchor, anchor_y);
     }
@@ -363,30 +446,60 @@ extern "C" void blitz_tall_sprite_begin(uint8_t* rdram, int32_t node) {
     if (blitz_ds_first_part(&part_top, &part_bottom)) {
         float upper_share = blitz_ds_second_on_top ? part_top : part_bottom;
         scale = std::min(scale, bottom ? 1.0f - upper_share : upper_share);
+        // A screen narrower than the picture (a 4:3 one under a wide one) shows only its middle: its 2D shrinks to fit it.
+        const bool first_window = bottom == (blitz_ds_second_on_top != 0);
+        scale *= blitz_ds_width_share(first_window ? 1 : 0);
     }
-    // The meter keeps its distance from the left edge, not from the middle: the corner, all its parts together.
-    float placed_x = meter ? saved[0] * scale : 256.0f + (saved[0] - 256.0f) * scale;
+    // Everything shrinks about the middle: the shrunken 512-wide space shows only its middle half across the picture, so a
+    // place measured from the left edge (the kick meter's was) lands off the screen. The meter never showed for that.
+    float placed_x = 256.0f + (saved[0] - 256.0f) * scale;
     float placed_y = saved[1] * scale + (bottom ? 0.0f : 384.0f * (1.0f - scale));
+    if (down_banner && bottom) placed_y += panel_low_y;  // almost on the lower screen's bottom edge (team): TALL panel_low_y
     float size = scale;
     // A call's panel (INCOMPLETE, NO GAIN: frames group 0x800, words 0x34) in the upper half of the game's picture: the
     // middle of its screen, all of it by the same amount. So too the one-word images (1ST DOWN, 1ST QUARTER: MSG_*), the
     // first of them each frame setting it for the others. Other 2D: down a little, clear of the scoreboard.
     if (directions) placed_y -= (directions_y - 192.0f) * scale;
-    else if (!scoreboard && !bottom) {
+    else if (!scoreboard && !bottom && !meter) {
         int32_t call_img = MEM_W(0x0C, obj);
-        if (group == call_frames || group == tall_frames || group == call_words) {
-            if (call_up && std::fabs(saved[1] - call_y) <= call_range) placed_y -= call_shift * scale;
+        if (big_message && !(call_up && std::fabs(saved[1] - call_y) <= call_range)) {
+            // On its own: where the game puts it, moved up the same from the first frame (the messages sit around y 262), a
+            // little high on the upper screen so the score panel under it stays clear (TALL msg_up). In a panel's box (FUMBLE
+            // over its plate, perhaps): with the box, below.
+            placed_y -= (262.0f - 192.0f) * scale;
+            placed_y += msg_up;
+        }
+        else if (call_box || group == call_words) {
+            if (call_up && std::fabs(saved[1] - call_y) <= call_range) {
+                // A play's result (16 YARD PASS over 1ST DOWN AND 30) is high on the game's screen: the upper screen's top right,
+                // where one screen has it, out of the field's way (team, 2026-11-26). Lower panels (the rules) still centre.
+                if (call_y >= result_line) placed_x += result_dx;
+                else placed_y += -call_shift * scale + card;  // the rules and tip cards: centred, then TALL card (team, 2026-11-27)
+            }
         }
         else if (call_img != 0 && !memcmp_game(rdram, call_img + 0x0E, "MSG_", 4)) {
             // Together, by last frame's extent: END OF over 1ST QUARTER are three images on two lines.
             msg_low = std::min(msg_low, saved[1]);
             msg_high = std::max(msg_high, saved[1]);
-            placed_y -= msg_shift * scale;
+            // From the game's own layout, not last frame's: measured, a message showed in one place for a frame and then
+            // jumped (TOUCHDOWN!, the team, 2026-11-27). They sit around y 262 (247-271); END OF over 1ST QUARTER keep their lines.
+            placed_y -= (262.0f - 192.0f) * scale;
+            placed_y += msg_up;  // a little high on the upper screen, clear of the score panel under it (TALL msg_up)
         }
-        // The score panel after a score and the down-and-distance one (groups 0x701 and 9): not dropped like other banners
-        // but lifted, since their lower rows reach the middle of the picture and the hinge split them (team, 2026-11-04).
-        else if (group == group_score_panel || group == group_score_words) placed_y += 16.0f * scale;
-        else placed_y -= banner_drop * 384.0f * scale;
+        // The score panel after a score and the down-and-distance one (groups 0x701 and 9): at the bottom of the upper screen,
+        // centred, just clear of the hinge (team, 2026-11-26; it was lifted 16 for the hinge, 2026-11-04).
+        // Two offsets: the down and distance (1ST AND 30) sits low (the team's pick, panel), the score panel after a score is taller
+        // and keeps clear of the hinge higher up (score_lift; it shared panel's and split at the hinge, 2026-11-27).
+        // The down and distance's words have their own nudge against its plate (TALL panel_words, the team 2026-11-27).
+        else if (group == group_score_panel || group == group_score_words)
+            placed_y += (down_banner ? panel_lift + (group == group_score_words ? panel_words : 0.0f) : score_lift) * scale;
+        // While the pause menu's up (TIME OUT, group 0x5F07, seen last frame), all of it goes up together: its labels are
+        // another group than its plates, so lifting one group alone parted them (team, 2026-11-26).
+        else placed_y += paused_last_frame ? pause_up : -banner_drop * 384.0f * scale;
+    }
+    if (meter_seen) {  // where a kick meter lands, now and then (it hasn't shown on two screens: the team's Duo, 2026-11-27)
+        static int said = 0;
+        if (said++ % 120 == 0) fprintf(stderr, "[tall] meter group %X at %.0f,%.0f -> %.0f,%.0f scale %.2f (mode %.0f, bottom %d)\n", group, saved[0], saved[1], placed_x, placed_y, size, meter_mode, bottom ? 1 : 0);
     }
     put_float(rdram, obj + obj_x, placed_x);
     put_float(rdram, obj + obj_y, placed_y);
@@ -456,7 +569,7 @@ namespace {
     }
 
     Vec f_preview_shift(float amount, float dist) {
-        return Vec{downfield, 0, 0} * (amount * dist * game_tan * k / std::sin(follow_pitch * pi / 180.0f));
+        return Vec{downfield, 0, 0} * (amount * dist * game_tan * widen * k / std::sin(follow_pitch * pi / 180.0f));
     }
 
     Vec player_at(uint8_t* rdram, int i) {
@@ -469,9 +582,9 @@ namespace {
         float cp = std::cos(at_pitch * pi / 180.0f), sp = std::sin(at_pitch * pi / 180.0f);
         Vec f = unit(h * cp + Vec{0, -sp, 0});
         Vec u = cross(r, f);
-        float tan_h = game_tan * game_aspect * 0.92f, tan_v = game_tan * k * 0.92f;
+        float tan_h = game_tan * widen * game_aspect * 0.92f, tan_v = game_tan * widen * k * 0.92f;
         for (float d = from; d < dist_wide; d += 8.0f) {
-            Vec aim = center + h * (at_shift * d * game_tan * k / sp);
+            Vec aim = center + h * (at_shift * d * game_tan * widen * k / sp);
             Vec eye = aim + f * -d;
             bool fits = true;
             for (int i = 0; i < count && fits; i++) {
@@ -584,7 +697,7 @@ namespace {
         float cp = std::cos(follow_pitch * pi / 180.0f), sp = std::sin(follow_pitch * pi / 180.0f);
         Vec f = unit(Vec{downfield, 0, 0} * cp + Vec{0, -sp, 0});
         // The ground a screen's height covers, near enough: moving the aim forward moves the play down the picture.
-        Vec aim = follow_center + Vec{downfield, 0, 0} * (follow_shift * follow_dist * game_tan * k / sp);
+        Vec aim = follow_center + Vec{downfield, 0, 0} * (follow_shift * follow_dist * game_tan * widen * k / sp);
         Vec my_eye = aim + f * -follow_dist;
         eye = eye + (my_eye - eye) * follow_mix;
         at = at + (aim - at) * follow_mix;
@@ -625,9 +738,16 @@ extern "C" void blitz_tall_camera(uint8_t* rdram, int32_t cam) {
         base.set(eye_v, at_v);
         // Back along the view first: the old aim stays where it was on the picture.
         eye_v = at_v + base.f * -(std::sqrt(dot(at_v - eye_v, at_v - eye_v)) * zoom);
-        float slope = tilt * game_tan * k;
+        float slope = tilt * game_tan * widen * k;
         // A low camera (a kickoff's) tilted that far would look past the top of the sky's art: only as far as sky_limit.
-        float room = sky_limit * pi / 180.0f - std::asin(std::clamp(base.f.y, -1.0f, 1.0f)) - std::atan(game_tan * k);
+        // A view widened for a narrower screen (TALL across) and taller than two 4:3 screens' (k 2: an AYN Thor's square-ish
+        // lower screen under its wide upper one) spends its extra height on sky. TALL skyfit 1 brings the top edge down by
+        // that much (the picture's bottom edge where two 4:3 screens have it): more field on the upper screen and the line
+        // near the hinge, but a low camera's play (a fumble's pile) then sits on the hinge or the upper screen. Off by
+        // default (Mac test at Thor proportions, 2026-11-27): the play stays on the lower screen, the top has more sky.
+        float sky = sky_limit;
+        if (widen > 1.001f) sky -= sky_fit * 2.0f * (std::atan(game_tan * widen * k) - std::atan(game_tan * 2.0f)) * 180.0f / pi;
+        float room = sky * pi / 180.0f - std::asin(std::clamp(base.f.y, -1.0f, 1.0f)) - std::atan(game_tan * widen * k);
         slope = std::min(slope, std::tan(std::max(room, 0.0f)));
         at_v = eye_v + unit(base.f + base.u * slope) * std::sqrt(dot(at_v - eye_v, at_v - eye_v));
     }
@@ -648,7 +768,7 @@ extern "C" uint32_t blitz_tall_fov(uint32_t fov_bits) {
     float fov;
     memcpy(&fov, &fov_bits, 4);
     game_tan = std::tan(fov * pi / 360.0f);
-    fov = 2.0f * std::atan(k * std::tan(fov * pi / 360.0f)) * 180.0f / pi;
+    fov = 2.0f * std::atan(k * widen * std::tan(fov * pi / 360.0f)) * 180.0f / pi;
     memcpy(&fov_bits, &fov, 4);
     return fov_bits;
 }

@@ -37,6 +37,12 @@ extern "C" void blitz_sprite_after_texrect(uint8_t*) {}
 extern "C" void blitz_gfx_prologue(uint8_t*, int32_t) {}
 // widescreen.cpp: Aspect Ratio Expand is never on.
 extern "C" int blitz_force_color_clear(void) { return 0; }
+// The players' wider cull: the picture is 4:3, so the draws get the game's own flags.
+extern "C" void blitz_ws_cull_begin(void) {}
+extern "C" void blitz_ws_cull_test(uint8_t*, recomp_context*) {}
+extern "C" void blitz_ws_cull_hidden(recomp_context*) {}
+extern "C" void blitz_ws_cull_done(uint8_t*, recomp_context*) {}
+extern "C" uint32_t blitz_ws_draw_flags(uint8_t*, int32_t, uint32_t flags) { return flags; }
 
 // ---- crew.cpp: Classic has no player file ----
 extern "C" int blitz_crew_wait(uint8_t*) { return 0; }
@@ -52,6 +58,11 @@ namespace blitz {
     // The same option (id and default) as the desktop, so rules.json is the same file.
     void add_receiver_option(recomp::config::Config& c) {
         c.add_bool_option("receiver_buttons", "Receiver Buttons", "Off on the PSP.", false);
+    }
+    // ---- play_art.cpp (draws through gfx_ext's camera tag, off here): the same option, so rules.json is the same ----
+    void add_play_art_option(recomp::config::Config& c) {
+        c.add_enum_option("play_art", "Play Art", "Off on the PSP.",
+                          {{0u, "off", "Off"}, {1u, "first", "First Break"}, {2u, "full", "Full"}}, 1u);
     }
 }
 

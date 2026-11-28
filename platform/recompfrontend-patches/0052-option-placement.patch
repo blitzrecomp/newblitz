@@ -1,0 +1,463 @@
+diff --git a/recompui/include/recompui/config.h b/recompui/include/recompui/config.h
+index 7ee1a29..7ca32fc 100644
+--- a/recompui/include/recompui/config.h
++++ b/recompui/include/recompui/config.h
+@@ -160,6 +160,11 @@ namespace recompui {
+         void set_option_section(const std::string &config_id, const std::string &option_id, const std::string &label,
+                                 std::function<std::string()> count = {});
+         void set_option_action(const std::string &config_id, const std::string &option_id, const std::string &button_text);
++        // Blitz settings layout: draws a config's option on another tab (an options tab, or the Controls tab's top)
++        // instead of its own. Its value stays in its own config and that config's file; only where the row is drawn
++        // moves. A tab draws the rows placed on it in the order placed: `first` ones before its own rows, the rest after.
++        // Placing an option on its own config's tab puts it back there.
++        void place_option(const std::string &config_id, const std::string &option_id, const std::string &tab_id, bool first = false);
+         // Shows a title and text in the open options page's description panel (the header's icon buttons).
+         void describe_header_button(const std::string &title, const std::string &text);
+ 
+diff --git a/recompui/src/config/ui_config_page_controls.cpp b/recompui/src/config/ui_config_page_controls.cpp
+index dbb5f9c..8061054 100644
+--- a/recompui/src/config/ui_config_page_controls.cpp
++++ b/recompui/src/config/ui_config_page_controls.cpp
+@@ -257,6 +257,7 @@ void ConfigPageControls::process_event(const Event &e) {
+             last_update_index = update_index;
+             render_all();
+         }
++        placed.poll();
+         queue_update();
+         break;
+     default:
+@@ -382,6 +383,7 @@ bool ConfigPageControls::should_show_mappings() {
+ 
+ void ConfigPageControls::render_body() {
+     recompui::ContextId context = get_current_context();
++    placed.clear();  // drawn again with the mappings (and not at all with the players)
+ 
+     if (should_show_mappings()) {
+         body->get_right()->set_display(Display::Flex);
+@@ -602,6 +604,33 @@ void ConfigPageControls::render_control_mappings() {
+         create_game_input_contexts();
+         set_current_profile_index();
+ 
++        // Options placed on this tab (Blitz: rumble, button icons and the like), above the mappings.
++        placed.clear();
++        if (!placed_options(config::controls::id).empty()) {
++            Element *placed_box = context.create_element<Element>(body_left_scroll, 0, "div", false);
++            placed_box->set_display(Display::Block);
++            placed_box->set_width(100.0f, Unit::Percent);
++            placed_box->set_margin_bottom(18.0f);
++            placed_box->set_as_navigation_container(NavigationType::Vertical);
++            auto hover = [this](recomp::config::Config *cfg, const std::string &option_id) {
++                if (description_container == nullptr) {
++                    return;
++                }
++                const recomp::config::ConfigOption &option = cfg->get_option(option_id);
++                std::string title = option.name;
++                for (char &c : title) c = (char)std::toupper((unsigned char)c);
++                if (description_eyebrow != nullptr) {
++                    description_eyebrow->set_text("");
++                }
++                if (description_title != nullptr) {
++                    description_title->set_text(title);
++                }
++                description_container->set_text_unsafe(option.description);
++            };
++            placed.render(context, placed_box, config::controls::id, true, hover);
++            placed.render(context, placed_box, config::controls::id, false, hover);
++        }
++
+         // Blitz '27 column headers: N64 BUTTON · MAIN · ALSO, in cyan caps over the slots.
+         {
+             auto columns = context.create_element<Element>(body_left_scroll, 0, "div", false);
+diff --git a/recompui/src/config/ui_config_page_controls.h b/recompui/src/config/ui_config_page_controls.h
+index d5f7a45..a45db46 100644
+--- a/recompui/src/config/ui_config_page_controls.h
++++ b/recompui/src/config/ui_config_page_controls.h
+@@ -11,6 +11,7 @@
+ #include "elements/ui_toggle.h"
+ #include "elements/ui_modal.h"
+ #include "composites/ui_player_card.h"
++#include "config/ui_config_placed_rows.h"
+ 
+ namespace recompui {
+ 
+@@ -159,6 +160,8 @@ protected:
+     Element *description_container = nullptr;
+     Label *description_eyebrow = nullptr;
+     Label *description_title = nullptr;
++    // Options from other configs placed at the top of this tab (config::place_option, Blitz's settings layout).
++    PlacedOptionRows placed;
+     on_player_bind_callback on_player_bind;
+     Element *nav_up_element = nullptr;
+     Element *first_nav_element = nullptr;
+diff --git a/recompui/src/config/ui_config_page_options_menu.cpp b/recompui/src/config/ui_config_page_options_menu.cpp
+index 1e4c2d8..7831450 100644
+--- a/recompui/src/config/ui_config_page_options_menu.cpp
++++ b/recompui/src/config/ui_config_page_options_menu.cpp
+@@ -1,5 +1,6 @@
+ #include "ui_config_page_options_menu.h"
+ #include "recompui/config.h"
++#include <algorithm>
+ #include <map>
+ 
+ 
+@@ -67,6 +68,142 @@ namespace {
+     };
+ }
+ 
++namespace {
++    std::map<std::string, std::vector<PlacedOption>> &placements() {
++        static std::map<std::string, std::vector<PlacedOption>> by_tab;
++        return by_tab;
++    }
++    std::map<std::string, std::string> &placed_tab_of() {  // "config/option" -> the tab it's drawn on
++        static std::map<std::string, std::string> tabs;
++        return tabs;
++    }
++}
++
++void config::place_option(const std::string &config_id, const std::string &option_id, const std::string &tab_id, bool first) {
++    const std::string key = config_id + "/" + option_id;
++    if (auto it = placed_tab_of().find(key); it != placed_tab_of().end()) {  // placed again: moved from the earlier tab
++        auto &old = placements()[it->second];
++        old.erase(std::remove_if(old.begin(), old.end(), [&](const PlacedOption &p) {
++            return p.config_id == config_id && p.option_id == option_id;
++        }), old.end());
++        placed_tab_of().erase(it);
++    }
++    if (tab_id == config_id) {
++        return;  // back on its own tab
++    }
++    placed_tab_of()[key] = tab_id;
++    placements()[tab_id].push_back({ config_id, option_id, first });
++}
++
++const std::vector<PlacedOption> &placed_options(const std::string &tab_id) {
++    static const std::vector<PlacedOption> none;
++    auto it = placements().find(tab_id);
++    return it == placements().end() ? none : it->second;
++}
++
++bool option_placed_elsewhere(const std::string &config_id, const std::string &option_id) {
++    return placed_tab_of().contains(config_id + "/" + option_id);
++}
++
++ConfigOptionElement *create_option_row(ContextId context, Element *parent, recomp::config::Config *config, size_t i,
++                                       set_option_value_t set_value, on_option_hover_t on_hover) {
++    const auto &config_option = config->get_config_schema().options[i];
++    ConfigOptionElement *element = nullptr;
++    const std::string key = config->id + "/" + config_option.id;
++    if (auto section = option_sections().find(key); section != option_sections().end()) {
++        context.create_element<ConfigSectionRow>(parent, section->second.label, section->second.count);
++    }
++    if (auto action = option_actions().find(key); action != option_actions().end() &&
++        config_option.type == recomp::config::ConfigOptionType::Bool) {
++        element = context.create_element<ConfigOptionAction>(parent, config_option.id, i, config, set_value, on_hover, action->second);
++    }
++    else {
++        switch (config_option.type) {
++            case recomp::config::ConfigOptionType::Enum:
++                element = context.create_element<ConfigOptionEnum>(parent, config_option.id, i, config, set_value, on_hover);
++                break;
++            case recomp::config::ConfigOptionType::Number:
++                element = context.create_element<ConfigOptionNumber>(parent, config_option.id, i, config, set_value, on_hover);
++                break;
++            case recomp::config::ConfigOptionType::String:
++                element = context.create_element<ConfigOptionString>(parent, config_option.id, i, config, set_value, on_hover);
++                break;
++            case recomp::config::ConfigOptionType::Bool:
++                element = context.create_element<ConfigOptionBool>(parent, config_option.id, i, config, set_value, on_hover);
++                break;
++            default:
++                assert(false && "Unknown config option type");
++                return nullptr;
++        }
++    }
++    element->update_disabled();
++    element->update_hidden();
++    return element;
++}
++
++size_t PlacedOptionRows::render(ContextId context, Element *parent, const std::string &tab_id, bool first, hover_t on_hover) {
++    size_t drawn = 0;
++    for (const PlacedOption &p : placed_options(tab_id)) {
++        if (p.first != first) {
++            continue;
++        }
++        recomp::config::Config *cfg = nullptr;
++        try {
++            cfg = &config::get_config(p.config_id);
++        } catch (const std::exception &) {
++            continue;  // that config's tab isn't in this build
++        }
++        const auto &by_id = cfg->get_config_schema().options_by_id;
++        auto found = by_id.find(p.option_id);
++        if (found == by_id.end()) {
++            continue;
++        }
++        const size_t index = found->second;
++        // Its own config's change, saved at once: its own tab's close (which saves it) may not come.
++        set_option_value_t set_value = [cfg](const std::string &option_id, recomp::config::ConfigValueVariant value) {
++            cfg->set_option_value(option_id, value);
++            if (!cfg->requires_confirmation) {
++                cfg->save_config();
++            }
++        };
++        on_option_hover_t hover = [cfg, on_hover](const std::string &option_id) {
++            if (on_hover) {
++                on_hover(cfg, option_id);
++            }
++        };
++        ConfigOptionElement *element = create_option_row(context, parent, cfg, index, set_value, hover);
++        if (element == nullptr) {
++            continue;
++        }
++        rows.push_back({ element, cfg, index, cfg->is_config_option_hidden(index), cfg->is_config_option_disabled(index),
++                         cfg->requires_confirmation ? cfg->get_temp_option_value(p.option_id) : cfg->get_option_value(p.option_id) });
++        drawn++;
++    }
++    return drawn;
++}
++
++void PlacedOptionRows::poll() {
++    for (Row &row : rows) {
++        const bool hidden = row.config->is_config_option_hidden(row.index);
++        if (hidden != row.hidden) {
++            row.hidden = hidden;
++            row.element->update_hidden();
++        }
++        const bool disabled = row.config->is_config_option_disabled(row.index);
++        if (disabled != row.disabled) {
++            row.disabled = disabled;
++            row.element->update_disabled();
++        }
++        const std::string &id = row.element->get_option_id();
++        recomp::config::ConfigValueVariant value =
++            row.config->requires_confirmation ? row.config->get_temp_option_value(id) : row.config->get_option_value(id);
++        if (value != row.value) {
++            row.value = value;
++            row.element->update_value();
++        }
++    }
++}
++
+ static ConfigPageOptionsMenu *described_page = nullptr;  // the open options page, for header descriptions
+ 
+ void config::describe_header_button(const std::string &title, const std::string &text) {
+@@ -183,7 +320,8 @@ ConfigPageOptionsMenu::ConfigPageOptionsMenu(
+ void ConfigPageOptionsMenu::set_description_text(const std::string &text_in) {
+     // With nothing focused, the tab's name and how to get a description (controller words, not mouse ones).
+     const std::string text = text_in.empty() ? "Move to a setting to see what it does." : text_in;
+-    std::string title = (!text_in.empty() && !description_option_id.empty()) ? config->get_option(description_option_id).name : config->name;
++    const recomp::config::Config *shown = description_config != nullptr ? description_config : config;
++    std::string title = (!text_in.empty() && !description_option_id.empty()) ? shown->get_option(description_option_id).name : config->name;
+     for (char& c : title) c = (char)std::toupper((unsigned char)c);
+     show_description(title, text, is_internal || text_in.empty());
+ }
+@@ -209,7 +347,9 @@ void ConfigPageOptionsMenu::perform_option_render_updates() {
+         std::string &option_id = schema.options[option_index].id;
+         ConfigOptionElement* element = get_element_from_option_id(option_id);
+         if (element == nullptr) {
+-            printf("Failed to update conf option: '%s'\n", option_id.c_str());
++            if (!option_placed_elsewhere(config->id, option_id)) {  // drawn on another tab, which polls it
++                printf("Failed to update conf option: '%s'\n", option_id.c_str());
++            }
+             continue;
+         }
+         for (auto &update_type :option_update.updates) {
+@@ -237,7 +377,7 @@ void ConfigPageOptionsMenu::perform_option_render_updates() {
+                     break;
+                 }
+                 case ConfigOptionUpdateType::Description: {
+-                    if (description_container && description_option_id == option_id) {
++                    if (description_container && description_config == nullptr && description_option_id == option_id) {
+                         set_description_text(config->get_option(option_index).description);
+                     }
+                     break;
+@@ -267,6 +407,7 @@ void ConfigPageOptionsMenu::process_event(const Event &e) {
+             }
+         }
+         perform_option_render_updates();
++        placed.poll();
+         break;
+     }
+     case EventType::MenuAction: {
+@@ -330,89 +471,35 @@ void ConfigPageOptionsMenu::render_config_options() {
+         bound_set_option_value = [this](const std::string &option_id, recomp::config::ConfigValueVariant value) {
+             this->on_set_option_value(option_id, value);
+         };
++        // Rows placed here from other configs (config::place_option): the first ones, this page's own (less any drawn on
++        // another tab), then the rest.
++        placed.clear();
++        auto placed_hover = [this](recomp::config::Config *cfg, const std::string &option_id) {
++            if (description_container) {
++                description_option_id = option_id;
++                description_config = cfg;
++                set_description_text(cfg->get_option(option_id).description);
++            }
++        };
++        placed.render(context, body_left_scroll, config->id, true, placed_hover);
+         auto schema = config->get_config_schema();
+         for (size_t i = 0; i < schema.options.size(); i++) {
+-            auto &config_option = schema.options[i];
+-            ConfigOptionElement *element = nullptr;
+-            const std::string key = config->id + "/" + config_option.id;
+-            if (auto section = option_sections().find(key); section != option_sections().end()) {
+-                context.create_element<ConfigSectionRow>(body_left_scroll, section->second.label, section->second.count);
++            if (option_placed_elsewhere(config->id, schema.options[i].id)) {
++                continue;
+             }
+-            if (auto action = option_actions().find(key); action != option_actions().end() &&
+-                config_option.type == recomp::config::ConfigOptionType::Bool) {
+-                element = context.create_element<ConfigOptionAction>(
+-                    body_left_scroll,
+-                    config_option.id,
+-                    i,
+-                    config,
+-                    bound_set_option_value,
+-                    bound_on_option_hover,
+-                    action->second
+-                );
+-                element->update_disabled();
+-                element->update_hidden();
++            ConfigOptionElement *element = create_option_row(context, body_left_scroll, config, i, bound_set_option_value, bound_on_option_hover);
++            if (element != nullptr) {
+                 config_option_elements.push_back(element);
+-                continue;
+             }
+-            switch (config_option.type) {
+-                case recomp::config::ConfigOptionType::Enum: {
+-                    element = context.create_element<ConfigOptionEnum>(
+-                        body_left_scroll,
+-                        config_option.id,
+-                        i,
+-                        config,
+-                        bound_set_option_value,
+-                        bound_on_option_hover
+-                    );
+-                    break;
+-                }
+-                case recomp::config::ConfigOptionType::Number: {
+-                    element = context.create_element<ConfigOptionNumber>(
+-                        body_left_scroll,
+-                        config_option.id,
+-                        i,
+-                        config,
+-                        bound_set_option_value,
+-                        bound_on_option_hover
+-                    );
+-                    break;
+-                }
+-                case recomp::config::ConfigOptionType::String: {
+-                    element = context.create_element<ConfigOptionString>(
+-                        body_left_scroll,
+-                        config_option.id,
+-                        i,
+-                        config,
+-                        bound_set_option_value,
+-                        bound_on_option_hover
+-                    );
+-                    break;
+-                }
+-                case recomp::config::ConfigOptionType::Bool: {
+-                    element = context.create_element<ConfigOptionBool>(
+-                        body_left_scroll,
+-                        config_option.id,
+-                        i,
+-                        config,
+-                        bound_set_option_value,
+-                        bound_on_option_hover
+-                    );
+-                    break;
+-                }
+-                default: {
+-                    assert(false && "Unknown config option type");
+-                }
+-            };
+-            element->update_disabled();
+-            element->update_hidden();
+-            config_option_elements.push_back(element);
+         }
++        placed.render(context, body_left_scroll, config->id, false, placed_hover);
+     }
+ }
+ 
+ void ConfigPageOptionsMenu::on_option_hover(const std::string &option_id) {
+     if (description_container) {
+         description_option_id = option_id;
++        description_config = nullptr;
+         set_description_text(config->get_option(option_id).description);
+     }
+ }
+diff --git a/recompui/src/config/ui_config_page_options_menu.h b/recompui/src/config/ui_config_page_options_menu.h
+index 9ca8519..0fd5f91 100644
+--- a/recompui/src/config/ui_config_page_options_menu.h
++++ b/recompui/src/config/ui_config_page_options_menu.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include "config/ui_config_option.h"
++#include "config/ui_config_placed_rows.h"
+ #include "elements/ui_config_page.h"
+ #include "elements/ui_modal.h"
+ #include "elements/ui_button.h"
+@@ -40,6 +41,9 @@ namespace recompui {
+         bool description_shown = false;
+         std::string shown_title, shown_text;
+         bool shown_unsafe = false;
++        // Rows from other configs placed on this tab, and whose description is shown (null: this page's own config).
++        PlacedOptionRows placed;
++        const recomp::config::Config *description_config = nullptr;
+     public:
+         ConfigPageOptionsMenu(
+             ResourceId rid,
+diff --git a/recompui/src/config/ui_config_placed_rows.h b/recompui/src/config/ui_config_placed_rows.h
+new file mode 100644
+index 0000000..f782411
+--- /dev/null
++++ b/recompui/src/config/ui_config_placed_rows.h
+@@ -0,0 +1,45 @@
++#pragma once
++
++#include <functional>
++#include <string>
++#include <vector>
++
++#include "config/ui_config_option.h"
++#include "librecomp/config.hpp"
++
++namespace recompui {
++    // Blitz settings layout (config::place_option): rows drawn on another tab than their config's own. Each keeps its
++    // config, so its value is read from and written to that config (and its file) as on its own tab.
++    struct PlacedOption {
++        std::string config_id;
++        std::string option_id;
++        bool first = false;
++    };
++    const std::vector<PlacedOption> &placed_options(const std::string &tab_id);
++    bool option_placed_elsewhere(const std::string &config_id, const std::string &option_id);
++    // One option's row (and the section heading set before it), as an options page draws it.
++    ConfigOptionElement *create_option_row(ContextId context, Element *parent, recomp::config::Config *config, size_t option_index,
++                                           set_option_value_t set_value, on_option_hover_t on_hover);
++
++    // The rows placed on a tab, drawn into a page and kept up to date by polling (their configs' update lists belong to
++    // their own pages).
++    class PlacedOptionRows {
++    public:
++        using hover_t = std::function<void(recomp::config::Config *config, const std::string &option_id)>;
++        void clear() { rows.clear(); }
++        bool empty() const { return rows.empty(); }
++        // Draws the rows placed on tab_id with this `first`, in the order placed. Returns how many it drew.
++        size_t render(ContextId context, Element *parent, const std::string &tab_id, bool first, hover_t on_hover);
++        // Each update: a row whose value, hidden or disabled state changed is redrawn.
++        void poll();
++    private:
++        struct Row {
++            ConfigOptionElement *element;
++            recomp::config::Config *config;
++            size_t index;
++            bool hidden, disabled;
++            recomp::config::ConfigValueVariant value;
++        };
++        std::vector<Row> rows;
++    };
++}

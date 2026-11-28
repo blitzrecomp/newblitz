@@ -75,6 +75,9 @@ tools/rosters_publish.sh
 tools/ios/install_worker
 tools/blitz_logs_worker
 tools/rosters_hub_worker/wrangler.toml
+# Cloud Sync's server (tools/save_sync_worker, docs/SAVE_SYNC.md §7) is public whole since 1.0.5, wrangler.toml too: it
+# holds no secret and no account (the Worker and bucket names are in the address the app ships with anyway), and a fork
+# deploys its own copy from it. Only build/save_sync_server (the address) stays out of the source.
 
 # The launch to-do list and video plans (internal).
 docs/LAUNCH.md
