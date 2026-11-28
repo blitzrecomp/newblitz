@@ -64,6 +64,25 @@ class RomToolTest(unittest.TestCase):
         self.assertEqual(len(md5s), len(set(md5s)))
         self.assertTrue(all(len(m) == 32 for m in md5s))
 
+    def test_v10_update_patch(self):
+        # USA v1.0 updates to v1.1 with the bundled patch: its header names v1.1's SHA-1 (config/target_rom.json's), and
+        # it stays small (code bytes only, no assets). Applying it to a real dump: make test-rom-upgrade.
+        import struct
+        db = romtool.known()
+        v10 = next(r for r in db["roms"] if r["id"] == "blitz2000-v10")
+        self.assertEqual(v10["updates_to"], "blitz2000-v11")
+        patch = (romtool.ROOT / v10["patch"]).read_bytes()
+        self.assertLess(len(patch), 64 * 1024)
+        magic, old_size, new_size, _, _, new_sha, csize, dsize = struct.unpack_from("<8sIII20s20sII", patch)
+        self.assertEqual(magic, b"NBDIFF01")
+        self.assertEqual((old_size, new_size), (16 << 20, 16 << 20))
+        self.assertEqual(68 + csize + dsize, len(patch))
+        self.assertEqual(new_sha.hex(), "3754c8fdf5cdce5de62685ce9be73e06ba5e3577")
+        with self.assertRaises(SystemExit):  # not the ROM it's for
+            sys.path.insert(0, str(romtool.ROOT / "tools"))
+            import make_rom_patch
+            make_rom_patch.apply(b"\0" * (16 << 20), patch)
+
 
 if __name__ == "__main__":
     unittest.main()

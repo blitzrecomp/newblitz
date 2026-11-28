@@ -7,14 +7,14 @@ This guide is for people who have never set up an emulator, and for anyone who w
 - **A Mac with Apple Silicon** (M1 or later).
 - **The app:**
   - **Classic Blitz** is the original 2000 game.
-  - **Modern Blitz** has 32 teams and current rosters, on the same USA v1.1 cartridge as Classic: load the ROM once and both are there (the launcher switches between them).
+  - **Modern Blitz** has 32 teams and current rosters, on the same USA cartridge as Classic (v1.1, or v1.0 updated to it): load the ROM once and both are there (the launcher switches between them).
   - **Modern Blitz for the Team Extension** is a separate build that plays the Team Extension version of the game, or a community update built on it (such as Resurrection's Gold or Silver Edition). When you load a community update (or switch with **Change ROM** on the launcher), it asks whose rosters to play: **Blitz 2026** puts this app's current rosters on its art and uniforms, **Its Own** keeps its teams. Settings → Season → Rosters changes it later.
-- **Your own copy of the game, as a ROM file.** The app doesn't include the game. You make a ROM from your own cartridge with a cartridge reader, a small USB device that copies the cartridge to a file. Classic Blitz needs the USA v1.1 cartridge, and the app checks the file is exactly that.
+- **Your own copy of the game, as a ROM file.** The app doesn't include the game. You make a ROM from your own cartridge with a cartridge reader, a small USB device that copies the cartridge to a file. The app needs the USA cartridge, v1.1 or v1.0, and checks the file is exactly one of those. A v1.0 dump is updated to v1.1 as it goes in (the two are the same game with the code moved; the app carries a small patch of v1.1's code for it, no assets), and the app says so. Your own file isn't changed.
 
 ## First launch
 
 1. **Open the app.** macOS may say it "can't be opened" because it isn't from the App Store. Open **System Settings → Privacy & Security**, scroll down, and click **Open Anyway** next to the app's name. You only do this once.
-2. **Load ROM.** Choose your ROM file: .z64, .v64 and .n64 all work, and so does a .zip holding one. The app checks it and keeps its own copy, so you can move or delete the original afterwards. If it isn't the right file, the app says what's wrong with it (for example, that it isn't the USA v1.1 cartridge, or that the file is damaged). On a phone or the PS5, put the ROM in the app's folder (the Files app, a file manager, or `/data/blitzrecomp` over FTP) and open the app.
+2. **Load ROM.** Choose your ROM file: .z64, .v64 and .n64 all work, and so does a .zip holding one. The app checks it and keeps its own copy, so you can move or delete the original afterwards. If it isn't the right file, the app says what's wrong with it (for example, that it isn't the USA cartridge, or that the file is damaged). A file passed by another launcher (`--import-rom`) that isn't taken says why on screen too, and the ROM the app already had stays. On a phone or the PS5, put the ROM in the app's folder (the Files app, a file manager, or `/data/blitzrecomp` over FTP) and open the app.
 3. **Blitz Builder** asks three things, once:
    - **Which Blitz?** **New Blitz** (today's 32 teams, rosters and uniforms) or **Original 1999** (NFL Blitz 2000 exactly as it shipped). Change it later in Settings → Season → Game.
    - **Set it up for you?** **Recommended** plays straight away; **Customize** opens Settings on the house rules (Receiver Buttons, the play clock, realism and the rest are all off until you turn them on).
@@ -92,15 +92,29 @@ No controller for everyone? **Settings → Players → Phone Controllers → Tur
 | Rules | Smart CPU Opponent | The game's own Smart CPU code, on for every 1-player game: the CPU plays at its top skill. Tougher, not smarter |
 | Rules | Smarter Play Calling | Off by default. The CPU kicks the field goal at the end of a half (13 seconds or less, in range), doesn't try field goals over 55 yards, fakes far less, and goes for two only from the 4th quarter on |
 | Season | Tiebreakers | The original rules, or the NFL's |
-| Season | Rosters (Modern Blitz) | Auto, Blitz 2026, the ROM's own, or another installed pack. **Blitz: Pac-12** plays the eight 2026 Pac-12 schools in Arcade (Season is off for it) |
-| Season | Lineups (Modern Blitz) | **This Week** (default): who's starting this week, injuries and all; new lineups are made every morning in season (6:17 a.m. Pacific) and download when the app starts. In an Advanced season each week plays that NFL week's lineup. **Full Strength**: everyone healthy. **Built-In**: the rosters built in. **Week N**: keeps a week's lineup after newer ones arrive |
-| Season | Season Mode (Modern Blitz) | Advanced: all 32 teams, the real 2026 schedule and 7-team playoffs |
+| Teams | League (Modern Blitz) | ◀ **NFL 2026** ▶, or any league pak you've added (the CFL's, **Blitz: Pac-12** ...): one row with arrows, however many there are. The arrows only look (dimmed, "Press × to choose"); **×**, Enter or a tap on the name chooses, and leaving with one not chosen asks (**Restart to Switch** / **Keep**). A league pak plays Arcade and Tournament (get CFL 2026 and Pac-12 2026 in Add-Ons); Season, Advanced and the Play Editor are the NFL's and greyed out on the main menu. A pak added in Add-Ons is listed at once, and New Blitz asks **Play it now?** (on the launcher or in Settings, never over a game). During a game, a chosen league asks to restart (**Restart Now** / **Later**) |
+| Teams | Rosters (Modern Blitz, NFL 2026) | Auto, Blitz 2026, or the ROM's own. Hidden while League is a league pak |
+| Teams | Lineups (Modern Blitz, NFL 2026) | **Current (Week N)** (default): the freshest lineup New Blitz has, injuries and all, labelled with its week; new lineups download when the app starts. In an Advanced season each week plays that NFL week's lineup. **All Starters (Healthy)**: every team at its best. Takes effect from the next game. Hidden while League is a league pak |
+| Teams | Season Mode (Modern Blitz) | Standard or Advanced (all 32 teams, the real 2026 schedule and 7-team playoffs). Starting a new season asks **Standard or Advanced season?**, starting from this setting and saving the answer to it; the other one restarts the game into it |
 | Season | Roster Room (Modern Blitz) | **Open** serves a page on this computer only and opens it in your browser: every team's slots, with this week's player in each and anyone on the roster to put there instead. **Lock In** saves your crews and closes the room. They play over the weekly lineup from the next team select, in every mode, and go into an exported ROM |
 | Export | Kind of ROM | The launcher's Export ROM screen offers the same. **Lite: Arcade**: all 32 teams and every uniform, the game's own Season and Tournament, any N64 or emulator. **Lite: Season**: the 2026 season (8 divisions, 18 weeks) with each team's 2026 home and away, on any N64. **Full** (default): every uniform and the 2026 season, which needs an Expansion Pak on a real N64. **Custom**: changing any option below (32 Teams, 2026 Season, Every Uniform, the extras) makes it Custom. The Lites leave Choose CPU Opponent off. Classic has **Classic** and Custom. The file name says which kind it is |
+| Export | League paks | With a league pak chosen (Settings → Teams → League), Export ROM makes a cartridge for that league, Arcade and Tournament only |
 | Export | Rosters (Modern) | **Current**: this week's lineups. **2026 Season**: every team at full strength. **Custom**: this week's with your Roster Room crews (picking it on the Export screen opens the Roster Room) |
 | Export | Export ROM | Saves a cart-ready .z64 to Downloads, a new file each time (the date and time in its name, so an emulator holding the last one open doesn't matter; an emulator keeps saves per file name, so a new export starts fresh saves), for a real N64 or a flash cart. It always carries your rosters (Roster Room crews included), skin shades, art and the 2026 home and away uniforms. Optional, each from your current settings: **Uniform Picker** (Modern; C-left at team select steps through the team's sets), **Skip Rumble Pak Screen** (on by default), **Choose CPU Opponent** (in a 1-player game the other side's list opens for you once you've picked, under CHOOSE OPPONENT), **Play Clock**, **Blitz Codes**, **Home Field** and **Realism** (on a cart, Season too). When it's done it lists what went in |
 
-The ↻ button at the top of Settings restarts the game without quitting the app.
+The ↻ button at the top of Settings (Restart) starts the game over from its title screen, the way an N64's reset button
+does, and takes up settings that say they wait for the next start (Game, League, Rosters, Season Mode, a new roster pak,
+a restored Controller Pak). Changing Game, League, Rosters or Season Mode during a game asks to restart right away
+(**Restart**, or **Cancel** to put it back); while anything still waits for a restart, the ↻ button shows a dot. On a phone it happens inside the app in a moment: no closing, no trip to the home screen. On a computer
+New Blitz relaunches itself. A game you haven't saved is lost either way. On Android, after changing Potato Mode, Swap
+Screens or the two-screen Potato settings, Restart starts the whole app again instead, as those are set when it opens.
+**Settings → General → Main Menu** stops the game the same way and goes straight to the launcher, on a phone too (it no longer closes the app). The PS5 has no Restart yet: close
+the game and open it again.
+
+**Add-Ons.** Paks installed from Add-Ons (the 2026 Season, the league paks) update themselves when the app starts while **Settings → Teams → Keep Rosters and Uniforms Up to Date** is on (the default; on mobile data, big downloads wait for Wi-Fi). **Check**, top right, looks for new paks now ("Up to date." when there's nothing). Paks you added yourself with Add… are never replaced behind your back, and a pak you remove stays removed until you press **Get**. **Open Folder** works on phones: the Files app on an iPhone (On My iPhone → New Blitz), and on Android the Files app at New Blitz's folder (also listed in file pickers as "New Blitz"). The 2026 Season pak's NFL uniforms were redone in 1.0.6 (all 32 teams, 116 sets), and reach every version.
+
+**Reset Data** clears New Blitz's folder, so the whole app starts again: a computer and an Android device restart it by
+themselves; an iPhone or iPad closes and says so (open it again to begin the first run).
 
 ## Sharing your rules
 
@@ -152,7 +166,7 @@ app opens: the last 20 changes, plus one a day for the last two weeks. They're i
 To put one back: Settings → Saves → **Backups**. Each copy shows when it was made and what it holds,
 for example **Nov 26, 1:53 PM · LAR, week 6** for a 2026 Season, newest first (**Older** pages back). Pick one, then
 **Restore**. The pak you have now is kept as a copy first, so you can go back to it the same way. From the main menu
-it's done at once; during a game New Blitz restarts to do it (a phone or console closes: open it again).
+it's done at once; during a game New Blitz restarts to do it (in place on a phone; a PS5 closes: open it again).
 
 ## Your saves on every device
 

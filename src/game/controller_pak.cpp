@@ -56,6 +56,7 @@
 #include "pak_guard.h"
 #include "save_sync_core.h"
 #include "blitz_pak_backups.h"
+#include "blitz_soft_reset.h"
 
 namespace blitz {
     void post_notice(const std::string& msg);  // notices.cpp
@@ -108,6 +109,17 @@ namespace {
     void notify(const std::string& msg) {
         blitz::post_notice("Controller Pak: " + msg);
     }
+
+    // Restart in place (soft_restart.cpp): every write already reached its file (write_image, under the lock), so the paks
+    // are simply forgotten: the next boot opens them again from the folder its mode and pack pick, and a restore or a
+    // Save Sync import waiting for "the next start" (pak_restore, pak_sync_apply) goes in then.
+    [[maybe_unused]] const bool pak_soft_reset = blitz::on_soft_reset("controller pak", [] {
+        std::lock_guard lock{paks_mutex};
+        for (Pak& p : paks) p = Pak{};
+        guard_on = false;
+        season_save_slot = -1;
+        released.clear();
+    });
 
     // The pak as the game and libultra remember it in RDRAM (boot segment: the same addresses in every flavour).
     constexpr uint32_t inode_cache_channel = 0x8002CDD0;  // __osPfsInodeCacheChannel (s32)

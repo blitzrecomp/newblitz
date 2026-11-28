@@ -201,8 +201,10 @@ namespace blitz::teamdata::original {
     // The teams with their own right-facing image, highest slot first (as the game lists them); a spare entry
     // names no team.
     void write_right_helmets(uint8_t* rdram, const std::vector<const Team*>& in_slot) {
-        // The game scans 9 entries of its list; the moved list (Modern, the 32-team cart) holds 32.
-        const int entries = relocated() || cart() ? blitz::engine32::vs_right_entries : vs_right_entries;
+        // The game scans 9 entries of its list; the moved list (Modern, the 32-team cart) holds 32. The game's own list
+        // has 10 teams but only 9 images: a 10th image would land on the first VS helmet (vs_left, slot 0), so a cart
+        // whose 10 or more teams have their own right helmet showed another team's on slot 0's side.
+        const int entries = relocated() || cart() ? blitz::engine32::vs_right_entries : vs_right_entries - 1;
         const uint32_t teams_at = at(vs_right_teams), ids_at = at(vs_right_ids);
         int k = 0;
         for (int s = (int)std::min<size_t>(in_slot.size(), (size_t)slot_count()) - 1; s >= 0 && k < entries; s--) {

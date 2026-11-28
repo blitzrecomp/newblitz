@@ -93,10 +93,17 @@ namespace {
         recompinput::InputDevice shown_device = recompinput::InputDevice::COUNT;
         int shown_profile = -2;
         bool back = false, exit = false;
+        bool hidden_for_prompt = false;
     protected:
         std::string_view get_type_name() override { return "FirstRunHints"; }
         void process_event(const Event& e) override {
             if (e.type != EventType::Update) return;
+            // The layer on top owns the hint row: a prompt over setup (the ROM's v1.0 note) draws its own, as over a
+            // Settings modal (RecompFrontend ui_modal.cpp).
+            if (bool prompt = is_prompt_open(); prompt != hidden_for_prompt) {
+                hidden_for_prompt = prompt;
+                set_visibility(prompt ? Visibility::Hidden : Visibility::Visible);
+            }
             auto [device, profile] = hint_input_info();
             if (device != shown_device || profile != shown_profile) {
                 shown_device = device;

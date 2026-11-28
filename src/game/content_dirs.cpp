@@ -7,6 +7,8 @@
 // so a pak installed before the game starts is used by that game with no restart.
 #include "season_pak.h"
 
+#include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -24,10 +26,45 @@ namespace {
     bool installed = false, bundled = false;
     std::string version;
     nlohmann::json manifest;
+    // The other paks (1.0.6: the league paks), by id: each a pak.json that reads, is a blitz-pak/1 named for its folder, and
+    // is for this build. Read after the season's, in id order.
+    std::vector<blitz::InstalledPak> others;
 
     bool has_season(const fs::path& root) {
         std::error_code ec;
         return fs::is_regular_file(root / "packs" / "blitz2026" / "pack.json", ec);
+    }
+
+    void find_others() {
+        others.clear();
+        std::error_code ec;
+        std::vector<fs::path> dirs;
+        for (const auto& e : fs::directory_iterator(blitz::paks_dir(), ec)) {
+            std::string id = e.path().filename().string();
+            if (id != blitz::season_pak_id && blitz::valid_pak_id(id) && e.is_directory(ec)) dirs.push_back(e.path());
+        }
+        std::sort(dirs.begin(), dirs.end());
+        for (const fs::path& dir : dirs) {
+            std::string id = dir.filename().string();
+            std::ifstream in{dir / "pak.json"};
+            if (!in) continue;
+            try {
+                nlohmann::json j = nlohmann::json::parse(in);
+                if (j.value("format", "") != "blitz-pak/1" || j.value("id", "") != id) {
+                    fprintf(stderr, "[paks] %s/pak.json isn't a pak for that folder: not used\n", dir.string().c_str());
+                    continue;
+                }
+                if (j.value("min_build", 0) > std::atoi(BLITZ_BUILD)) {
+                    fprintf(stderr, "[paks] %s needs build %d or newer (this is %s): not used\n", id.c_str(), j.value("min_build", 0), BLITZ_BUILD);
+                    continue;
+                }
+                others.push_back({id, j.value("title", id), j.value("version", ""), j.value("summary", ""), dir});
+                fprintf(stderr, "[paks] %s %s installed\n", id.c_str(), others.back().version.c_str());
+            }
+            catch (const std::exception& e) {
+                fprintf(stderr, "[paks] %s/pak.json: %s\n", dir.string().c_str(), e.what());
+            }
+        }
     }
 
     // Call with the mutex held.
@@ -38,6 +75,7 @@ namespace {
         version.clear();
         manifest = nlohmann::json::object();
         bundled = has_season(recompui::file::get_program_path());
+        find_others();
         fs::path dir = blitz::season_pak_dir();
         std::ifstream in{dir / "pak.json"};
         if (!in) return;
@@ -76,7 +114,33 @@ namespace blitz {
         work_out();
         std::vector<fs::path> out{recompui::file::get_program_path()};
         if (installed) out.push_back(season_pak_dir());
+        for (const InstalledPak& p : others) out.push_back(p.dir);
         return out;
+    }
+
+    bool valid_pak_id(const std::string& id) {
+        if (id.empty() || id.size() > 32) return false;
+        for (char c : id) {
+            if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_')) return false;
+        }
+        return true;
+    }
+
+    std::vector<InstalledPak> installed_paks() {
+        std::lock_guard lock{mutex};
+        work_out();
+        std::vector<InstalledPak> out;
+        if (installed) out.push_back({season_pak_id, manifest.value("title", "2026 Season"), version, manifest.value("summary", ""), season_pak_dir()});
+        out.insert(out.end(), others.begin(), others.end());
+        return out;
+    }
+
+    bool pak_installed(const std::string& id) {
+        std::lock_guard lock{mutex};
+        work_out();
+        if (id == season_pak_id) return installed;
+        for (const InstalledPak& p : others) if (p.id == id) return true;
+        return false;
     }
 
     std::vector<fs::path> content_dirs_newest_first() {
@@ -115,8 +179,12 @@ namespace blitz {
         return bundled || installed;
     }
 
+    std::atomic<int> generation{0};
     void content_dirs_refresh() {
         std::lock_guard lock{mutex};
         known = false;
+        generation++;
     }
+
+    int content_dirs_generation() { return generation.load(); }
 }

@@ -100,8 +100,7 @@ label saying what belongs there. To fill them:
 | `addons` | features | Add-Ons: the installed paks, the 2026 Season row |
 | `hints` | features | A first-run tip card, in the controller's own buttons |
 
-Keep screenshots free of league and team logos and real player faces where possible (the site's own rule: no NFL, team
-or player names or logos in its imagery), and of anything personal (file paths, account names).
+Images show our own work: the app's screens, and play where no real logo, wordmark or player likeness is legible. Keep them free of those, and of anything personal (file paths, account names).
 
 ## Deploy (not run yet)
 
@@ -115,7 +114,6 @@ leaves out `tools/`, this README, `deploy.sh` and `site.json`. If the site gets 
 
 ## Rules for the content
 
-No NFL, team or player names or logos in the imagery or copy (beyond the factual "NFL Blitz 2000" and the trademark
-notice), no ROM links, no download link for the season pak (it comes only through the app), no one's personal name, no
+Names of leagues and teams in text are fine as plain facts ("CFL 2026 and Pac-12 2026 league paks"); keep "NFL" out of headings beyond the factual "NFL Blitz 2000" and the trademark notice. Images follow the rule under Screenshots: our own work, no legible real logos or likenesses (the team's decision, 2026-11-28), no ROM links, no download link for the season pak (it comes only through the app), no one's personal name, no
 donation links. Facts come from the repo's README, CHANGELOG, docs/PLAYING.md and the platform guides; the privacy
 page follows what the code connects to (`git grep -n http_get -- src`).

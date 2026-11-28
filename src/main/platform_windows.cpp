@@ -131,10 +131,19 @@ namespace blitz {
 namespace blitz {
     // A computer has file dialogs: no drop folder.
     std::filesystem::path rom_drop_folder() { return {}; }
+    void open_app_folder_in_files(std::function<void(bool)> done) { if (done) done(false); }  // Explorer: os_shell.cpp
+    // No progress from WinHTTP's one call: once, at the end. Metered connections aren't asked about.
+    bool http_get_progress(const std::string& url, std::string& body, int& status, const std::function<void(uint64_t, uint64_t)>& progress) {
+        bool ok = http_get(url, "", "", body, status);
+        if (ok && progress) progress(body.size(), body.size());
+        return ok;
+    }
+    bool network_metered() { return false; }
 }
 
 namespace blitz {
     void window_created(SDL_Window*) {}
+    bool relaunch_app() { return false; }  // blitz_host.h: Android only
 }
 
 namespace blitz {

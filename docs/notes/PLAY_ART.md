@@ -219,3 +219,35 @@ list`.
 Files: `src/game/play_art.cpp` (game side, option, live command), `src/game/play_art_walk.h` (walker, geometry, list),
 `gfx_ext.cpp` (the call), `house_rules.cpp` (the option), `src/psp/stubs_hooks.cpp` (the option, off), `dev_input.cpp`
 (PLAYART), `tests/play_art_test.cpp`, `tests/test_play_art.py`.
+
+## The look: the playbook's own (2026-11-28)
+
+Asked for: play art that feels like Blitz, matching its own. The play select's cards (77x61
+CI4 tiles, coloured at draw time) draw every pass route the same way:
+
+- **Red** (about 232, 48, 32), every receiver alike; the back's swing or handoff in **green**; players as yellow O
+  rings (the QB magenta), the defense as yellow/magenta X; the line of scrimmage an orange bar on a dark green grid.
+- **Fat lines** (about 3 px on a 77 px card) **lit from the top left**: a darker red along the lower-right edge.
+- **A black drop shadow** down and right of every line and head (not an all-round outline).
+- **Broad barbed arrowheads**, about twice the line's width each side, the barbs swept back past a notch.
+
+`play_art_walk.h` now builds that: a strip per route (two vertices a joint, mitred; a wedge at turns over 120 degrees)
+whose vertices are shaded by which side faces the light (the shadow side 0.5 of the colour), a barbed head (tip, two
+barbs, the notch 0.4 of its length ahead of them), and under both a black copy 2.6 units down and right on screen
+(towards the offense's own end and its right), 0.8 units wider each side, alpha 200 of the line's 245. Shared vertices
+keep it about the old size: the biggest of the 45 plays is 3.6 KB in Full (was 2.5 KB), so the cap went to 4 KB; a
+longer Play Editor route drops the shadows rather than its art. Frame cost: no change in the [fps] lines on the Mac
+(30.0, 0 hitches, art on or off, BLITZ DS too); building the worst case (three 14-point routes) takes 8 us.
+
+Three looks (`PLAYART look card|blend|madden`), compared on the Mac in the Day, Night and Snow stadiums:
+
+- **Card**: the cards exactly, all three routes red. Closest, but red says nothing about who's who, the routes look
+  alike where they cross (Full), and the colour-to-button link (the point of the feature) is gone.
+- **Blend** (the default): the cards' line, light, shadow and head, in the Receiver Buttons colours made as saturated
+  as the cards' red (triangle 24, 216, 120; R1 46, 155, 255; circle 245, 40, 60; Xbox Y 255, 200, 20). The cards
+  colour by role, not by receiver, so the Blitz look doesn't argue against keeping the buttons' colours.
+- **Madden**: 1.0.5's thin flat ribbons (alpha 208, plain head), kept for comparison. They wash out on snow.
+
+The art isn't fogged, so on Snow (heavy fog) it stays bright; the shadow keeps it apart from the white turf. Not drawn:
+the cards' O rings at the receivers' feet (they'd sit under the players and their shadows, and the icons over their
+heads already mark them).

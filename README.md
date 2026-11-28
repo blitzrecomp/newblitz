@@ -10,8 +10,8 @@ New Blitz is the 1999 Nintendo 64 game, recompiled to run as a native app: no em
 adds what a modern setup wants (widescreen, save states, Redo Play, phones as controllers, tournaments, a modern
 season mode), and can bring the game up to date with a season pak.
 
-- **Bring your own cartridge.** New Blitz needs your own dump of **NFL Blitz 2000 (USA) v1.1**. No game assets are
-  included, and nobody here can send you one.
+- **Bring your own cartridge.** New Blitz needs your own dump of **NFL Blitz 2000 (USA)**, v1.1 or v1.0 (a v1.0
+  dump is updated to v1.1 as it goes in). No game assets are included, and nobody here can send you one.
 - **Free and non-commercial.** Not affiliated with, endorsed or sponsored by the NFL, the NFL Players Association,
   any NFL club, Midway or its successors.
 
@@ -19,8 +19,8 @@ season mode), and can bring the game up to date with a season pak.
 
 **Get New Blitz for your computer** from [Releases](../../releases/latest). It sets up your phone, handheld, PS5 or an
 N64/emulator export too: the computer is the hub, and it sends each device the game with your ROM and your setup
-already in, so the device starts ready to play. You supply your own NFL Blitz 2000 (USA) v1.1 cartridge dump: the
-computer app asks for it.
+already in, so the device starts ready to play. You supply your own NFL Blitz 2000 (USA) cartridge dump, v1.1 or
+v1.0 (the app updates a v1.0 dump to v1.1 with a small patch of the game's code, no assets): the computer app asks for it.
 
 | Computer | File | How | State |
 |---|---|---|---|
@@ -67,7 +67,8 @@ The downloads aren't signed with a developer certificate, so your device asks fi
    and keeps a copy.
 3. **Add the 2026 season?** One click downloads the 2026 Season pak (today's teams, rosters, uniforms and team art,
    about 2 MB) and plays **New Blitz** with it. Or choose **Just the 1999 game** to play the cartridge as it was
-   (**Original 1999**). You can add or remove the pak later under **Add-Ons**.
+   (**Original 1999**). You can add or remove the pak later under **Add-Ons**, where the CFL 2026 and Pac-12 2026 league
+   paks (Arcade and Tournament) are too.
 4. **Recommended or Customize:** the recommended setup, or the Rules tab first to pick house rules.
 5. **Updates and reports:** **Keep rosters and uniforms up to date** is ticked (untick it to stay offline); **Send
    crash reports** is off unless you tick it, and Settings → General shows exactly what a report contains.
@@ -117,7 +118,7 @@ reports, once). Phones, handhelds and the PS5 have no Builder of their own. Each
 
 ## Paks
 
-Paks are add-ons the Builder installs: season rosters, uniform sets, team art, announcer calls, rules. The 2026 Season
+Paks are add-ons the Builder installs: season rosters, uniform sets, team art, announcer calls, rules, and leagues (CFL 2026, Pac-12 2026; choose one under Settings → Teams → League). Paks update themselves; **Add-Ons → Check** looks now. The 2026 Season
 pak is the one-click download above. Community paks are shared on our [Discord](https://discord.gg/AtcKN9dY5). To make
 one, or to bring New Blitz to another device, see the [contributor guide](https://newblitz.com/contribute).
 
@@ -171,7 +172,7 @@ recompiler reads the game's code from it.
 ```
 make env && make venv     # check the toolchain; the Python tools
 tools/build_deps.sh       # SDL2 and FreeType for the Mac (once)
-# put your NFL Blitz 2000 (USA) v1.1 dump in rom/
+# put your NFL Blitz 2000 (USA) v1.1 dump in rom/ (or v1.0: rom-import updates it, with the zstd command)
 make rom-import           # check it and pin its SHA-1
 make test                 # tool tests (synthetic data only)
 make app-modern           # the Mac app

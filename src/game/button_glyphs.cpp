@@ -28,6 +28,7 @@
 #include "recomp.h"
 #include "librecomp/game.hpp"
 #include "util/file.h"
+#include "blitz_soft_reset.h"
 
 namespace blitz {
     int port_glyph_family(int port);  // controllers.cpp: 0 PlayStation, 1 Xbox, 2 Switch, 3 N64 (the game's own)
@@ -62,6 +63,12 @@ namespace {
         for (int f = 0; f < families; f++)
             for (int g = 0; g < 9; g++) variant[f][g] = blitz::fs_file_index(file_of(f, g));
     }
+
+    // Restart in place: the next boot's file table may place the icons elsewhere.
+    [[maybe_unused]] const bool glyphs_soft_reset = blitz::on_soft_reset("glyphs", [] {
+        blitz::reset_once(resolved);
+        owner = -1;
+    });
 }
 
 namespace blitz {

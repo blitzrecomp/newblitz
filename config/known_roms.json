@@ -26,7 +26,10 @@
       "revision": "1.0",
       "md5": "ba49514441023722f02d41c62612f6c3",
       "crc": ["15A00969", "34E5A285"],
-      "players": 4
+      "players": 4,
+      "_updates_to": "Accepted since 1.0.6: the app and `romtool import` rebuild v1.1 from it with this patch (src/common/rom_upgrade.cpp, tools/make_rom_patch.py), then check v1.1's hash.",
+      "updates_to": "blitz2000-v11",
+      "patch": "assets/rom/v10_to_v11.nbdiff"
     },
     {
       "id": "blitz2000-v11",

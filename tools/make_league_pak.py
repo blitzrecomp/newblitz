@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""Build the "Blitz: Pac-12" league pak (packs/pac12): eight 2026 Pac-12 football schools on NFL base teams,
+"""Build a league pak (e.g. "Blitz: Pac-12", packs/pac12) from a league config: its teams on NFL base teams,
 with fictional players and our own art.
 
-  .venv/bin/python tools/make_league_pak.py [--rom build/teamplus.z64] [--out packs/pac12] [--sheet PNG]
+  .venv/bin/python tools/make_league_pak.py [--league pac12] [--rom build/teamplus.z64] [--out DIR] [--sheet PNG]
+
+--league names tools/leagues/<name>.json (or is a path to one): the pack.json header (id, title, version, league
+name, modes, ladder) and each team's id, NFL base, names, colours and ratings. Nothing about a league is written
+in this file, so one importer serves every league.
 
 A league pak's teams are built on NFL franchises (their CPU plays, skill, uniforms and 3D models); its
 images replace the base teams' files by name, which is safe because no NFL team plays while the pak is
@@ -13,6 +17,8 @@ colours. The ROM is read only for the base teams' file names, sizes and origins,
 Players are fictional (college players' names belong to them), generated from a fixed seed.
 """
 import argparse
+import hashlib
+import io
 import json
 import random
 import struct
@@ -30,19 +36,33 @@ import wms  # noqa: E402
 FONT = "/System/Library/Fonts/Supplemental/Arial Black.ttf"
 BLOCKS, BLOCK = 0x11F17C, 0x220   # team+ team blocks in the ROM
 
-# id, base franchise, city, nickname, select name, abbr, initials, primary, secondary, ratings (pass, rush, line, def, st)
-TEAMS = [
-    ("BSU", "DEN", "Boise State", "Broncos", "Boise St.", "BSU", "BSU", "#0033A0", "#D64309", (4, 4, 3, 4, 3)),
-    ("CSU", "GB", "Colorado State", "Rams", "Colorado St.", "CSU", "CSU", "#1E4D2B", "#C8C372", (3, 3, 2, 3, 3)),
-    ("FRE", "ARI", "Fresno State", "Bulldogs", "Fresno St.", "FRE", "FS", "#DB0032", "#13284C", (3, 3, 3, 3, 2)),
-    ("ORS", "CIN", "Oregon State", "Beavers", "Oregon St.", "OSU", "OS", "#DC4405", "#111111", (3, 3, 3, 3, 3)),
-    ("SDS", "ATL", "San Diego State", "Aztecs", "San Diego St.", "SDS", "SD", "#A6192E", "#111111", (2, 3, 3, 4, 3)),
-    ("TXS", "WAS", "Texas State", "Bobcats", "Texas St.", "TXS", "TXST", "#501214", "#B79A5B", (3, 3, 2, 3, 2)),
-    ("USU", "DAL", "Utah State", "Aggies", "Utah St.", "USU", "USU", "#0F2439", "#A2AAAD", (3, 2, 2, 2, 3)),
-    ("WSU", "TB", "Washington St", "Cougars", "Wash. St.", "WSU", "WSU", "#981E32", "#5E6A71", (4, 2, 3, 3, 3)),
-]
-NICKNAMES = {"ARI": "Cardinals", "ATL": "Falcons", "CIN": "Bengals", "DAL": "Cowboys", "DEN": "Broncos", "GB": "Packers",
-             "TB": "Buccaneers", "WAS": ("Redskins", "Commanders")}
+from uniform_handoff import NICKNAMES  # noqa: E402  every franchise's nickname(s) in the ROM's team list
+
+RATING_NAMES = ["passing", "rushing", "linemen", "defense", "special_teams"]
+
+
+def load_league(name):
+    """tools/leagues/<name>.json, or a path to a league config."""
+    path = Path(name)
+    if not path.suffix:
+        path = ROOT / "tools" / "leagues" / f"{name}.json"
+    cfg = json.loads(path.read_text())
+    ids = [t["id"] for t in cfg["teams"]]
+    bases = [t["base"] for t in cfg["teams"]]
+    if len(set(ids)) != len(ids):
+        raise SystemExit(f"{path}: a team id appears twice")
+    if len(set(bases)) != len(bases):
+        # The pak's images replace the base team's files by name: two teams on one base overwrite each other's art.
+        raise SystemExit(f"{path}: one NFL base per team (the art is keyed by the base's file names)")
+    for b in bases:
+        if b not in NICKNAMES:
+            raise SystemExit(f"{path}: base {b} isn't an NFL franchise id")
+    return cfg
+
+
+def team_ratings(t):
+    r = t.get("ratings", [])
+    return dict(zip(RATING_NAMES, r)) if isinstance(r, list) else {k: r[k] for k in RATING_NAMES if k in r}
 
 SURNAMES = """Abernathy Acosta Adair Alcott Aldridge Ambrose Ashby Avery Bancroft Barlow Beckett Bellamy Benning Birch
 Blackwell Bolden Bowen Bradshaw Brannon Briggs Brock Burgess Calloway Cardenas Carver Castillo Chambers Childers Clement
@@ -227,16 +247,20 @@ def encode_ci4(img, flags=0, ox=0, oy=0):
     return b"wn\x02" + bytes([flags]) + struct.pack(">IIIii", 16, w, h, ox, oy) + bytes(8) + px + palette
 
 
-def base_files(rom, ents_by_index, franchise):
-    """The base team's file names and headers, by role."""
+def team_block(rom, franchise):
+    """The ROM offset of a franchise's team block."""
     for k in range(32):
         b = BLOCKS + k * BLOCK
         nick = rom[b + 0x1E0:b + 0x1F0].split(b"\0")[0].decode()
         want = NICKNAMES[franchise]
         if nick in (want if isinstance(want, tuple) else (want,)):
-            break
-    else:
-        raise SystemExit(f"{franchise} isn't in the ROM's team list")
+            return b
+    raise SystemExit(f"{franchise} isn't in the ROM's team list")
+
+
+def base_files(rom, ents_by_index, franchise):
+    """The base team's file names and headers, by role."""
+    b = team_block(rom, franchise)
     u16 = lambda o: struct.unpack(">H", rom[b + o:b + o + 2])[0]
     roles = {"helmet_home": 0x180, "helmet_away": 0x182, "logo_small": 0x1D8, "logo": 0x1DA, "title_city": 0x1DC,
              "title_team": 0x1DE, "endzone1": 0x214, "endzone2": 0x216, "endzone3": 0x218, "win": 0x21A, "vs_left": 0x21C}
@@ -262,6 +286,16 @@ def helmet_shell(info):
     return Image.new("RGBA", (w, h), c)
 
 
+def pack_header(cfg):
+    """pack.json without its teams, from the league config (the game reads league name, modes, ladder, ladder_done)."""
+    league = {"name": cfg["name"], "modes": cfg.get("modes", ["arcade"])}
+    for k in ("ladder", "ladder_done"):
+        if k in cfg:
+            league[k] = cfg[k]
+    return {"format": "blitz-pack/2", "id": cfg["id"], "title": cfg["title"], "version": cfg["version"],
+            "requires_rom": "blitz2000-teamplus", "league": league}
+
+
 def players(t, rng):
     used, out = set(), []
     for slot, (lo, hi) in enumerate(NUMBERS):
@@ -275,15 +309,39 @@ def players(t, rng):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--league", default="pac12", help="tools/leagues/<name>.json, or a path to a league config")
     ap.add_argument("--rom", default=str(ROOT / "build" / "teamplus.z64"))
-    ap.add_argument("--out", default=str(ROOT / "packs" / "pac12"))
-    ap.add_argument("--sheet", default=str(ROOT / "build" / "analysis" / "league" / "pac12_sheet.png"))
+    ap.add_argument("--out", help="the pak folder (default: the league config's \"out\")")
+    ap.add_argument("--sheet", help="the review sheet (default: the league config's \"sheet\")")
     ap.add_argument("--uniforms", help="a folder of finished uniform textures (<ID>/<part>_<home|away>.png at game size, "
                     "build/league_uniforms/README.md): converts them into --out's files/added and points each team at them")
     ap.add_argument("--art", help="a folder of finished art (<ID>/logo.png, logo_small, title_city, title_team, win, helmet, "
                     "endzone at 4x): converts it into --out's files/ instead of drawing. Third-party marks stay out of git: "
                     "point --out at an app folder's packs/pac12 (a user pack wins over the bundled one)")
+    ap.add_argument("--handoff", help="a design handoff's league folder (league_pak_art_out/<league>: <ID>/team_art.json, "
+                    "uniform_sets.json and their PNGs): the whole pak (art, uniforms with alternates, clashes) into --out")
+    ap.add_argument("--research", help="with --handoff: league_pak_research/<league> (<ID>/selected_players.json)")
+    ap.add_argument("--report", help="with --handoff: where the import report goes (default build/analysis/league/<id>_import.json)")
+    ap.add_argument("--kit", help="with --uniforms: the league's design-kit folder (<ID>/parts.json names each part's game "
+                    "file) instead of build/league_uniforms/manifest.json")
+    ap.add_argument("--sleeves", help="with --handoff: a list of per-cap shoulder companions (the CFL's component_audit/"
+                    "right_arm_assets.json): each set's right sleeve gets its own texture (tools/uv_override.py --sleeves)")
+    ap.add_argument("--cart", help="a cart-only texture manifest (JSON, or its folder: {\"sets\": [{team_id, set_id, file, "
+                    "sha256}]}): each set's \"cart_files\", what Export ROM puts on the cart instead of the set's own part")
     a = ap.parse_args(argv)
+    a.cfg = load_league(a.league)
+    if a.cart:
+        a.out = a.out or str(ROOT / a.cfg["out"])
+        return import_cart(a)
+    if a.handoff:
+        a.out = a.out or str(ROOT / "build" / "league_paks" / a.cfg["id"])
+        import_handoff(a)
+        if a.sleeves:
+            import uv_override
+            uv_override.sleeves(a.sleeves, Path(a.out))
+        return
+    a.out = a.out or str(ROOT / a.cfg["out"])
+    a.sheet = a.sheet or str(ROOT / a.cfg.get("sheet", f"build/analysis/league/{a.cfg['id']}_sheet.png"))
     if a.uniforms:
         return import_uniforms(a)
     if a.art:
@@ -296,10 +354,12 @@ def main(argv=None):
     for old in list(files.glob("*.wms")) + list(files.glob("added/*.wms")):
         old.unlink()
     (files / "added").mkdir(exist_ok=True)
-    rng = random.Random(2026)
+    rng = random.Random(a.cfg.get("player_seed", 2026))
     teams, written, sheet_rows = [], {}, []
-    for (tid, base, city, nick, select, abbr, initials, primary, secondary, ratings) in TEAMS:
-        t = dict(id=tid, nickname=nick, initials=initials, primary=primary, secondary=secondary)
+    for ct in a.cfg["teams"]:
+        tid, base, city, nick, select, abbr = ct["id"], ct["base"], ct["city"], ct["nickname"], ct["select"], ct["abbr"]
+        primary, secondary = ct["primary"], ct["secondary"]
+        t = dict(id=tid, nickname=nick, initials=ct.get("initials", abbr), primary=primary, secondary=secondary)
         bf = base_files(rom, ents, base)
         art = {
             "logo": badge(t, bf["logo"]["w"], bf["logo"]["h"]),
@@ -331,25 +391,13 @@ def main(argv=None):
         teams.append({
             "id": tid, "base": base, "city": city, "nickname": nick, "select": select, "abbr": abbr,
             "vs_helmet_right": f"{tid.lower()}_vsr.wms",
-            "ratings": dict(zip(["passing", "rushing", "linemen", "defense", "special_teams"], ratings)),
+            "ratings": team_ratings(ct),
             "players": players(t, rng),
         })
     for name, (tid, data) in sorted(written.items()):
         (files / name).write_bytes(data)
-    pack = {
-        "format": "blitz-pack/2",
-        "id": "pac12",
-        "title": "Blitz: Pac-12",
-        "version": "2026.10.17",
-        "requires_rom": "blitz2000-teamplus",
-        "league": {
-            "name": "Pac-12",
-            "modes": ["arcade"],
-            "ladder": [["USU", "TXS"], ["CSU", "SDS"], ["ORS", "FRE"], ["WSU", "BSU"]],
-            "ladder_done": ["BSU", "WSU", "FRE", "SDS"],
-        },
-        "teams": teams,
-    }
+    pack = pack_header(a.cfg)
+    pack["teams"] = teams
     (out / "pack.json").write_text(json.dumps(pack, indent=1) + "\n")
     print(f"{out / 'pack.json'}: {len(teams)} teams; {len(written)} images in {files}")
 
@@ -393,20 +441,118 @@ def encode_ci4_exact(img, flags=0, ox=0, oy=0):
     return b"wn\x02" + bytes([flags]) + struct.pack(">IIIii", 16, w, h, ox, oy) + bytes(8) + body + palette
 
 
+def import_cart(a):
+    """Cart-only textures (a design handoff's manifest) -> files/added/<the set's own file>c.wms and the set's "cart_files".
+
+    The manifest (a JSON file, or a folder holding one, e.g. cart_safe_shoulders/cart_safe_shoulders.json) lists
+    {"sets": [{"team_id", "set_id", "file", "sha256"?, "part"?}]}: "file" is a PNG relative to the manifest, at the set's
+    own part's size, in the game's stored layout; "part" (or the manifest's, or the file name's "<part>_cart.png") names
+    the uniform part. Each goes in at the set's own file's size, format, flags and origin. Export ROM puts it on the cart
+    in place of the set's own file (src/game/content_pack_tp.cpp league_cart_part), for sets whose look the cart's code
+    can't draw (a "uv_override"'s coordinates); the app never draws it. Run it last (after --uniforms and
+    tools/uv_override.py): pack.json's teams must already have their sets."""
+    m = Path(a.cart)
+    if m.is_dir():
+        found = [p for p in sorted(m.glob("*.json")) if isinstance(json.loads(p.read_text()).get("sets"), list)]
+        if len(found) != 1:
+            raise SystemExit(f"{m}: {len(found)} manifests with \"sets\" (want one)")
+        m = found[0]
+    manifest = json.loads(m.read_text())
+    out = Path(a.out)
+    pack_path = out / "pack.json"
+    pack = json.loads(pack_path.read_text())
+    if manifest.get("league") and manifest["league"] != pack.get("id"):
+        raise SystemExit(f"{m}: for league {manifest['league']}, the pak is {pack.get('id')}")
+    added = out / "files" / "added"
+    parts = [p for p, _ in UNIFORM_PARTS]
+    done = []
+    for e in manifest["sets"]:
+        tid, sid = e["team_id"], e["set_id"]
+        png = m.parent / e["file"]
+        data = png.read_bytes()
+        if e.get("sha256") and hashlib.sha256(data).hexdigest() != e["sha256"]:
+            raise SystemExit(f"{png}: SHA-256 {hashlib.sha256(data).hexdigest()}, the manifest says {e['sha256']}")
+        part = e.get("part") or manifest.get("part") or png.stem.removesuffix("_cart")
+        if part not in parts:
+            raise SystemExit(f"{png}: part {part!r} isn't one of {parts}")
+        team = next((t for t in pack["teams"] if t["id"] == tid), None)
+        if team is None:
+            raise SystemExit(f"{tid}: not a team of {pack_path}")
+        if sid in ("home", "away"):
+            own = team.get("uniform_files", {}).get(f"{part}_{sid}")
+            holder = team.setdefault("cart_files", {}).setdefault(sid, {})
+        else:
+            us = next((u for u in team.get("uniform_sets", []) if u["id"] == sid), None)
+            if us is None:
+                raise SystemExit(f"{tid}: no uniform set {sid} in {pack_path}")
+            own = us.get("files", {}).get(part)
+            holder = us.setdefault("cart_files", {})
+        if not own:
+            raise SystemExit(f"{tid} {sid}: the set has no {part} file of its own to swap on the cart")
+        d = (added / own).read_bytes()
+        typ, w, h, ox, oy = struct.unpack_from(">IIIii", d, 4)
+        img = Image.open(io.BytesIO(data)).convert("RGBA")
+        if img.size != (w, h):
+            raise SystemExit(f"{png}: {img.size}, the set's {part} ({own}) is {(w, h)}")
+        name = own[:-4] + "c.wms"
+        if len(name) > 14:
+            raise SystemExit(f"{own}: its cart file {name} is longer than the game's 14 characters")
+        enc = encode_ci4_exact(img, d[3], ox, oy) if typ == 16 else wms.encode_rgba16(img, d[3], ox, oy)
+        (added / name).write_bytes(enc)
+        holder[part] = name
+        done.append(f"{tid} {sid}: {part} {own} -> {name} on the cart")
+    pack_path.write_text(json.dumps(pack, indent=1) + "\n")
+    print("\n".join(done))
+    print(f"{pack_path}: \"cart_files\" for {len(done)} set part(s) from {m}")
+
+
 def import_uniforms(a):
-    """Finished uniform PNGs -> files/added/<id>_<part>_<h|a>.wms and each team's "uniform_files"; clashes from jersey colours."""
+    """Finished uniform PNGs -> files/added/<id>_<part>_<h|a>.wms and each team's "uniform_files"; clashes from jersey colours.
+
+    A team folder with a uniform_sets.json (the 2026 league handoff) also gives: its alternates (alternates/<set_id>/
+    <part>.png, listed under "alternates_delivered") -> files/added/<id>_<code>_<n>.wms and the team's "uniform_sets"
+    (the Uniform Picker offers them after home and away); its clash suggestions -> "clashes_with"; and its helmet sides
+    are stored as drawn (helmet_logo set: halves composed deliberately, e.g. Boise's number half and horse half)."""
     rom = fs.load(a.rom)
     _, ents = fs.toc(rom)
     by_name = fs.by_name(ents)
     src, out = Path(a.uniforms), Path(a.out)
-    manifest = json.loads((ROOT / "build" / "league_uniforms" / "manifest.json").read_text())
+    if getattr(a, "kit", None):
+        # The design kit's parts.json: base_game_file per part (same_file_as as the old manifest has it).
+        manifest = {"teams": {}}
+        for pj in sorted(Path(a.kit).glob("*/parts.json")):
+            parts = json.loads(pj.read_text())
+            manifest["teams"][pj.parent.name] = {"parts": {k: dict(v, game_file=v["base_game_file"]) for k, v in parts.items()}}
+    else:
+        manifest = json.loads((ROOT / a.cfg["uniform_manifest"]).read_text())
+    profile_logos, backwards = set(a.cfg.get("profile_logos", [])), a.cfg.get("helmet_backwards", "none")
     pack = json.loads((out / "pack.json").read_text())
     added = out / "files" / "added"
     added.mkdir(parents=True, exist_ok=True)
-    colour, n = {}, 0
+    colour, n, suggested = {}, 0, {}
+
+    def encode_part(tid, part, meta, png, as_drawn):
+        d = fs.read(rom, by_name[meta["game_file"]])
+        typ, w, h, ox, oy = struct.unpack_from(">IIIii", d, 4)
+        img = Image.open(png).convert("RGBA")
+        if img.size != (w, h):
+            raise SystemExit(f"{png}: {img.size}, the game's is {(w, h)}")
+        if part == "helmet_side":
+            # Painted as on the helmet; uniform_handoff.helmet_store turns it into the game's layout
+            # (rows 14-29 flipped, the halves mirror images of each other).
+            from uniform_handoff import helmet_store
+            # Older Pac-12 art drew its logos facing right in both halves, so a profile logo's left half was backwards.
+            # Art with helmet_logo metadata has its halves composed as they should look: stored as drawn.
+            img = helmet_store(img, backwards, profile=not as_drawn and tid in profile_logos)
+        # Numbers and every other part: stored as delivered (the kit's templates are the game's stored layout, digits
+        # included, and the handoff keeps their alpha masks pixel for pixel).
+        return img, (encode_ci4_exact(img, d[3], ox, oy) if typ == 16 else wms.encode_rgba16(img, d[3], ox, oy))
+
     for team in pack["teams"]:
         tid = team["id"]
         parts = manifest["teams"].get(tid, {}).get("parts", {})
+        sets_meta = json.loads((src / tid / "uniform_sets.json").read_text()) if (src / tid / "uniform_sets.json").exists() else None
+        as_drawn = bool(sets_meta) and all(sets_meta.get(s, {}).get("helmet_logo") for s in ("home", "away"))
         files = {}
         for part, code in UNIFORM_PARTS:
             for side, s in (("home", "h"), ("away", "a")):
@@ -421,18 +567,7 @@ def import_uniforms(a):
                     if meta.get("same_file_as") in files:
                         files[key] = files[meta["same_file_as"]]
                     continue
-                d = fs.read(rom, by_name[meta["game_file"]])
-                typ, w, h, ox, oy = struct.unpack_from(">IIIii", d, 4)
-                img = Image.open(png).convert("RGBA")
-                if img.size != (w, h):
-                    raise SystemExit(f"{png}: {img.size}, the game's is {(w, h)}")
-                if part == "helmet_side":
-                    # Painted as on the helmet; uniform_handoff.helmet_store turns it into the game's layout
-                    # (rows 14-29 flipped, the halves mirror images of each other).
-                    from uniform_handoff import helmet_store
-                    # The Pac-12 art's logos face right in both halves, so a profile logo's left half is backwards.
-                    img = helmet_store(img, "left", profile=tid in PROFILE_LOGOS)
-                data = encode_ci4_exact(img, d[3], ox, oy) if typ == 16 else wms.encode_rgba16(img, d[3], ox, oy)
+                img, data = encode_part(tid, part, meta, png, as_drawn)
                 name = f"{tid.lower()}_{code}_{s}.wms"
                 (added / name).write_bytes(data)
                 files[key] = name
@@ -442,25 +577,54 @@ def import_uniforms(a):
                     colour[tid] = tuple(sum(p[i] for p in opaque) / len(opaque) for i in range(3))
         if files:
             team["uniform_files"] = files
-    # Home jerseys that look alike clash (the second team switches to its away set), as the game's matrix does.
-    ids = list(colour)
+        # Alternates: alternates/<set_id>/<part>.png, the parts' game files those of the side the set was drawn on.
+        alts = []
+        for k, alt in enumerate((sets_meta or {}).get("alternates_delivered", []), 1):
+            folder = src / tid / alt.get("directory", f"alternates/{alt['set_id']}")
+            side = alt.get("template_basis", "home")
+            set_files = {}
+            for part, code in UNIFORM_PARTS:
+                png, meta = folder / f"{part}.png", parts.get(f"{part}_{side}")
+                if not png.exists() or not meta:
+                    continue
+                _, data = encode_part(tid, part, meta, png, bool(alt.get("helmet_logo")))
+                name = f"{tid.lower()}_{code}_{k}.wms"
+                (added / name).write_bytes(data)
+                set_files[part] = name
+                n += 1
+            if set_files:
+                alts.append({"id": alt["set_id"], "name": alt["name"][:31], "dark": bool(alt.get("dark", True)), "files": set_files})
+        if alts:
+            team["uniform_sets"] = alts
+        else:
+            team.pop("uniform_sets", None)
+        if sets_meta and "clash_suggestions" in sets_meta:
+            # "opponent_id" (the first Pac-12 handoff) or "with" (the 2026 per-set format import_handoff reads)
+            suggested[tid] = [c.get("opponent_id") or c.get("with") for c in sets_meta["clash_suggestions"]]
+    ids = [t["id"] for t in pack["teams"]]
     for team in pack["teams"]:
         tid = team["id"]
-        if tid not in colour:
+        if suggested:
+            # The handoff's clash suggestions (each pair: one side in its road set), made symmetric.
+            near = [o for o in ids if o != tid and (o in suggested.get(tid, []) or tid in suggested.get(o, []))]
+        elif tid in colour:
+            # Home jerseys that look alike clash (the second team switches to its away set), as the game's matrix does.
+            near = [o for o in colour if o != tid and sum((x - y) ** 2 for x, y in zip(colour[tid], colour[o])) ** 0.5 < 70]
+        else:
             continue
-        near = [o for o in ids if o != tid and sum((x - y) ** 2 for x, y in zip(colour[tid], colour[o])) ** 0.5 < 70]
         if near:
             team["clashes_with"] = near
         else:
             team.pop("clashes_with", None)
     (out / "pack.json").write_text(json.dumps(pack, indent=1) + "\n")
-    print(f"{out}: {n} uniform textures from {src}; clashes: " +
-          ", ".join(f"{t['id']}~{'/'.join(t['clashes_with'])}" for t in pack["teams"] if t.get("clashes_with")))
+    print(f"{out}: {n} uniform textures from {src}; alternates: " +
+          ", ".join(f"{t['id']} {'/'.join(s['id'] for s in t['uniform_sets'])}" for t in pack["teams"] if t.get("uniform_sets")) +
+          "; clashes: " + ", ".join(f"{t['id']}~{'/'.join(t['clashes_with'])}" for t in pack["teams"] if t.get("clashes_with")))
 
 
-# Schools whose helmet logo is an animal in profile: on the right VS helmet it faces the facemask too, so that
-# helmet is the left one mirrored whole. Letter marks (and a front-facing head) read the same on both sides.
-PROFILE_LOGOS = {"BSU", "ORS", "FRE", "TXS"}
+# A league config's "profile_logos": teams whose helmet logo is an animal in profile. --art (art with no right-side
+# VS helmet of its own) makes theirs the left one mirrored whole, so the animal faces the facemask on both sides.
+# Letter marks (and a front-facing head) read the same on both sides.
 TITLE_TEAM_MAX_H = 32  # px: the nickname wordmark on the VS screen; taller boxes (CIN's is 46) push it off the banner
 
 
@@ -475,8 +639,21 @@ def fit_wordmark(img, w, h):
     return box
 
 
+def endzone_band_strips(band, w, h):
+    """End zone strips (w x h each, the game's ez1 and ez2) from a band 2h wide and w high read left to right.
+    The game stores its strips mirrored (tools/import_team_art.py, commit 7dddc82: the NFL rounds' readable strips,
+    the band turned clockwise, are mirrored left to right). Flipping the band top to bottom and turning it clockwise
+    is that same mirror: pixel (x, y) of the band is (y, x) of the strip pair, ez1 the band's first half.
+    In-game proof for a league pak: Boise State, 2026-11-27 (pac12_dev_proof/BSU_ENDZONE_PROOF.md)."""
+    strip = band.transpose(Image.FLIP_TOP_BOTTOM).rotate(-90, expand=True)
+    return strip.crop((0, 0, w, h)), strip.crop((0, h, w, 2 * h))
+
+
 def import_art(a):
-    """Finished 4x PNGs -> the pak's .wms files, sized and placed like the drawn set; pack.json copied from packs/pac12."""
+    """Finished 4x PNGs -> the pak's .wms files, sized and placed like the drawn set; pack.json copied from the league's own (config "out").
+
+    A team with a team_art.json (the 2026 league handoff) also uses its endzone_fill colour; a team without endzone.png
+    keeps its base team's end zone (bands are made only once the orientation is proven in game)."""
     rom = fs.load(a.rom)
     _, ents = fs.toc(rom)
     art, out = Path(a.art), Path(a.out)
@@ -485,39 +662,68 @@ def import_art(a):
     # The repo's pack.json, unless this folder has one already (it may carry real rosters from college_roster.py):
     # then only the art changes and its players stay.
     if not (out / "pack.json").exists():
-        (out / "pack.json").write_text((ROOT / "packs" / "pac12" / "pack.json").read_text())
+        (out / "pack.json").write_text((ROOT / a.cfg["out"] / "pack.json").read_text())
+    profile_logos = set(a.cfg.get("profile_logos", []))
     n = 0
-    for (tid, base, *_rest) in TEAMS:
-        primary = _rest[5]
+    for ct in a.cfg["teams"]:
+        tid, base = ct["id"], ct["base"]
+        if not (art / tid).is_dir():
+            continue
+        meta = json.loads((art / tid / "team_art.json").read_text()) if (art / tid / "team_art.json").exists() else {}
+        primary = meta.get("endzone_fill") or ct["primary"]
         bf = base_files(rom, ents, base)
         load = lambda name, info: Image.open(art / tid / name).convert("RGBA").resize((info["w"], info["h"]), Image.LANCZOS)
         for role, name in (("logo", "logo.png"), ("logo_small", "logo_small.png"), ("title_city", "title_city.png"),
                            ("title_team", "title_team.png"), ("win", "win.png"), ("vs_left", "helmet.png")):
             info = bf[role]
+            if role == "logo_small":
+                # The scoreboard logo: hard alpha in a palette, as the game's own (type 0). Its master is the native image
+                # scaled up by a whole number (nearest neighbour), so nearest neighbour gives the native pixels back.
+                img = Image.open(art / tid / name).convert("RGBA").resize((info["w"], info["h"]), Image.NEAREST)
+                img.putalpha(img.getchannel("A").point(lambda v: 255 if v >= 128 else 0))
+                try:
+                    data = wms.encode_ci8(img, info["flags"] or 4, *info["origin"])
+                except Exception:  # noqa: BLE001  over 255 colours: hard-alpha full colour
+                    data = wms.encode_rgba16(img, info["flags"] or 4, *info["origin"])
+                (files / info["name"]).write_bytes(data)
+                n += 1
+                continue
             img = load(name, info) if role != "title_team" else fit_wordmark(Image.open(art / tid / name).convert("RGBA"), info["w"], info["h"])
             (files / info["name"]).write_bytes(wms.encode_type19(img, info["flags"] or 4, *info["origin"]))
             n += 1
         h, w = bf["endzone1"]["h"], bf["endzone1"]["w"]
-        band = Image.open(art / tid / "endzone.png").convert("RGBA").resize((2 * h, w), Image.LANCZOS)
-        strip = band.transpose(Image.FLIP_TOP_BOTTOM).rotate(-90, expand=True)
-        for role, img in (("endzone1", strip.crop((0, 0, w, h))), ("endzone2", strip.crop((0, h, w, 2 * h))),
-                          ("endzone3", Image.new("RGBA", (bf["endzone3"]["w"], bf["endzone3"]["h"]), rgb(primary)))):
-            info = bf[role]
-            (files / info["name"]).write_bytes(encode_ci4(img, info["flags"], *info["origin"]))
-            n += 1
+        if (art / tid / "endzone.png").exists():
+            band = Image.open(art / tid / "endzone.png").convert("RGBA")
+            if band.size != (2 * h, w):
+                band = band.resize((2 * h, w), Image.LANCZOS)
+            ez1, ez2 = endzone_band_strips(band, w, h)
+            fill = Image.new("RGBA", (bf["endzone3"]["w"], bf["endzone3"]["h"]), rgb(primary))
+            for role, img in (("endzone1", ez1), ("endzone2", ez2), ("endzone3", fill)):
+                info = bf[role]
+                # Flat art in at most 16 colours keeps its exact palette (both strips and the fill then match); else quantised.
+                exact = len(img.convert("RGB").getcolors(16) or []) > 0
+                (files / info["name"]).write_bytes(encode_ci4_exact(img, info["flags"], *info["origin"]) if exact
+                                                   else encode_ci4(img, info["flags"], *info["origin"]))
+                n += 1
+        else:
+            for role in ("endzone1", "endzone2", "endzone3"):
+                (files / bf[role]["name"]).unlink(missing_ok=True)
+            print(f"{tid}: no endzone.png; its base's end zone stays")
         for role in ("helmet_home", "helmet_away"):
             shell = helmet_shell(bf[role])
             if shell is not None:
                 (files / bf[role]["name"]).write_bytes(wms.encode_rgba16(shell, bf[role]["flags"], *bf[role]["origin"]))
         right = art / tid / "helmet_right.png"
         added = files / "added" / f"{tid.lower()}_vsr.wms"
-        if right.exists() or tid in PROFILE_LOGOS:
+        if right.exists() or tid in profile_logos:
             info = bf["vs_left"]
             added.parent.mkdir(exist_ok=True)
-            if tid in PROFILE_LOGOS:
-                img = load("helmet.png", info).transpose(Image.FLIP_LEFT_RIGHT)
-            else:
+            if right.exists():
+                # The art's own right-side helmet (facing left), never the left one mirrored: lettering and numbers
+                # would read backwards, and a helmet's two sides can differ (Boise: horse on one, 26 on the other).
                 img = Image.open(right).convert("RGBA").resize((info["w"], info["h"]), Image.LANCZOS)
+            else:
+                img = load("helmet.png", info).transpose(Image.FLIP_LEFT_RIGHT)  # older art without one: a profile logo
             added.write_bytes(wms.encode_type19(img, info["flags"] or 4, *info["origin"]))
             n += 1
         elif added.exists():
@@ -532,6 +738,291 @@ def import_art(a):
             team.pop("vs_helmet_right", None)
     (out / "pack.json").write_text(json.dumps(pack, indent=1) + "\n")
     print(f"{out}: {n} images from {art}")
+
+
+# ---- A design handoff (league_pak_art_out/<league> + league_pak_research/<league>) -> a complete pak ----------------
+# Per team: team_art.json (2D roles, each file's native size and scale), uniform_sets.json (home, away, alternates with
+# their parts, dark flag, helmet_logo and symmetric clash suggestions), the research's selected_players.json (each
+# player's "blitz" object holds only pack.json's player keys). Any league in that layout (CFL, Pac-12 2026).
+
+PLAYER_KEYS = {"slot", "expect", "last", "number", "size", "skin", "heavy", "announcer_call"}
+ROLE_OF = {"logo": "logo", "logo_small": "logo_small", "title_city": "title_city", "title_team": "title_team", "win": "win",
+           "helmet": "vs_left", "helmet_right": "vs_left"}
+
+
+def base_uniform_parts(rom, ents_by_index, franchise):
+    """The base team's ten uniform parts per side: [part][side] -> name, type, size, origin, flags."""
+    b = team_block(rom, franchise)
+    out = []
+    for k in range(10):
+        row = []
+        for side in (0, 1):
+            u = struct.unpack(">H", rom[b + 0x180 + 4 * k + 2 * side:b + 0x182 + 4 * k + 2 * side])[0]
+            e = ents_by_index[u - 1]
+            d = fs.read(rom, e)
+            typ, w, h, ox, oy = struct.unpack_from(">IIIii", d, 4)
+            row.append(dict(name=e["name"].lower(), type=typ, w=w, h=h, origin=(ox, oy), flags=d[3]))
+        out.append(row)
+    return out
+
+
+def soft_alpha(img):
+    px = img.get_flattened_data() if hasattr(img, "get_flattened_data") else img.getdata()
+    return any(0 < p[3] < 255 for p in px)
+
+
+def endzone_band_to_strips(band, w, h):
+    """A readable end-zone band (2h x w, e.g. 240x32, the word left to right) -> the two stored strips (w x h each).
+
+    The game's own strips are stored like this: the Bills' bil_ez1 on top of bil_ez2 read as the band after a quarter
+    turn anticlockwise and a vertical flip, so the band goes back by the inverse (flip, quarter turn clockwise), the
+    first strip the band's left half. Same transform as endzone_strips (draw mode) and --art."""
+    strip = band.transpose(Image.FLIP_TOP_BOTTOM).rotate(-90, expand=True)
+    return strip.crop((0, 0, w, h)), strip.crop((0, h, w, 2 * h))
+
+
+def import_handoff(a):
+    rom = fs.load(a.rom)
+    _, ents = fs.toc(rom)
+    src, out, cfg = Path(a.handoff), Path(a.out), a.cfg
+    research = Path(a.research) if a.research else None
+    files = out / "files"
+    added = files / "added"
+    files.mkdir(parents=True, exist_ok=True)
+    for old in list(files.glob("*.wms")) + list(files.glob("added/*.wms")):
+        old.unlink()
+    added.mkdir(exist_ok=True)
+    report = {"league": cfg["id"], "handoff": str(src), "research": str(research) if research else None, "teams": {},
+              "rejected": [], "warnings": [], "written": 0}
+    reject = lambda tid, s, role, f, why, **kw: report["rejected"].append(dict(team=tid, set=s, role=role, file=str(f), why=why, **kw))
+    warn = lambda msg: report["warnings"].append(msg)
+    backwards = cfg.get("helmet_backwards", "none")
+    ids = [t["id"] for t in cfg["teams"]]
+    teams, home_rgb = [], {}
+    set_ids = {}  # team -> its set ids (home, away, alternates), for the clash lists
+
+    def write(path, data):
+        path.write_bytes(data)
+        report["written"] += 1
+
+    for ct in cfg["teams"]:
+        tid, base = ct["id"], ct["base"]
+        tdir = src / tid
+        tr = report["teams"].setdefault(tid, {"base": base, "art": {}, "uniforms": {}, "players": 0})
+        ta = json.loads((tdir / "team_art.json").read_text())
+        if ta.get("base") and ta["base"] != base:
+            raise SystemExit(f"{tid}: the art was made on {ta['base']}, the league config says {base}")
+        bf = base_files(rom, ents, base)
+        team = {"id": tid, "base": base, "city": ct["city"], "nickname": ct["nickname"], "select": ct["select"], "abbr": ct["abbr"]}
+
+        # 2D roles: each file at its own scale (team_art.json file_specs), to the base team's slot.
+        specs = ta.get("file_specs", {})
+        for role, rel in ta.get("files", {}).items():
+            spec = specs.get(role, {})
+            path = src / rel
+            if role == "endzone":
+                continue
+            if role not in ROLE_OF:
+                warn(f"{tid}: role {role} isn't used")
+                continue
+            info = bf[ROLE_OF[role]]
+            if not path.exists():
+                reject(tid, "2d", role, path, "missing")
+                continue
+            img = Image.open(path).convert("RGBA")
+            scale = spec.get("scale", 4)
+            native = tuple(spec.get("native_dimensions", (info["w"], info["h"])))
+            want = (native[0] * scale, native[1] * scale)
+            if native != (info["w"], info["h"]):
+                reject(tid, "2d", role, path, f"native size {native} isn't the {base} slot {(info['w'], info['h'])}",
+                       expected=[info["w"] * scale, info["h"] * scale], actual=list(img.size))
+                continue
+            if img.size != want:
+                reject(tid, "2d", role, path, f"{img.size} isn't {native} x{scale} = {want}", expected=list(want), actual=list(img.size))
+                continue
+            if scale != 1:
+                img = img.resize(native, Image.LANCZOS)
+            note = {}
+            if role == "title_team":
+                box = img.getchannel("A").point(lambda v: 255 if v >= 16 else 0).getbbox()
+                note["visible_height"] = box[3] - box[1] if box else 0
+                note["bottom_gap"] = native[1] - box[3] if box else None
+                if box and box[3] - box[1] > TITLE_TEAM_MAX_H:
+                    img = fit_wordmark(img.crop(box), info["w"], info["h"])
+                    warn(f"{tid}: title_team {box[3] - box[1]} px tall, capped to {TITLE_TEAM_MAX_H}")
+            soft = soft_alpha(img)
+            data = (wms.encode_type19 if soft or role != "logo_small" else wms.encode_rgba16)(img, info["flags"] or 4, *info["origin"])
+            if role == "helmet_right":
+                write(added / f"{tid.lower()}_vsr.wms", data)
+                team["vs_helmet_right"] = f"{tid.lower()}_vsr.wms"
+                tr["art"][role] = f"added/{tid.lower()}_vsr.wms"
+            else:
+                write(files / info["name"], data)
+                tr["art"][role] = info["name"]
+            tr["art"][role + "_alpha"] = "soft" if soft else "hard"
+            tr["art"].update({f"{role}_{k}": v for k, v in note.items()})
+        if "vs_helmet_right" not in team:
+            warn(f"{tid}: no helmet_right.png; the right VS helmet is the left one mirrored by the game")
+
+        # End zone: a native band (2h x w), or a plain placeholder in the fill colour (no lettering, no NFL strip).
+        ez_w, ez_h = bf["endzone1"]["w"], bf["endzone1"]["h"]
+        fill = ta.get("endzone_fill") or ta.get("colours", {}).get("primary") or ct.get("primary", "#404040")
+        rel = ta.get("files", {}).get("endzone")
+        band = None
+        if rel and (src / rel).exists():
+            band = Image.open(src / rel).convert("RGBA")
+            if band.size != (2 * ez_h, ez_w):
+                reject(tid, "2d", "endzone", src / rel, f"{band.size} isn't the native {(2 * ez_h, ez_w)} band",
+                       expected=[2 * ez_h, ez_w], actual=list(band.size))
+                band = None
+        if band is None:
+            band = Image.new("RGBA", (2 * ez_h, ez_w), rgb(fill))
+            tr["art"]["endzone"] = f"placeholder: plain {fill}, no band delivered"
+        else:
+            tr["art"]["endzone"] = f"band {rel}, fill {fill}"
+        ez1, ez2 = endzone_band_to_strips(band, ez_w, ez_h)
+        for role, img in (("endzone1", ez1), ("endzone2", ez2), ("endzone3", Image.new("RGBA", (bf["endzone3"]["w"], bf["endzone3"]["h"]), rgb(fill)))):
+            info = bf[role]
+            write(files / info["name"], encode_ci4_exact(img, info["flags"], *info["origin"]))
+        for role in ("helmet_home", "helmet_away"):  # the base's NFL helmet decal, should anything still draw it
+            shell = helmet_shell(bf[role])
+            if shell is not None:
+                write(files / bf[role]["name"], wms.encode_rgba16(shell, bf[role]["flags"], *bf[role]["origin"]))
+
+        # Uniforms: home, away and the alternates, each part at the base part's size and format.
+        parts = base_uniform_parts(rom, ents, base)
+        us = json.loads((tdir / "uniform_sets.json").read_text())
+        sets = [("home", us["home"], 0), ("away", us["away"], 1)]
+        for k, alt in enumerate(us.get("alternates_delivered", [])):
+            side = 1 if alt.get("template_side", "home") == "away" else 0
+            sj = tdir / alt.get("directory", "") / "set.json"
+            if sj.exists() and not alt.get("template_side"):
+                side = 1 if json.loads(sj.read_text()).get("template_side") == "away" else 0
+            sets.append((alt["set_id"], alt, side))
+        set_ids[tid] = [s for s, _, _ in sets]
+        uniform_files, extra = {}, []
+        for n, (sid, meta, side) in enumerate(sets):
+            code_side = "h" if sid == "home" else "a" if sid == "away" else str(n)
+            got = {}
+            for k, (part, code) in enumerate(UNIFORM_PARTS):
+                rel = meta.get("files", {}).get(part)
+                path = tdir / rel if rel else None
+                if not path or not path.exists():
+                    reject(tid, sid, part, path, "missing")
+                    continue
+                info = parts[k][side]
+                img = Image.open(path).convert("RGBA")
+                if img.size != (info["w"], info["h"]):
+                    reject(tid, sid, part, path, f"{img.size} isn't the {base} part's {(info['w'], info['h'])}",
+                           expected=[info["w"], info["h"]], actual=list(img.size))
+                    continue
+                if part == "helmet_side":
+                    from uniform_handoff import helmet_store, _halves_alike
+                    same, mirrored = _halves_alike(img)
+                    logo = meta.get("helmet_logo", "symmetric")
+                    # Painted as on the helmet; only the game's layout change (rows 14-29 flipped, right half mirrored).
+                    # A profile logo already drawn as mirror-image halves is left as drawn: no global mirror of a decal.
+                    img = helmet_store(img, backwards, profile=logo == "profile")
+                    tr["uniforms"][f"{sid}.helmet_logo"] = f"{logo}; halves same {same:.2f} mirrored {mirrored:.2f}"
+                try:
+                    data = encode_ci4_exact(img, info["flags"], *info["origin"]) if info["type"] == 16 else wms.encode_rgba16(img, info["flags"], *info["origin"])
+                except SystemExit as e:
+                    reject(tid, sid, part, path, str(e), expected="16 colours incl. transparency")
+                    continue
+                name = f"{tid.lower()}_{code}_{code_side}.wms"
+                write(added / name, data)
+                got[part] = name
+                if sid == "home" and part == "jersey":
+                    opaque = [p for p in (img.get_flattened_data() if hasattr(img, "get_flattened_data") else img.getdata()) if p[3] >= 128]
+                    home_rgb[tid] = tuple(sum(p[i] for p in opaque) / len(opaque) for i in range(3))
+            if sid in ("home", "away"):
+                uniform_files.update({f"{p}_{sid}": f for p, f in got.items()})
+            elif got:
+                extra.append({"id": sid, "name": meta.get("name", sid)[:31], "dark": bool(meta.get("dark", True)), "files": got})
+            tr["uniforms"][sid] = f"{len(got)}/10 parts"
+        team["uniform_files"] = uniform_files
+        # Set metadata for the picker and the clash check (src/game/content_pack_tp.cpp "uniform_sets").
+        meta_sets = [{"id": "home", "name": us["home"].get("name", "Home")[:31], "dark": bool(us["home"].get("dark", True))},
+                     {"id": "away", "name": us["away"].get("name", "Away")[:31], "dark": bool(us["away"].get("dark", False))}]
+        team["uniform_sets"] = meta_sets + extra
+        team["_clash_suggestions"] = us.get("clash_suggestions", [])
+
+        # Players: the research's selection, only the parser's keys.
+        if research:
+            sel = json.loads((research / tid / "selected_players.json").read_text())
+            plist = []
+            for p in sel["players"]:
+                bz = p["blitz"]
+                bad = set(bz) - PLAYER_KEYS
+                if bad:
+                    raise SystemExit(f"{tid}: player keys {sorted(bad)} aren't pack.json's")
+                plist.append({k: bz[k] for k in ("slot", "last", "number", "size", "skin", "heavy", "announcer_call") if k in bz})
+            plist.sort(key=lambda p: p["slot"])
+            slots = [p["slot"] for p in plist]
+            if slots != list(range(15)):
+                raise SystemExit(f"{tid}: slots {slots}, not 0-14 once each")
+            pos = {p["blitz"]["slot"]: p.get("pos_native", "") for p in sel["players"]}
+            if pos.get(3) != "QB":
+                raise SystemExit(f"{tid}: slot 3 is {pos.get(3)}, not the QB")
+            c1 = next(p for p in sel["players"] if p["blitz"]["slot"] == 1)
+            if pos.get(1) not in ("C", "OC") and not any(w in (c1.get("selection_rationale", "") + c1.get("pos_detail", "")).lower()
+                                                     for w in ("centre", "center")):
+                warn(f"{tid}: slot 1 ({c1['blitz']['last']}, {pos.get(1)}) isn't marked as the centre")
+            for p in plist:
+                if not (1 <= len(p["last"]) <= 15) or any(not (c.isalpha() or c in " .'-") or ord(c) > 127 for c in p["last"]):
+                    raise SystemExit(f"{tid} slot {p['slot']}: label {p['last']!r} isn't 1-15 ASCII letters, space . ' -")
+            nums = [p["number"] for p in plist]
+            if len(set(nums)) != len(nums):
+                warn(f"{tid}: duplicate jersey numbers {nums}")
+            team["players"] = plist
+            tr["players"] = len(plist)
+            tr["qb"] = f"{plist[3]['number']}-{plist[3]['last']}"
+            bars = sel.get("team_bars")
+            if bars:
+                team["ratings"] = {k: bars[k] for k in RATING_NAMES if k in bars}
+        if "ratings" not in team and ct.get("ratings"):
+            team["ratings"] = team_ratings(ct)
+        teams.append(team)
+
+    # Clashes: the suggestions are per set and symmetric; home-on-home ones become the team clash list the game's own
+    # rule reads (who changes is the game's choice, not a visitor-wears-away rule), every one goes on its set too.
+    pairs = set()
+    for team in teams:
+        for c in team.pop("_clash_suggestions"):
+            if c["with"] not in ids:
+                warn(f"{team['id']}: clash with unknown team {c['with']}")
+                continue
+            if c["with_set"] not in set_ids.get(c["with"], []) or c["set_id"] not in set_ids[team["id"]]:
+                warn(f"{team['id']}.{c['set_id']} clash with unknown set {c['with']}.{c['with_set']}")
+                continue
+            pairs.add(((team["id"], c["set_id"]), (c["with"], c["with_set"])))
+    one_way = [p for p in pairs if (p[1], p[0]) not in pairs]
+    if one_way:
+        warn(f"{len(one_way)} clash suggestion(s) listed one way only, e.g. {one_way[0]}: used both ways")
+    for (x, y) in list(pairs):
+        pairs.add((y, x))
+    for team in teams:
+        tid = team["id"]
+        homes = sorted({y[0] for x, y in pairs if x == (tid, "home") and y[1] == "home"}, key=ids.index)
+        if homes:
+            team["clashes_with"] = homes
+        for s in team["uniform_sets"]:
+            cl = sorted({f"{y[0]}.{y[1]}" for x, y in pairs if x == (tid, s["id"])})
+            if cl:
+                s["clashes"] = cl
+    report["clash_pairs"] = len(pairs) // 2
+    pack = pack_header(cfg)
+    pack["teams"] = teams
+    (out / "pack.json").write_text(json.dumps(pack, indent=1) + "\n")
+    rp = Path(a.report or ROOT / "build" / "analysis" / "league" / f"{cfg['id']}_import.json")
+    rp.parent.mkdir(parents=True, exist_ok=True)
+    rp.write_text(json.dumps(report, indent=1) + "\n")
+    print(f"{out}: {len(teams)} teams, {report['written']} files; {len(report['rejected'])} rejected, "
+          f"{len(report['warnings'])} warning(s); report {rp}")
+    for r in report["rejected"]:
+        print(f"  REJECTED {r['team']} {r['set']} {r['role']}: {r['why']}")
+    for w_ in report["warnings"]:
+        print(f"  warning: {w_}")
 
 
 if __name__ == "__main__":

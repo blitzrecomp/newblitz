@@ -160,7 +160,9 @@ for d in secret_dirs:
 # Private files in build/: every value in them (KEY=VALUE lines: the value), plus a URL's host unless it's a public
 # server's. public_author (the public identity) and the public servers' addresses aren't secrets.
 SECRET_FILES = ["rosters_token", "rosters_hub", "rosters_repo", "blitz_logs_hub", "android_install_link",
-                "android_short_link", "ios_install_link", "psp_key", "psp_cmd_key", "pak_upload_secret", "pak_hub_key"]
+                "android_short_link", "ios_install_link", "psp_key", "psp_cmd_key", "pak_upload_secret", "pak_hub_key",
+                "rosters_upload_secret", "rosters_hub.new", "rosters_hub.old", "blitz_logs_hub.new", "blitz_logs_hub.old",
+                "ios_install_link.old", "android_install_link.old", "android_short_link.old"]
 for d in secret_dirs:
     for name in SECRET_FILES:
         try:

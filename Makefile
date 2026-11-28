@@ -1,7 +1,7 @@
 PY ?= python3
 VENV := .venv
 
-.PHONY: psp-recomp regress ios-classic ios-modern win win-classic win-modern ps5-classic ps5-modern bundle bundle-classic bundle-teamplus recomp-modern houston team-art app-modern env venv test test-adv test-pak test-sync test-cloud test-cloud-ask test-sync-worker test-play-art rom-scan rom-import rom-verify syms recomp n64recomp rsp patches app dist notarize rom2026 syms2026 recomp2026 app2026 dist2026 logo27
+.PHONY: test-rom-upgrade psp-recomp regress ios-classic ios-modern win win-classic win-modern ps5-classic ps5-modern bundle bundle-classic bundle-teamplus recomp-modern houston team-art app-modern env venv test test-adv test-pak test-sync test-cloud test-cloud-ask test-sync-worker test-league test-play-art rom-scan rom-import rom-verify syms recomp n64recomp rsp patches app dist notarize rom2026 syms2026 recomp2026 app2026 dist2026 logo27
 
 env:            ## Check the toolchain
 	@./tools/check_env.sh
@@ -11,7 +11,7 @@ venv:           ## Python tools: ROM analysis (splat, spimdisasm), Pillow, dmgbu
 	$(VENV)/bin/pip install -q --upgrade pip
 	$(VENV)/bin/pip install -q -r requirements.txt
 
-test: test-adv test-pak test-screens test-sync test-cloud test-cloud-ask test-sync-worker
+test: test-adv test-pak test-screens test-sync test-cloud test-cloud-ask test-content-ask test-league test-sync-worker test-rom-upgrade
 	$(VENV)/bin/python -m unittest discover -s tests -v
 
 test-screens:   ## Unit tests for Settings → Two Screens' presets and Custom Layout (src/game/two_screens.h) against tall_view.cpp
@@ -23,6 +23,16 @@ test-cloud-ask: ## Unit tests for "Playing on multiple devices?" (src/game/cloud
 	@mkdir -p build/tests
 	clang++ -std=c++20 -O1 -g -Wall tests/cloud_ask_test.cpp -o build/tests/cloud_ask_test
 	build/tests/cloud_ask_test
+
+test-content-ask: ## Unit tests for "Keep rosters, uniforms and new paks up to date?" (src/game/content_ask.h): once, setting off, not on a fresh install, not beside Cloud Sync's
+	@mkdir -p build/tests
+	clang++ -std=c++20 -O1 -g -Wall tests/content_ask_test.cpp -o build/tests/content_ask_test
+	build/tests/content_ask_test
+
+test-league:    ## Unit tests for Settings → Teams from before 1.0.6 (src/game/league_migrate.h): Rosters = a pack becomes League, old Lineups become Current
+	@mkdir -p build/tests
+	clang++ -std=c++20 -O1 -g -Wall tests/league_migrate_test.cpp -o build/tests/league_migrate_test
+	build/tests/league_migrate_test
 
 test-adv:       ## Unit tests for Advanced mode's league model (standings, tiebreakers, playoffs)
 	@mkdir -p build/tests
@@ -58,6 +68,22 @@ test-cloud:     ## Unit tests for Cloud Sync and Sync over Wi-Fi, two "devices" 
 		for i in 1 2 3 4 5 6 7 8 9 10; do P=$$(sed -n 's/^listening //p' $$L); [ -n "$$P" ] && break; sleep 0.3; done; \
 		build/tests/save_sync_cloud_test $$P; rc=$$?; kill $$S; exit $$rc; \
 	else echo "test-cloud: no node, so the two-device part is skipped"; build/tests/save_sync_cloud_test; fi
+
+# The ROMs are the player's own, read where they are (never copied into the repo); each check skips without its ROM.
+ROMS_DIR ?= $(HOME)/Desktop/Gaming/roms
+ROM_V10 ?= $(ROMS_DIR)/NFL Blitz 2000 (USA).zip
+ROM_V11 ?= $(ROMS_DIR)/NFL Blitz 2000.zip
+ZSTD_DIR := lib/rt64/src/contrib/zstd/lib
+test-rom-upgrade: ## USA v1.0 -> v1.1 at import (src/common/rom_upgrade.cpp) with the bundled patch: byte orders, SHA-1s, damage (ROM_V10=, ROM_V11=)
+	@mkdir -p build/tests/miniz build/tests/zstd
+	@printf '#define MINIZ_EXPORT\n' > build/tests/miniz/miniz_export.h
+	@for f in miniz miniz_tdef miniz_tinfl miniz_zip; do clang -c -O1 -w -Ibuild/tests/miniz lib/N64ModernRuntime/thirdparty/miniz/$$f.c -o build/tests/miniz/$$f.o || exit 1; done
+	@for f in common/debug common/entropy_common common/error_private common/fse_decompress common/xxhash common/zstd_common \
+		decompress/huf_decompress decompress/zstd_ddict decompress/zstd_decompress decompress/zstd_decompress_block; do \
+		clang -c -O2 -w -DZSTD_DISABLE_ASM $(ZSTD_DIR)/$$f.c -o build/tests/zstd/$$(basename $$f).o || exit 1; done
+	clang++ -std=c++20 -O2 -g -Wall -isystem lib/N64ModernRuntime/thirdparty/miniz -isystem build/tests/miniz -isystem lib/rt64/src/contrib \
+		tests/rom_upgrade_test.cpp src/common/rom_upgrade.cpp src/common/sha256.cpp build/tests/miniz/*.o build/tests/zstd/*.o -o build/tests/rom_upgrade_test
+	build/tests/rom_upgrade_test assets/rom/v10_to_v11.nbdiff "$(ROM_V10)" "$(ROM_V11)"
 
 test-sync-worker: ## The save sync Worker's rules (tools/save_sync_worker): compare-and-set, size, rate, tokens, the 90-day sweep, against R2 in memory (node)
 	@if command -v node > /dev/null; then node tools/save_sync_worker/test/worker_test.mjs; else echo "test-sync-worker: no node: skipped"; fi
@@ -255,7 +281,12 @@ pak-2026:   ## build/paks/season2026.nbpak (+ its versioned name and catalog.jso
 	$(PY) tools/make_season_pak.py build --pack packs/blitz2026 --rosters build/blitz-rosters --houston build/engine32/houston \
 		--app-folder $(SEASON_APP_FOLDER) --parts "$(SEASON_PARTS)" --out build/paks
 
-.PHONY: pak-2026
+pak-league:   ## build/paks/<ID>-<VERSION>.nbpak from a league's roster pack, its entry put into build/paks/catalog.json (ID= TITLE= PACK= VERSION=; SUMMARY=, PARTS="<dir>=uniforms ...", AUTO=off, MIN_BUILD=<n>)
+	@test -n "$(ID)" && test -n "$(TITLE)" && test -n "$(PACK)" && test -n "$(VERSION)" || { echo "usage: make pak-league ID=pac12 TITLE=\"Blitz: Pac-12\" PACK=packs/pac12 VERSION=2026.11.27"; exit 2; }
+	$(PY) tools/make_season_pak.py pak --id "$(ID)" --title "$(TITLE)" --pack "$(PACK)" --version "$(VERSION)" \
+		$(if $(SUMMARY),--summary "$(SUMMARY)") $(foreach p,$(PARTS),--part "$(p)") $(if $(AUTO),--auto $(AUTO)) $(if $(MIN_BUILD),--min-build $(MIN_BUILD)) --out build/paks
+
+.PHONY: pak-2026 pak-league
 
 # The device kits Blitz Builder sends from the Mac app (src/main/device_send.cpp): the PS5 title and its launch payload
 # and the Android APK. Build those first (make ps5-modern, make android-modern), then `make device-kits app-modern`.

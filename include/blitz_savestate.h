@@ -10,6 +10,8 @@
 #include <type_traits>
 #include <vector>
 
+#include "blitz_soft_reset.h"
+
 namespace blitz {
     using StateBlob = std::vector<uint8_t>;
 
@@ -18,7 +20,8 @@ namespace blitz {
     void savestate_register(const std::string& name, std::function<StateBlob()> save, std::function<void(const StateBlob&)> load,
                             std::function<std::string(const StateBlob&)> check = nullptr);
 
-    // A plain struct or value, copied as bytes (a blob of another size is ignored).
+    // A plain struct or value, copied as bytes (a blob of another size is ignored). It follows the game, so a restart in
+    // place (blitz_soft_reset.h) puts back the value it had when it registered, before any game ran.
     template <typename T> bool savestate_register_pod(const std::string& name, T* obj) {
         static_assert(std::is_trivially_copyable_v<T>);
         savestate_register(
@@ -26,6 +29,8 @@ namespace blitz {
             [obj](const StateBlob& b) {
                 if (b.size() == sizeof(T)) std::memcpy((void*)obj, b.data(), sizeof(T));
             });
+        StateBlob fresh((const uint8_t*)obj, (const uint8_t*)obj + sizeof(T));
+        on_soft_reset(name.c_str(), [obj, fresh] { std::memcpy((void*)obj, fresh.data(), sizeof(T)); });
         return true;
     }
 }

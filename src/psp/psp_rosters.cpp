@@ -44,7 +44,7 @@ namespace {
     using json = nlohmann::json;
     constexpr const char* opt_lineups = "lineups";
     constexpr const char* pack_path = "psp/pack.txt";
-    enum Choice : uint32_t { ThisWeek = 0, Full = 1, Packed = 2, FirstWeek = 10 };
+    enum Choice : uint32_t { Current = 0, Full = 1 };  // 1.0.6: Built-In and Week N are gone (rosters_live.cpp)
 
     std::mutex mutex;
     std::map<std::string, blitz::RosterPlayer> players;                  // id -> player
@@ -52,7 +52,6 @@ namespace {
     std::map<std::string, std::shared_ptr<blitz::Lineup>> lineups;      // label -> lineup
     std::string week, updated;
     bool loaded = false;
-    std::vector<std::string> week_keys;      // the Lineups choices 10, 11, ...
     std::vector<std::string> pending_messages;
     std::atomic<bool> checking{false};
     std::atomic<int> checks{0};
@@ -410,22 +409,12 @@ namespace blitz {
         pending_messages.erase(pending_messages.begin());
     }
 
-    // Settings → Season → Lineups: the desktop's option (id, choices, default), with the pack's weeks.
+    // Settings → Teams → Lineups: the desktop's option (id, choices, default), Current labelled with the pack's freshest week.
     void add_lineups_option(recomp::config::Config& config) {
-        std::vector<recomp::config::ConfigOptionEnumOption> o = {
-            {ThisWeek, "week", "This Week"}, {Full, "full", "Full Strength"}, {Packed, "packed", "Built-In"}};
         std::vector<std::string> weeks = saved_weeks();
-        std::string pinned;
-        std::string saved;
-        if (pspsys::read_file(psplog::app_path("season.json"), saved, 1 << 16)) {
-            json j = json::parse(saved, nullptr, false);
-            if (j.is_object()) pinned = j.value(opt_lineups, "");
-        }
-        week_keys.clear();
-        if (std::find(weeks.begin(), weeks.end(), pinned) != weeks.end()) week_keys.push_back(pinned);
-        else if (!weeks.empty()) week_keys.push_back(weeks.back());
-        for (size_t i = 0; i < week_keys.size(); i++) o.emplace_back((uint32_t)(FirstWeek + i), week_keys[i], display(week_keys[i]));
-        config.add_enum_option(opt_lineups, "Lineups", "Which week's players take the field (rosters/pack.txt).", o, ThisWeek);
+        std::string current = weeks.empty() ? "Current" : "Current (" + display(weeks.back()) + ")";
+        config.add_enum_option(opt_lineups, "Lineups", "Which players take the field (rosters/pack.txt).",
+                               {{Current, "week", current}, {Full, "full", "All Starters (Healthy)"}}, Current);
     }
 
     // Settings → Teams → Roster Updates (the desktop's, rosters_live.cpp): the PSP's downloads follow its own net.cfg, so
@@ -444,11 +433,8 @@ namespace blitz {
     std::shared_ptr<const Lineup> lineup_now(int adv_week) {
         std::vector<std::string> weeks = saved_weeks();
         std::lock_guard lock{mutex};
-        uint32_t c = choice();
-        if (c == Packed) return nullptr;
-        if (c == Full) return load("full");
+        if (choice() == Full) return load("full");
         if (weeks.empty()) return load("full");
-        if (c >= FirstWeek && c - FirstWeek < week_keys.size()) return load(week_keys[c - FirstWeek]);
         if (adv_week < 0) return load(weeks.back());
         int year = ordinal(weeks.back()) / 100;
         int want = year * 100 + adv_week + 1 + (adv_week >= 18 ? (adv_week == 21 ? 2 : 0) : 0);

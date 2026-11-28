@@ -17,6 +17,7 @@
 #include <string>
 #include <vector>
 #include <atomic>
+#include <mutex>
 #include <cerrno>
 
 #ifdef _WIN32
@@ -95,6 +96,7 @@ namespace blitz { extern std::atomic_bool background_hold; }  // replay.cpp: the
 #include "blitz_config.h"
 #include "icon_bytes.h"
 #include "miniz.h"
+#include "../common/rom_upgrade.h"
 
 const std::string version_string = BLITZ_VERSION;  // CMakeLists.txt
 
@@ -324,9 +326,15 @@ ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callbacks_t::
 #endif
 }
 
+static void rom_message_toast();  // below: an import's message once the game's up
+
 namespace blitz {
+#if BLITZ_MODERN
+    void league_select_update();  // league_select.cpp: the League row's prompts, one at a time
+#endif
     std::string take_notice();  // notices.cpp
     std::string take_status();
+    void post_status(const std::string& msg);
     void toast_show(const std::string& message);  // toast.cpp
     void toast_hold(bool on);
     int take_status_hold();                       // notices.cpp
@@ -338,7 +346,8 @@ namespace blitz {
     bool savestate_quit_prompt();
     void capture_shutdown();  // capture.cpp
     void party_update();               // below
-    void hints_update();               // hints.cpp
+    void soft_restart_ui_update();     // below: a restart in place's Settings closed, or the launcher shown
+    void hints_update();             // hints.cpp
     void builder_update();             // firstrun.cpp: the first start's setup
     void builder_autostarted();
     void firstrun_launcher_frame(int frame);
@@ -368,6 +377,7 @@ void update_gfx(void*) {
     blitz::savestate_startup_prompt();
     blitz::ui_step("party");
     blitz::party_update();
+    blitz::soft_restart_ui_update();
     // First-time hints (hints.cpp), a few times a second.
     {
         static Uint32 last = 0;
@@ -389,6 +399,7 @@ void update_gfx(void*) {
     blitz::ui_step("toasts, replay, screens");
     blitz::party_tab_refresh();
     // Statuses (save states, Redo Play) show as a toast at the bottom right for a moment.
+    rom_message_toast();  // an import's message, the game having started straight away
     std::string status = blitz::take_status();
     if (!status.empty() && ultramodern::is_game_started()) blitz::toast_show(status);
     if (int h = blitz::take_status_hold(); h != 0) blitz::toast_hold(h == 1);  // a load's notice stays up (notices.cpp)
@@ -404,6 +415,10 @@ void update_gfx(void*) {
     blitz::receiver_targets_update(window);
     blitz::window_size_update(window);
     blitz::ds_stack_apply(window);
+#if BLITZ_MODERN
+    blitz::ui_step("league prompts");
+    blitz::league_select_update();
+#endif
     blitz::ui_step("notice");
     std::string notice = blitz::take_notice();
     // BLITZ_QUIET_NOTICES=1 (dev/test runs): log only, no dialog on the desktop.
@@ -501,23 +516,140 @@ static std::atomic<bool> restart_requested{false};
 // Settings → Main Menu during a game: the same relaunch, into the launcher instead of the game.
 static std::atomic<bool> restart_to_launcher{false};
 
+// A restart in place, finished on the main thread (update_gfx): 1 the game booted again (Settings closed), 2 the
+// launcher (Settings → Main Menu).
+static std::atomic<int> soft_restart_ui{0};
+
 namespace blitz {
     void log_shutdown();  // app_log.cpp
+    void soft_reset_run_hooks();  // soft_restart.cpp
+    void show_launcher();         // below
+    void reset_data_pending(const std::filesystem::path& app_folder, const char* when);  // reset_data.cpp
+
+    // Restart in place (soft_restart.cpp, n64modernruntime 0026): the game boots again inside the running app, the way
+    // an N64's reset does. A phone's Restart and Main Menu (it can't start itself again); a computer's with
+    // BLITZ_SOFT_RESTART=1 (dev: the same path, tested on the Mac), else a computer relaunches its process.
+    bool soft_restart_on() {
+        static const bool on = [] {
+            if (const char* e = getenv("BLITZ_SOFT_RESTART"); e != nullptr && *e != '\0') return e[0] == '1';
+            return platform::soft_restart;
+        }();
+        return on;
+    }
+
+    // Android's whole-app restart (Reset Data, a setting read at launch, a restart in place that failed). Never through the
+    // quit: an Android quit ends in RT64's shutdown, which aborts the process (a destroyed mutex its present queue still
+    // waits on: a plain Quit does it too, 2026-11-27), so main's end, where a computer relaunches, is never reached. And the
+    // relaunch's activity can't start while the quit runs: it puts the game in the background, where SDL holds the main
+    // loop. So the game is stopped the way a restart in place stops it, Reset Data clears the folder then (as at the end
+    // of a quit), the launcher is started (BlitzRestart waits for this process to go) and the process ends at once.
+    static std::atomic<bool> relaunch_after_stop{false};
+    [[noreturn]] static void relaunch_now(const char* why) {
+        blitz::reset_data_pending(recompui::file::get_app_folder_path(), why);
+        bool ok = blitz::relaunch_app();
+        fprintf(stderr, "[restart] the process ends for the relaunch%s\n", ok ? "" : " (it didn't start: open New Blitz again)");
+        blitz::log_shutdown();
+        std::_Exit(0);
+    }
+    static void relaunch_android(const char* why) {
+        if (recomp::request_soft_reset(false)) {
+            relaunch_after_stop = true;  // relaunch_now runs in soft_reset_between, with the game stopped
+            return;
+        }
+        relaunch_now(why);  // no game running (the launcher, setup): at once
+    }
+
+    // The whole app, when a restart in place can't do (Reset Data clears the folder its settings came from) or didn't
+    // work: a computer relaunches its process, Android its launcher activity (above); an iPhone can't, so it closes with a
+    // note to open it again.
+    static void restart_whole_app(bool to_launcher, const char* why) {
+        fprintf(stderr, "[restart] the whole app (%s)\n", why);
+        if (platform::android) {
+            relaunch_android(why);
+            return;
+        }
+        if (platform::desktop) {
+            restart_requested = true;
+            restart_to_launcher = to_launcher;
+        }
+        else {
+            recompui::message_box("New Blitz closes to finish restarting. Open it again to carry on.");
+        }
+        ultramodern::quit();
+    }
+
+    // The runtime's two callbacks (recomp::set_soft_reset_callbacks), set in main.
+    static void soft_reset_between(bool to_launcher) {
+        if (relaunch_after_stop) relaunch_now("relaunch");
+        soft_reset_run_hooks();
+        soft_restart_ui = to_launcher ? 2 : 1;
+    }
+    static void soft_reset_failed() {
+        if (relaunch_after_stop || platform::android) relaunch_now("the game didn't stop");
+        restart_whole_app(false, "the game didn't stop for a restart in place");
+    }
+
+    // On the main thread, every update_gfx: a restart in place's Settings closed, the launcher for Main Menu.
+    // Only the menus close: Settings and a prompt still up. The overlays that stay through a game (touch controls, BLITZ DS's
+    // lower screen, toasts) keep their own record of being shown; hiding every context left them out of step (the Surface
+    // Duo, build 959: "hide a context that isn't shown", and the touch controls shown again on top of play select).
+    void soft_restart_ui_update() {
+        int what = soft_restart_ui.exchange(0);
+        if (what == 0) return;
+        recompui::ContextId settings = recompui::config::get_config_context_id();
+        if (settings != recompui::ContextId::null() && recompui::is_context_shown(settings)) recompui::hide_context(settings);
+        if (what == 2) show_launcher();
+        fprintf(stderr, "[restart] in place: %s\n", what == 2 ? "the launcher" : "the game again");
+    }
+
+    // false: no restart in place here, or it can't start now (none while the game starts up or already restarting).
+    static bool restart_in_place(bool to_launcher) {
+        if (!soft_restart_on()) return false;
+        if (!recomp::request_soft_reset(to_launcher)) {
+            fprintf(stderr, "[restart] in place: not now (no game running, or a restart already under way)\n");
+            return false;
+        }
+        fprintf(stderr, "[restart] in place%s\n", to_launcher ? ", to the launcher" : "");
+        return true;
+    }
+
+    // A setting the app reads as it launches changed (Android's Potato Mode, Swap Screens, config.cpp): a restart in place
+    // wouldn't pick it up, so Restart starts the whole app again where it can (Android's relaunch).
+    static std::atomic<const char*> launch_setting_changed{nullptr};
+    void app_restart_needed(const char* setting) {
+        launch_setting_changed = setting;
+        fprintf(stderr, "[restart] %s changed: Restart starts the whole app again\n", setting);
+    }
+    // For the Settings header's Restart (its dot and prompt, league_select.cpp): that setting's name, or "".
+    std::string app_restart_setting() {
+        const char* s = launch_setting_changed.load();
+        return s == nullptr ? std::string{} : std::string(s);
+    }
 
     void request_restart() {
         if (!ultramodern::is_game_started()) return;  // quitting while the game starts up isn't safe
+        if (const char* s = launch_setting_changed.load(); s != nullptr && platform::app_restart && !platform::desktop) {
+            restart_whole_app(false, s);
+            return;
+        }
+        if (soft_restart_on()) {
+            restart_in_place(false);  // a second press while one is under way does nothing
+            return;
+        }
+        if (!blitz::restart_available) return;
         restart_requested = true;
         ultramodern::quit();
     }
 
-    // Settings → Main Menu from a game (firstrun.cpp, after its "Leave this game?"): a game can't be stopped and left
-    // running underneath, so the app ends and starts again on the launcher. The mark (config.cpp skip_launcher) makes
-    // that next start open on the launcher; a phone, which can't start itself again, opens there when it's next opened.
+    // Settings → Main Menu from a game (firstrun.cpp, after its "Leave this game?"): a phone stops the game in place and
+    // shows the launcher; a computer ends and starts again on the launcher (the mark, config.cpp skip_launcher, makes
+    // that start open there). A device with neither opens on the launcher when it's next opened.
     void leave_to_main_menu() {
+        if (soft_restart_on() && restart_in_place(true)) return;
         std::error_code ec;
         std::filesystem::create_directories(recompui::file::get_app_folder_path(), ec);
         std::ofstream(recompui::file::get_app_folder_path() / "open_launcher") << "1\n";
-        if (blitz::restart_available) {
+        if (blitz::restart_available && platform::desktop) {
             restart_requested = true;
             restart_to_launcher = true;
         }
@@ -525,11 +657,15 @@ namespace blitz {
     }
 
     // Reset Data and Restore a Backup (reset_data.cpp): the app ends, its folder is cleared (or restored) on the way
-    // out, and on a computer it starts again, on the launcher, where the first run comes up. A phone or console, which
-    // can't start itself again, starts over when it's next opened.
+    // out, and it starts again on the launcher, where the first run comes up: a computer relaunches, Android too
+    // (relaunch_android). An iPhone or a console, which can't start itself again, starts over when it's next opened.
     void restart_fresh() {
-        fprintf(stderr, "[reset] the app %s\n", blitz::restart_available ? "restarts" : "closes");
-        if (blitz::restart_available) {
+        fprintf(stderr, "[reset] the app %s\n", blitz::app_restart_available ? "restarts" : "closes");
+        if (platform::android) {
+            relaunch_android("reset");
+            return;
+        }
+        if (platform::desktop) {
             restart_requested = true;
             restart_to_launcher = true;
         }
@@ -636,12 +772,23 @@ namespace blitz {
     void experience_exec(char** argv);
 }
 
+// The USA v1.0 cartridge (1.0.6): the last import found it and stored the v1.1 the patch makes from it (rom_upgrade.h), or
+// found it and couldn't (upgrade_problem says why, for the player).
+static bool last_import_upgraded = false;
+static std::string upgrade_problem;
+
+// What the player is told when a v1.0 dump went in as v1.1.
+// BRANDING: the v1.0 note names the app
+static const char* const v10_note =
+    "That's the v1.0 cartridge: New Blitz updated it to v1.1, the version it plays. Your own file is unchanged.";
+
 // What a player reads when a ROM isn't accepted (the launcher's message box and --import-rom).
 static std::string rom_error_text(recomp::RomValidationError error) {
     if (rom_handed_over) {  // the other game took it and asked about switching
         rom_handed_over = false;
         return "";
     }
+    if (error == recomp::RomValidationError::IncorrectVersion && !upgrade_problem.empty()) return upgrade_problem;
     switch (error) {
         case recomp::RomValidationError::Good: return "ok, stored";
         case recomp::RomValidationError::FailedToOpen: return "Couldn't read that file. Check it isn't empty and that the app may open it.";
@@ -657,12 +804,12 @@ static std::string rom_error_text(recomp::RomValidationError error) {
 #elif BLITZ_MODERN
         case recomp::RomValidationError::IncorrectVersion:
             // BRANDING: ROM error text names the app
-            return "That's NFL Blitz 2000, but not the USA v1.1 copy New Blitz plays: it may be another version or "
+            return "That's NFL Blitz 2000, but not the USA v1.0 or v1.1 copy New Blitz plays: it may be another "
                    "region, damaged, or modified.";
 #else
         case recomp::RomValidationError::IncorrectVersion:
             // BRANDING: ROM error text names the app
-            return "That's NFL Blitz 2000, but not the USA v1.1 copy Classic Blitz needs: it may be another version or "
+            return "That's NFL Blitz 2000, but not the USA v1.0 or v1.1 copy Classic Blitz needs: it may be another "
                    "region, damaged, or modified.";
 #endif
         case recomp::RomValidationError::OtherError:
@@ -670,6 +817,82 @@ static std::string rom_error_text(recomp::RomValidationError error) {
                    "). Check there's free space.";
         default: return "Something went wrong reading that file.";
     }
+}
+
+// A ROM file checked and stored (recomp::select_rom). NFL Blitz 2000 that isn't v1.1 may be the USA v1.0 cartridge, in any
+// byte order: then the bundled patch (assets/rom/v10_to_v11.nbdiff) rebuilds v1.1 from it, its SHA-1 is checked, and that
+// is stored as the ROM, as if v1.1 had been picked (1.0.6). The player's own file is never changed.
+static recomp::RomValidationError check_and_store(const std::filesystem::path& file, std::u8string& game_id, const std::string& name) {
+    last_import_upgraded = false;
+    upgrade_problem.clear();
+    recomp::RomValidationError result = recomp::select_rom(file, game_id);
+    if (result != recomp::RomValidationError::IncorrectVersion) return result;
+    std::vector<uint8_t> rom;
+    {
+        std::ifstream f(file, std::ios::binary);
+        rom.assign(std::istreambuf_iterator<char>(f), {});
+    }
+    if (!blitzrom::to_z64(rom) || !blitzrom::header_is_v10(rom)) return result;
+    const std::filesystem::path patch_path = recompui::file::get_asset_path("rom/v10_to_v11.nbdiff");
+    std::vector<uint8_t> patch;
+    {
+        std::ifstream f(patch_path, std::ios::binary);
+        patch.assign(std::istreambuf_iterator<char>(f), {});
+    }
+    std::vector<uint8_t> v11;
+    std::string why;
+    const blitzrom::Upgrade up = blitzrom::apply_v10_patch(rom, patch.data(), patch.size(), v11, why);
+    std::vector<uint8_t>().swap(rom);  // 16 MB back before the next 16 MB are written
+    if (up != blitzrom::Upgrade::done) {
+        fprintf(stderr, "[rom] %s: the USA v1.0 cartridge's header, but no v1.1 from it: %s\n", name.c_str(),
+                why.c_str());
+        // BRANDING: the v1.0 refusals name the app
+        upgrade_problem = up == blitzrom::Upgrade::not_v10
+            ? std::string("That's NFL Blitz 2000 v1.0, but not an exact copy of the cartridge (it may be damaged or modified), "
+                          "so New Blitz can't update it to v1.1. Try dumping it again.")
+            : "That's the v1.0 cartridge, but New Blitz couldn't update it to v1.1: " + why + ". Reinstalling New Blitz puts "
+              "its update file back.";
+        return result;
+    }
+    std::error_code ec;
+    const std::filesystem::path tmp = recompui::file::get_app_folder_path() / ".import-rom-v11.tmp";
+    bool written = false;
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(v11.data()), (std::streamsize)v11.size());
+        written = (bool)out;
+    }
+    std::vector<uint8_t>().swap(v11);
+    result = written ? recomp::select_rom(tmp, game_id) : recomp::RomValidationError::OtherError;
+    std::filesystem::remove(tmp, ec);
+    last_import_upgraded = result == recomp::RomValidationError::Good;
+    fprintf(stderr, "[rom] %s: the USA v1.0 cartridge, updated to v1.1 (sha1 %s): %s\n", name.c_str(),
+            blitzrom::v11_sha1, last_import_upgraded ? "stored" : "not stored");
+    return result;
+}
+
+// What an import before the UI was up has to tell the player (--import-rom, the drop folder, an iPhone app made with
+// the ROM inside): shown over the launcher once it's up (on_launcher_update), or as a toast once a game started straight
+// away is on screen. import_refused: --import-rom's file wasn't taken, so the launcher stays up to say why rather than
+// starting the ROM stored before (1.0.6; it was only logged).
+namespace {
+    std::mutex rom_message_mutex;
+    std::string rom_message_title, rom_message_text;
+    bool import_refused = false;
+    int rom_message_in = -1;  // launcher frames until the message opens (on_launcher_update); -1: not yet asked for
+}
+static void queue_rom_message(const std::string& title, const std::string& text) {
+    fprintf(stderr, "[rom] for the player: %s: %s\n", title.c_str(), text.c_str());
+    std::lock_guard lock{rom_message_mutex};
+    rom_message_title = title;
+    rom_message_text = text;
+}
+
+// The v1.0 note for a ROM picked in the app (Load ROM, Blitz Builder's ROM step, Settings → Change ROM): over the
+// launcher a few frames on, or a toast during a game.
+static void show_v10_note() {
+    queue_rom_message("ROM Updated to v1.1", v10_note);
+    if (!ultramodern::is_game_started()) rom_message_in = 12;  // else rom_message_toast has it
 }
 
 // Load ROM and --import-rom: a .z64/.n64/.v64 file, or a .zip holding one (unpacked to a temporary file in the
@@ -684,7 +907,7 @@ static recomp::RomValidationError import_rom(const std::filesystem::path& path, 
         f.read(magic, sizeof magic);
     }
     if (std::memcmp(magic, "PK\x03\x04", 4) != 0) {
-        return recomp::select_rom(path, game_id);
+        return check_and_store(path, game_id, path.filename().string());
     }
     mz_zip_archive zip{};
     if (!mz_zip_reader_init_file(&zip, path.string().c_str(), 0)) {
@@ -722,7 +945,8 @@ static recomp::RomValidationError import_rom(const std::filesystem::path& path, 
         written = (bool)out;
     }
     mz_free(data);
-    recomp::RomValidationError result = written ? recomp::select_rom(tmp, game_id) : recomp::RomValidationError::OtherError;
+    recomp::RomValidationError result = written ? check_and_store(tmp, game_id, path.filename().string() + " (in the zip)")
+                                                : recomp::RomValidationError::OtherError;
     std::filesystem::remove(tmp, ec);
     return result;
 }
@@ -776,6 +1000,7 @@ namespace blitz {
         if (r == recomp::RomValidationError::Good) {
             recomp::check_all_stored_roms();  // so recomp::is_rom_valid agrees for the rest of this session
             fprintf(stderr, "[rom] stored from %s\n", path.filename().string().c_str());
+            if (last_import_upgraded) show_v10_note();
             return true;
         }
         if ((r == recomp::RomValidationError::IncorrectVersion || r == recomp::RomValidationError::IncorrectRom) &&
@@ -785,9 +1010,10 @@ namespace blitz {
         kind = r == recomp::RomValidationError::IncorrectVersion ? 2
              : r == recomp::RomValidationError::FailedToOpen || r == recomp::RomValidationError::OtherError ? 3 : 1;
         // BRANDING: first run's wrong-ROM text names the app
-        message = kind == 1 ? "That's not the right game. New Blitz needs NFL Blitz 2000 for the N64, USA, v1.1."
-                : kind == 2 ? "That's NFL Blitz 2000, but not the USA v1.1 copy New Blitz needs. A different region or "
-                              "version won't work, and a damaged file looks the same: try dumping it again."
+        message = kind == 1 ? "That's not the right game. New Blitz needs NFL Blitz 2000 for the N64, USA (v1.0 or v1.1)."
+                : kind == 2 && !upgrade_problem.empty() ? upgrade_problem
+                : kind == 2 ? "That's NFL Blitz 2000, but not the USA v1.0 or v1.1 copy New Blitz needs. A different region "
+                              "won't work, and a damaged file looks the same: try dumping it again."
                             : rom_error_text(r);
         rom_handed_over = false;
         fprintf(stderr, "[rom] %s: not stored (%d)\n", path.filename().string().c_str(), (int)r);
@@ -839,6 +1065,10 @@ void on_launcher_init(recompui::LauncherMenu* menu) {
     );
     blitz::style_launcher(menu, game_options_menu);  // launcher.cpp: logo and options
     launcher_autostart = autostart_game || blitz::skip_launcher();
+    if (launcher_autostart && import_refused) {  // the launcher stays up to say why --import-rom's file wasn't taken
+        fprintf(stderr, "[launcher] --import-rom's file wasn't taken: no start straight into the game\n");
+        launcher_autostart = false;
+    }
     // The launcher has to be up for its first 30 frames (on_launcher_update) but isn't for seeing then: it flashed at
     // every start on a phone (logo, PLAY ... BLITZ BUILDER) before the game. Shown if the game doesn't start after all.
     if (launcher_autostart) menu->set_display(recompui::Display::None);
@@ -912,6 +1142,7 @@ void on_launcher_update(recompui::LauncherMenu* menu) {
     }
     // --game, or Launcher at Start off unless Shift is held (to reach the launcher anyway).
     if (!launcher_autostart) {
+        rom_message_in = 12;
         return;
     }
     std::u8string game_id = blitz::game_id;  // is_rom_valid takes a non-const reference
@@ -926,6 +1157,43 @@ void on_launcher_update(recompui::LauncherMenu* menu) {
         fprintf(stderr, "[launcher] no valid stored ROM to start; the launcher stays (Load ROM).\n");
     }
     menu->set_display(recompui::Display::Block);  // kept out of sight for the start that didn't happen (on_launcher_init)
+    rom_message_in = 12;
+}
+
+// Every UI tick (update_gfx): what an import has to say (queue_rom_message). Outside a game, once asked for
+// (rom_message_in: on_launcher_update at its start, or a ROM picked in the app), a few ticks on, so it opens over the
+// screen Blitz Builder puts up (its first at the launcher's frame 30; a picked ROM moves it to the next); in a game (one
+// started straight away, or Settings → Change ROM), a toast.
+namespace blitz::firstrun_ui { bool shown(); }  // firstrun_screen.cpp: Blitz Builder's screen is up
+static void rom_message_toast() {
+    const bool in_game = ultramodern::is_game_started();
+    if (!in_game) {
+        // Over Blitz Builder once its screen is up, or a second on when none comes (Builder shows its screen a moment
+        // after it starts, and a screen shown after the prompt covers it).
+        static int waited = 0;
+        if (rom_message_in < 0) return;
+        if (rom_message_in > 0) {
+            rom_message_in--;
+            waited = 0;
+            return;
+        }
+        if (!blitz::firstrun_ui::shown() && ++waited < 60) return;
+        rom_message_in = -1;
+    }
+    std::string title, text;
+    {
+        std::lock_guard lock{rom_message_mutex};
+        if (rom_message_text.empty()) return;
+        title = std::exchange(rom_message_title, std::string{});
+        text = std::exchange(rom_message_text, std::string{});
+    }
+    if (in_game) {
+        blitz::post_status(text);
+        return;
+    }
+    fprintf(stderr, "[rom] message shown: %s\n", title.c_str());
+    if (launcher_menu != nullptr) launcher_menu->set_display(recompui::Display::Block);
+    recompui::open_info_prompt(title, text, "OK", [] {}, recompui::ButtonStyle::Primary);
 }
 
 void enable_texture_pack(recomp::mods::ModContext& context, const recomp::mods::ModHandle& mod) {
@@ -1146,6 +1414,7 @@ int main(int argc, char** argv) {
                 std::u8string candidate = blitz::game_id;
                 recomp::RomValidationError result = import_rom(setup / "blitz.z64", candidate);
                 fprintf(stderr, "[rom] the ROM inside the app: %s\n", rom_error_text(result).c_str());
+                if (result == recomp::RomValidationError::Good && last_import_upgraded) queue_rom_message("ROM Updated to v1.1", v10_note);
             }
             std::filesystem::create_directories(seen.parent_path(), ec);
             std::ofstream(seen) << mark << "\n";
@@ -1218,6 +1487,7 @@ int main(int argc, char** argv) {
                 recomp::RomValidationError result = import_rom(rom, candidate);
                 fprintf(stderr, "[rom] %s: %s\n", rom.string().c_str(), rom_error_text(result).c_str());
                 stored = result == recomp::RomValidationError::Good;
+                if (stored && last_import_upgraded) queue_rom_message("ROM Updated to v1.1", v10_note);
             }
         }
         if (roms.empty() && zips.empty()) fprintf(stderr, "[rom] no ROM in %s yet\n", rom_folder.string().c_str());
@@ -1233,8 +1503,24 @@ int main(int argc, char** argv) {
         }
         std::u8string game_id = blitz::game_id;
         recomp::RomValidationError result = import_rom(import_rom_path, game_id);
-        fprintf(stderr, "--import-rom %s: %s\n", import_rom_path, rom_error_text(result).c_str());
+        const std::string said = rom_error_text(result);
+        fprintf(stderr, "--import-rom %s: %s\n", import_rom_path, said.c_str());
         if (exit_after_import) return result == recomp::RomValidationError::Good ? 0 : 1;
+        // On screen too (1.0.6): RecompLauncher's start passes the player's pick this way, and a refusal only reached the
+        // log while the launcher went on with the ROM stored before.
+        if (result == recomp::RomValidationError::Good) {
+            if (last_import_upgraded) queue_rom_message("ROM Updated to v1.1", v10_note);
+        }
+        else if (!said.empty()) {
+            import_refused = true;
+            std::error_code sec;
+            const bool had_one = std::filesystem::exists(recomp::get_config_path() / (std::u8string(blitz::game_id) + u8".z64"), sec);
+            // BRANDING: the --import-rom refusal names the app
+            queue_rom_message("That ROM Didn't Work",
+                              "New Blitz couldn't use " + std::filesystem::path(import_rom_path).filename().string() + ". " + said +
+                                  (had_one ? "\n\nThe ROM New Blitz already had is unchanged, and still the one it plays."
+                                           : "\n\nPick the game's ROM with Start Game or Blitz Builder."));
+        }
     }
     blitz::experience_started();
 #if BLITZ_MODERN
@@ -1254,6 +1540,7 @@ int main(int argc, char** argv) {
             blitz::experience_hand_over(path)) {
             rom_handed_over = true;
         }
+        if (r == recomp::RomValidationError::Good && last_import_upgraded) show_v10_note();
         return r;
     }, rom_error_text);
     recompui::register_ui_exports();
@@ -1266,6 +1553,7 @@ int main(int argc, char** argv) {
     blitz::dev_input_early();           // dev: live commands reach the launcher and setup (tools/live.sh)
     blitz::crash_report_at_start();     // the last run crashed and reports are on: one goes, in the background
     if (blitz::restart_available) recompui::config::set_restart_callback(blitz::request_restart);  // the header's Restart
+    recomp::set_soft_reset_callbacks(blitz::soft_reset_between, blitz::soft_reset_failed);  // restart in place
     // A game in progress: offer to save it (save states), else Resume Interrupted Games (experimental).
     recompui::set_quit_prompt_override([] { return blitz::savestate_quit_prompt() || blitz::checkpoint_quit_prompt(); });
     recompui::register_launcher_init_callback(on_launcher_init);
@@ -1341,6 +1629,24 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(secs * 1000)));
             printf("[test] BLITZ_TEST_QUIT_AFTER: quitting as the Quit button does\n");
             ultramodern::quit();
+        }).detach();
+    }
+
+    // Tests only (2026-11-27): BLITZ_TEST_RESTART_EVERY=<seconds>[,<count>] presses Settings → Restart that often once the
+    // game runs, <count> times (5 if not given), for a restart in place on a device nobody is at (test_env.txt on Android).
+    if (const char* r = getenv("BLITZ_TEST_RESTART_EVERY"); r != nullptr && atof(r) > 0) {
+        const double secs = atof(r);
+        const char* comma = strchr(r, ',');
+        const int count = comma != nullptr && atoi(comma + 1) > 0 ? atoi(comma + 1) : 5;
+        std::thread([secs, count] {
+            for (int i = 1; i <= count; i++) {
+                while (!ultramodern::is_game_started()) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(secs * 1000)));
+                printf("[test] BLITZ_TEST_RESTART_EVERY: restart %d of %d\n", i, count);
+                // BLITZ_TEST_RESTART_WHOLE=1: as after changing Potato Mode, so Android starts the whole app again.
+                if (getenv("BLITZ_TEST_RESTART_WHOLE") != nullptr) blitz::app_restart_needed("BLITZ_TEST_RESTART_WHOLE");
+                blitz::request_restart();
+            }
         }).detach();
     }
 

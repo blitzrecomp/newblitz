@@ -139,6 +139,13 @@ void recompui::config::open() { once("config::open"); }
 bool recompui::config::close() { return true; }
 void recompui::config::set_option_section(const std::string&, const std::string&, const std::string&, std::function<std::string()>) {}
 void recompui::config::set_option_action(const std::string&, const std::string&, const std::string&) {}
+void recompui::config::set_option_cycle(const std::string&, const std::string&, std::function<std::vector<CycleChoice>()>, bool) {}
+std::optional<std::string> recompui::config::get_option_browse(const std::string&, const std::string&) { return std::nullopt; }
+void recompui::config::set_option_browse(const std::string&, const std::string&, std::optional<std::string>) {}
+void recompui::config::set_option_browse_left(std::function<void(const std::string&, const std::string&)>) {}
+void recompui::config::set_close_guard(std::function<bool(bool)>) {}
+void recompui::config::set_accept_hint(const std::string&) {}
+void recompui::config::set_restart_pending(std::function<std::string()>) {}
 void recompui::config::describe_header_button(const std::string&, const std::string&) {}
 void recompui::config::place_option(const std::string&, const std::string&, const std::string&, bool) {}
 

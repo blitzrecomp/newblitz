@@ -133,6 +133,7 @@ namespace blitz {
     void host_send_logs(const std::filesystem::path& zip);  // platform_android.cpp
     void set_clipboard_later(const std::string& text);      // controllers.cpp: on the main thread
     void host_set_swap_screens(bool swap);
+    void app_restart_needed(const char* setting);  // main.cpp: Restart starts the whole app again (a setting read at launch)
     void host_set_potato(bool on);
     void host_set_potato_two_screens(bool on);
     void tall_set(const std::string& name, float value);  // tall_view.cpp
@@ -393,6 +394,9 @@ namespace blitz {
     void create_rules_tab();        // house_rules.cpp
     void original_settings_visibility();  // adv_mode.cpp
     void apply_ui_theme();          // ui_theme.cpp
+#if BLITZ_MODERN
+    void league_select_init();      // league_select.cpp: League's prompts and the restart dot
+#endif
 }
 
 void blitz::init_config() {
@@ -478,6 +482,9 @@ void blitz::init_config() {
                               false, 0, true);
     general.add_bool_option("cloud_ask_never", "Cloud Sync Never Ask", "Don't Ask Again on the multiple-devices question.", false, true);
     general.add_string_option("cloud_ask_version", "Cloud Sync Asked At", "The app version the question was last asked at.", "", true);
+    // "Keep rosters, uniforms and new paks up to date?" (1.0.6, firstrun.cpp, src/game/content_ask.h): answered or settled,
+    // once per app.
+    general.add_bool_option("content_ask_done", "Content Updates Asked", "The keep-up-to-date question after 1.0.6 is settled.", false, true);
     // When this install's setup began (seconds): a stored ROM older than that is "a ROM saved earlier".
     general.add_string_option("setup_started", "Setup Started", "When first run began.", "", true);
     // Sound folded in here (team): the Sound tab held this one slider. It stays the real setting (sound.json, what the
@@ -677,15 +684,16 @@ void blitz::init_config() {
         "the game on one screen.", true);
     general.add_bool_option("swap_screens", "Swap Screens",
         "Which screen is the lower one, where play select goes. If play select comes up on the top screen, turn this on and "
-        "restart the app.", false);
+        "Restart (top of Settings).", false);
 #if defined(__ANDROID__)
     general.add_bool_option("potato_mode", "Potato Mode",
         "For weak handhelds: lower resolution, no antialiasing, no Redo Play, and straight into the game with no launcher. "
         "Always on with about 1 GB of RAM. On a stronger device it also keeps the game on four cores, to stand in for a weak "
-        "one. Restart the app after changing it.", false);
+        "one. Then Restart (top of Settings): New Blitz starts again with it.", false);
     general.add_option_change_callback("potato_mode", [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant,
-                                                         recomp::config::OptionChangeContext) {
+                                                         recomp::config::OptionChangeContext ctx) {
         blitz::host_set_potato(std::get<bool>(cur));
+        if (ctx != recomp::config::OptionChangeContext::Load) blitz::app_restart_needed("Potato Mode");
     });
 #endif
 #if defined(__ANDROID__)
@@ -693,11 +701,12 @@ void blitz::init_config() {
     // a new name, as a saved value outlives a changed default: potato_two_screens was off. Nothing changes with one screen.
     general.add_bool_option("potato_two_screens_on", "Two Screens (Potato)",
         "Potato Mode on a device with two screens: the field across both (on by default). Off: one screen, which runs a little "
-        "faster. Restart the app after changing it.",
+        "faster. Then Restart (top of Settings): New Blitz starts again with it.",
         true, getenv("BLITZ_LEAN") == nullptr);
     general.add_option_change_callback("potato_two_screens_on", [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant,
-                                                                recomp::config::OptionChangeContext) {
+                                                                recomp::config::OptionChangeContext ctx) {
         blitz::host_set_potato_two_screens(std::get<bool>(cur));
+        if (ctx != recomp::config::OptionChangeContext::Load) blitz::app_restart_needed("Two Screens (Potato)");
         // Two-Screen Sharpness shows with two screens (show_development); the Development rows show it either way.
         recomp::config::Config& g = recompui::config::get_general_config();
         const bool dev = std::get<bool>(g.get_option_value(recompui::config::general::options::debug_mode));
@@ -710,11 +719,12 @@ void blitz::init_config() {
     // launch can't be switched off from Settings).
     general.add_enum_option(blitz::potato_sharpness_id, "Two-Screen Sharpness",
         "Potato Mode with two screens: how much detail each screen gets. 1x is the game's original resolution. More is sharper and slower. "
-        "Restart the app after changing it.",
+        "Then Restart (top of Settings): New Blitz starts again with it.",
         std::vector<recomp::config::ConfigOptionEnumOption>{{0, "S100", "1x"}, {1, "S125", "1.25x"}, {2, "S150", "1.5x"}, {3, "S175", "1.75x"}, {4, "S200", "2x"}},
         3u, getenv("BLITZ_LEAN") == nullptr);
     general.add_option_change_callback(blitz::potato_sharpness_id, [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant,
-                                                                  recomp::config::OptionChangeContext) {
+                                                                  recomp::config::OptionChangeContext ctx) {
+        if (ctx != recomp::config::OptionChangeContext::Load) blitz::app_restart_needed("Two-Screen Sharpness");
         if (getenv("BLITZ_LEAN") != nullptr) blitz_2x_scale = blitz::two_x_scale(blitz::sharpness_scale_for(std::get<uint32_t>(cur)));
     });
     general.add_enum_option("potato_waits", "GPU Waits",
@@ -770,10 +780,12 @@ void blitz::init_config() {
         blitz::two_screens_apply(false);
     });
     general.add_option_change_callback("swap_screens", [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant,
-                                                          recomp::config::OptionChangeContext) {
+                                                          recomp::config::OptionChangeContext ctx) {
 #if defined(__ANDROID__)
         blitz::host_set_swap_screens(std::get<bool>(cur));
+        if (ctx != recomp::config::OptionChangeContext::Load) blitz::app_restart_needed("Swap Screens");
 #else
+        (void)ctx;
         blitz::ds_set_swapped(std::get<bool>(cur));  // the Mac's test windows
 #endif
         blitz::settings_hold_redraw();
@@ -949,6 +961,10 @@ void blitz::init_config() {
         blitz::settings_freeze_on = std::get<bool>(g.get_option_value("settings_freeze"));  // a first launch has no Load to set it
         blitz::two_screens_loaded();
     }
+#if BLITZ_MODERN
+    blitz::original_settings_visibility();  // again with the saved League (Rosters and Lineups are the NFL's)
+    blitz::league_select_init();
+#endif
 #if defined(__ANDROID__)
     // The callbacks don't run on a first launch, with no settings file to load, and a recipe has to hold there too.
     if (getenv("BLITZ_LEAN") != nullptr) {

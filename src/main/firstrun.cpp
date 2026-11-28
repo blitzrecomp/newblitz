@@ -61,6 +61,7 @@
 #include "firstrun_screen.h"
 #include "os_shell.h"
 #include "../game/cloud_ask.h"
+#include "../game/content_ask.h"
 
 namespace blitz {
     void export_screen_open_for_setup(const std::string& lead, std::function<void()> back, std::function<void()> exported);  // export_screen.cpp
@@ -130,12 +131,12 @@ namespace {
     enum Step {
         Idle, Where, Qr, Rom, RomBad, Season, Downloading, SeasonFailed, Setup, CustomizeWait, Updates, ReportView,
         Device, Android, Iphone, Sending, SendFailed, InstallSteps, Ps5, Sent, Export, ExportWait, ExportDone,
-        LeaveGame, Cloud, CloudWait, StepCount
+        LeaveGame, Cloud, CloudWait, ContentAsk, StepCount
     };
     const char* step_names[StepCount] = {
         "idle", "where", "qr", "rom", "rom-bad", "season", "season-download", "season-failed", "setup", "customize",
         "updates", "report-view", "device", "android", "iphone", "sending", "send-failed", "install-steps", "ps5",
-        "sent", "export", "export-wait", "export-done", "leave-game", "cloud", "cloud-wait"};
+        "sent", "export", "export-wait", "export-done", "leave-game", "cloud", "cloud-wait", "content-ask"};
 
     // Where the player wants to play (A), and on the phone path, which phone and how.
     enum Where { Here, Phone, Ps5Target, ExportTarget };
@@ -153,7 +154,7 @@ namespace {
         int rom_tries = 0;         // wrong ROMs in a row
         std::string rom_problem;
         bool rom_confirmed = false;  // "Use It" on the saved ROM
-        bool rom_shown = false, season_shown = false, updates_shown = false, cloud_shown = false;
+        bool rom_shown = false, season_shown = false, updates_shown = false, cloud_shown = false, content_shown = false;
         bool after_setup = false;  // welcomed already, and only D or E to ask (a device set up from a computer, an update)
         bool rosters = true, reports = false;  // D's boxes, kept while going back and forth
         bool updates_read = false;             // ... read from the settings the first time D shows
@@ -355,6 +356,46 @@ namespace {
     // A phone set up from a computer (builder_done) still asks D once: the computer never answers it for a device.
     bool device_asks_updates() { return flag("setup_ask_updates") && !flag("setup_updates_asked"); }
 
+    // ---- "Keep rosters, uniforms and new paks up to date?" (1.0.6; src/game/content_ask.h has the rule) ----------------
+    // Once per app, for a player set up already whose setting is off (a public 1.0.5 that never ticked it). On the
+    // launcher, before the game; before Cloud Sync's question when both are due (one after the other). Not on a PS5 (set
+    // up from a computer, and the setting is in its Settings).
+    namespace cx = blitz::content_ask;
+    int content_cached = -1;  // worked out once a start (season.json is read), again after an answer or setup's end
+
+    bool content_due_now() {
+        if (content_cached < 0) {
+#if BLITZ_MODERN && !defined(BLITZ_PLATFORM_PS5)
+            cx::Record r{flag("content_ask_done")};
+            bool on = blitz::content_updates_on(), server = !blitz::pak_server().empty();
+            if (cx::passes(r, welcomed(), on)) {  // set up with it on: never needs asking, even if turned off later
+                cx::passed(r);
+                set_flag("content_ask_done", true);
+            }
+            content_cached = cx::due(r, welcomed(), on, server) && !device_asks_updates() ? 1 : 0;
+            log("content ask=%s done=%d welcomed=%d on=%d server=%d", content_cached ? "due" : "no", r.done ? 1 : 0,
+                welcomed() ? 1 : 0, on ? 1 : 0, server ? 1 : 0);
+#else
+            content_cached = 0;
+#endif
+        }
+        return content_cached == 1;
+    }
+
+    void content_answer(cx::Answer a) {
+        cx::Record r{flag("content_ask_done")};
+        bool on = cx::answered(r, a);
+        set_flag("content_ask_done", true);
+        content_cached = -1;
+        log("content answer=%s", on ? "yes" : "no");
+        if (!on) return;  // No: left off, never asked again
+        blitz::set_live_rosters(true);
+#if BLITZ_MODERN
+        blitz::rosters_check_again();
+#endif
+        blitz::pak_sync_start(false, {}, nullptr);  // the posted paks, now
+    }
+
     // Whether setup should be up, from the state alone (no latch: a missed tick or a ROM that arrives late can't lose
     // it). reason: why not, or why.
     bool needed(const char*& reason) {
@@ -362,8 +403,8 @@ namespace {
         if (is_ps5() && !(welcomed() && rom_valid() && cloud_update_due())) { reason = "ps5"; return false; }
         if (autostarted) { reason = "autostart"; return false; }
         if (ultramodern::is_game_started()) { reason = "game"; return false; }
-        if (welcomed() && !device_asks_updates() && !cloud_update_due()) { reason = builder_done_at_start ? "builder_done" : "welcomed"; return false; }
-        reason = !welcomed() ? "not-welcomed" : device_asks_updates() ? "updates-unasked" : "cloud-ask";
+        if (welcomed() && !device_asks_updates() && !cloud_update_due() && !content_due_now()) { reason = builder_done_at_start ? "builder_done" : "welcomed"; return false; }
+        reason = !welcomed() ? "not-welcomed" : device_asks_updates() ? "updates-unasked" : content_due_now() ? "content-ask" : "cloud-ask";
         return true;
     }
 
@@ -407,8 +448,9 @@ namespace {
     // The screens of the current path, in order (the step count, and what comes next).
     std::vector<int> plan() {
         std::vector<int> p;
-        if (st.after_setup) {  // set up from a computer: D (and E); after an update: E only
+        if (st.after_setup) {  // set up from a computer: D (and E); after an update: the keep-up-to-date question, E
             if (device_asks_updates() || st.updates_shown) p.push_back(Updates);
+            if (content_due_now() || st.content_shown) p.push_back(ContentAsk);  // before E, never beside it
             if (cloud_needed() || st.cloud_shown) p.push_back(Cloud);
             return p;
         }
@@ -452,7 +494,8 @@ namespace {
         std::vector<int> p = plan();
         auto it = std::find(p.begin(), p.end(), step_of(st.step));
         // E on its own after an update isn't setup: no step count.
-        if (st.after_setup && p.size() == 1 && step_of(st.step) == Cloud) return "CLOUD SYNC";
+        if (st.after_setup && step_of(st.step) == Cloud && (p.size() == 1 || p.front() == ContentAsk)) return "CLOUD SYNC";
+        if (st.after_setup && step_of(st.step) == ContentAsk) return "UPDATES";
         std::string head = st.builder ? "BLITZ BUILDER" : "SETUP";
         // A, the first screen: how many steps follow depends on its answer (a PS5 has its own), so no count there.
         if (it == p.end() || step_of(st.step) == Where) return head;
@@ -522,6 +565,7 @@ namespace {
     void do_exit() {
         log("abandoned at=%s", step_names[st.step]);
         if (st.step == Cloud) cloud_answer(ca::Answer::NotNow);  // Exit on E: asked again after a later update
+        if (st.step == ContentAsk) content_answer(cx::Answer::No);  // Exit: as No (it's asked once)
         blitz::export_screen_close();
         blitz::firstrun_ui::hide();
         bool leave = st.export_started_game && ultramodern::is_game_started();  // as do_finish: not into the export's game
@@ -536,6 +580,9 @@ namespace {
     }
 
     void do_finish(const char* target) {
+        // A fresh install's setup asked the same in Updates and reports: the 1.0.6 question is settled (content_ask.h).
+        if (!welcomed() && !flag("content_ask_done")) set_flag("content_ask_done", true);
+        content_cached = -1;
         set_flag("welcomed", true);
         set_flag("setup_ask_updates", false);
         // Finished without E (a path that doesn't play here, Cloud Sync on, or not in this build): this version counts as
@@ -733,11 +780,11 @@ namespace {
 #if defined(BLITZ_IOS)
                                  "It makes this app again with your ROM and setup inside: install that one, and New Blitz "
                                  "starts ready to play.\n\n"
-                                 "No computer? Pick a File Instead: your NFL Blitz 2000 ROM, the USA cartridge, v1.1 (.z64, "
+                                 "No computer? Pick a File Instead: your NFL Blitz 2000 ROM, the USA cartridge, v1.1 or v1.0 (.z64, "
                                  ".n64, .v64 or a .zip). Or in the Files app, share the ROM to New Blitz (Share \xE2\x86\x92 New Blitz)."
 #else
                                  "It sends the game, your ROM and your setup here over USB, and New Blitz starts ready to play.\n\n"
-                                 "No computer? Pick a File Instead: your NFL Blitz 2000 ROM, the USA cartridge, v1.1 (.z64, "
+                                 "No computer? Pick a File Instead: your NFL Blitz 2000 ROM, the USA cartridge, v1.1 or v1.0 (.z64, "
                                  ".n64, .v64 or a .zip)."
 #endif
                     );
@@ -745,14 +792,14 @@ namespace {
                     break;
                 }
                 s = base("Load your NFL Blitz 2000 ROM",
-                         std::string("The USA cartridge, v1.1 (.z64, .n64, .v64 or a .zip).\n") +
+                         std::string("The USA cartridge, v1.1 or v1.0 (.z64, .n64, .v64 or a .zip).\n") +
                              (blitz::platform::desktop ? "New Blitz keeps its own copy. It never leaves this computer."
                                                        : "New Blitz keeps its own copy. It never leaves this device."));
                 s.actions = {act("Load ROM", "load-rom", [] { pick_rom(); })};
                 break;
             case RomBad:
                 s = base("That ROM didn't work", st.rom_problem);
-                if (st.rom_tries >= 4) s.note = "The right file is NFL Blitz 2000 for the N64, USA, version 1.1.";
+                if (st.rom_tries >= 4) s.note = "The right file is NFL Blitz 2000 for the N64, USA, version 1.1 or 1.0.";
                 s.actions = {act("Try Another", "try-another", [] { pick_rom(); })};
                 break;
             case Season:
@@ -838,16 +885,18 @@ namespace {
                     // A first run's defaults: rosters ticked, reports not (§12.1, §12.3). Run again (Blitz Builder), what's set now.
                     st.updates_read = true;
                     st.reports = blitz::crash_reports_on();
-                    if (flag("setup_updates_asked")) st.rosters = blitz::live_rosters_on();
+                    if (flag("setup_updates_asked")) st.rosters = blitz::content_updates_on();
                 }
-                bool rosters_row = modern() && !original_chosen() && blitz::season_content();
+                // The same switch brings the posted paks since 1.0.6 (season_pak.cpp), so it's asked wherever there's a
+                // server to bring them, in either game.
+                bool rosters_row = modern() && (blitz::season_content() || !blitz::pak_server().empty());
                 s = base("Updates and reports", rosters_row ? "Two choices. Change them any time in Settings."
                                                             : "Change it any time in Settings.");
                 if (rosters_row) {
                     s.checks.push_back(Check{
                         "Keep rosters and uniforms up to date",
-                        "New lineups download in the background when the app starts, on Thursdays and Saturdays in season, "
-                        "and a newer 2026 Season (uniforms, art) goes in at the next start.",
+                        "New lineups download when the app starts, on Thursdays and Saturdays in season, and New Blitz's "
+                        "add-on paks install and update themselves (big ones wait for Wi-Fi).",
                         [] { return st.rosters; }, [](bool v) { st.rosters = v; }});
                 }
                 s.checks.push_back(Check{
@@ -862,6 +911,9 @@ namespace {
 #if BLITZ_MODERN
                             if (st.rosters) blitz::rosters_check_again();
 #endif
+                            if (st.rosters) blitz::pak_sync_start(false, {}, nullptr);  // the posted paks, now
+                            set_flag("content_ask_done", true);  // answered here: the 1.0.6 question isn't needed
+                            content_cached = -1;
                         }
                         blitz::set_crash_reports(st.reports);
                         set_flag("setup_updates_asked", true);
@@ -873,6 +925,24 @@ namespace {
                 };
                 break;
             }
+            case ContentAsk:
+                st.content_shown = true;
+                // The owner's words (2026-11-27): Yes turns it on and syncs now; No leaves it off and isn't asked again.
+                s = base("Keep rosters, uniforms and new paks up to date?",
+                         "New lineups during the season, and New Blitz's add-on paks (the 2026 Season, the league paks), "
+                         "download and update by themselves when the app starts. On mobile data, big downloads wait for "
+                         "Wi-Fi.\n\nChange it any time in Settings \xE2\x86\x92 Teams.");
+                s.actions = {
+                    act("Yes", "yes", [] {
+                        content_answer(cx::Answer::Yes);
+                        next();
+                    }),
+                    act("No", "no", [] {
+                        content_answer(cx::Answer::No);
+                        next();
+                    }),
+                };
+                break;
             case Cloud:
                 st.cloud_shown = true;
                 // The owner's words (2026-11-27). Yes: Cloud Sync's screen, then setup goes on (CloudWait).
@@ -1141,7 +1211,7 @@ namespace {
             blitz::firstrun_ui::Screen s;
             // BRANDING: app name, the setup tool's name, PS5 app folder /data/blitzrecomp
             s.title = "Add your NFL Blitz 2000 ROM";
-            s.body = "New Blitz needs your own copy of NFL Blitz 2000 for the N64: the USA cartridge, v1.1. No game files "
+            s.body = "New Blitz needs your own copy of NFL Blitz 2000 for the N64: the USA cartridge, v1.1 or v1.0. No game files "
                      "come with it.\n\n"
                      "From a computer: open New Blitz on your Mac, Windows or Linux computer \xE2\x86\x92 Blitz Builder "
                      "\xE2\x86\x92 PS5. It sends your ROM and your setup. Close New Blitz here first: it starts again "
@@ -1267,7 +1337,8 @@ namespace blitz {
         abandoned = false;
         st = State{};
         cloud_moment_cached = -1;  // looked at afresh (Cloud Sync may have been turned on since)
-        st.builder = welcomed() && !device_asks_updates() && !cloud_update_due();
+        content_cached = -1;
+        st.builder = welcomed() && !device_asks_updates() && !cloud_update_due() && !content_due_now();
         st.after_setup = welcomed() && !st.builder;
         setup_started();
         if (where >= 0) st.where = where;
@@ -1328,7 +1399,7 @@ namespace blitz {
 
     // Whether the launcher's Finish Setup row shows (and the launcher shows at all at start: config.cpp).
     // Also while E is due after an update: this start opens on the launcher for it (config.cpp skip_launcher).
-    bool firstrun_unfinished() { return !welcomed() || device_asks_updates() || cloud_update_due(); }
+    bool firstrun_unfinished() { return !welcomed() || device_asks_updates() || cloud_update_due() || content_due_now(); }
 
     void firstrun_finish_setup_row() { firstrun_start("finish-setup-row"); }
 

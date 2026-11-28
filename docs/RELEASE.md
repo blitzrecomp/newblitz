@@ -138,3 +138,57 @@ The team's PS5 went back to stock after the last 1.0.2 test (2026-11-17), so no 
 - **Keep the stable build working:** later Mac apps still send it its first setup (rules, season, general settings) and
   the season server still serves it rosters. Change those formats only in ways an older build reads (add fields, never
   rename or remove), and keep `paks/catalog.json` and the rosters manifest readable by it.
+
+## Release in a fresh worktree (2026-11-28)
+
+The release branch is checked out in the main working copy, so build from a second copy of it:
+
+1. `git worktree add --detach <dir> <branch>`, then in it `git submodule update --init --recursive` (before
+   `tools/apply_patches.sh`).
+2. Link what a worktree lacks, from the main checkout's `build/`: `baserom.z64`, `teamplus.z64`, `rom_versions` (without
+   these every target fails at rom-verify), `ps5_stable` (the pinned PS5 kits) and `appimage` (the AppImage runtime),
+   plus every toolchain: `.venv`, `build/{android,ios}/{deps,prefix}`,
+   `build/deps`, `build/xwin*`, `build/linux/sysroot-x86_64`, the PS5 set (`sdk-m`, `prefix`, `deps`, `radv*`, `host`,
+   `pydeps`, `sdk`, `unleashed`), the roster/hub/key files and `build/ios_team`. Copy `build/engine32/houston`, don't
+   link it (the link would end up inside the IPA). A half-built `build/ps5/prefix` left in the worktree breaks the PS5
+   step.
+3. The PS5 build rejects versions that aren't `major.minor.patch` (no `-rc`).
+4. For the secrets the scan reads, set `BLITZ_SECRETS_DIR=<main checkout>/build`.
+5. A release dry run (`RELEASE_NO_ANDROID=1` skips the keystore) builds all six platforms and scans; the owner's
+   `make release` is the real one, with the keystore password.
+
+## Posting paks to the catalog (1.0.6)
+
+Paks are separate from the app's release: the season pak and league paks reach every installed version through the
+season server's catalog (`blitz-paks/1`, docs/design/SEASON_PAK.md). Post them after the release build exists, and
+only on the owner's say (a deploy changes what every player downloads).
+
+1. **Set `MIN_BUILD` to the release build** (the build number `make release` prints for the version), so older apps that
+   can't read a pak's keys ignore it instead of refusing it. League paks default to 950; the keys they use need 968
+   (uv_overrides), 981 (per-cap sleeves) and 994 (cart_files).
+2. **Build:** `make pak-2026 MIN_BUILD=<build>` for the season (from the private app's content), and for each league
+   `make pak-league ID=<id> TITLE="<title>" PACK=<pack folder> VERSION=<yyyy.mm.dd[.n]> MIN_BUILD=<build>
+   SUMMARY="..."` (CFL: `ID=cfl TITLE="CFL 2026"`; Pac-12: `ID=pac12 TITLE="Pac-12 2026"`). Each writes
+   `build/paks/<id>-<version>.nbpak` and puts its entry into `build/paks/catalog.json`, keeping the others.
+   `tools/make_season_pak.py check <file>` runs the app's own checks. The recipes (importer commands) are in
+   SEASON_PAK.md.
+3. **Check against old builds** with branch pak-compat's harness (docs/STATE.md, "Test recipes") before posting.
+4. **Publish:** `HUB_UPLOAD_SECRET=... tools/publish_pak.sh` uploads every pak the catalog names that's in
+   `build/paks`, then the catalog (the Worker refuses a catalog naming a pak it doesn't have). Versioned names are
+   cached for good: change the version for any changed pak. `"available": false` or dropping an entry is the kill
+   switch (installed copies keep playing).
+5. **Look at the live catalog afterwards** (`<season server>/paks/catalog.json`) and run a fresh public app against it
+   once.
+
+## The PS5 stable-kit pin step
+
+`make release` refuses to start unless the PS5 kit is pinned and its eboot matches `STABLE.txt`. Before the owner runs
+it:
+
+1. Build the version's PS5 kit as a release build (`make ps5-modern BLITZ_CONTENT=public RELEASE=1 VERSION=x.y.z`).
+2. Put it in `build/ps5_stable/x.y.z-build<N>/` (`PPSA99961/`, `launch.elf`, and `STABLE.txt`: its version and build,
+   the eboot's sha256, the commit, and `tested: no (...)` while it hasn't run on a console).
+3. Point `build/ps5_stable/current` at it. Without this the release defaults the PS5 to the previous pinned version
+   (1.0.5's build 942 for the 1.0.6 run), which then doesn't match the version being released. Older kits (805, 844,
+   942) stay in the folder to go back to.
+4. A kit with `tested: no` makes Blitz Builder say only "Sends New Blitz x.y.z (build N)."

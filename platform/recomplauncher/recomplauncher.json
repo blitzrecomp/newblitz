@@ -5,9 +5,12 @@
   "name": "New Blitz 2027",
   "game": {
     "kind": "iso",
-    "label": "Your NFL Blitz 2000 cartridge dump: the USA v1.1 (.z64, .n64, .v64 or a .zip holding one)",
+    "label": "Your NFL Blitz 2000 cartridge dump: the USA v1.1 or v1.0 (.z64, .n64, .v64 or a .zip holding one)",
     "check": { "ids": ["NBIE"] },
-    "dumps": [{ "name": "NFL Blitz 2000 (USA) (Rev 1)", "size": 16777216, "crc32": "b591cfea" }]
+    "dumps": [
+      { "name": "NFL Blitz 2000 (USA) (Rev 1)", "size": 16777216, "crc32": "b591cfea" },
+      { "name": "NFL Blitz 2000 (USA)", "size": 16777216, "crc32": "7f471773" }
+    ]
   },
   "start": {
     "program": ["New Blitz.app/Contents/MacOS/BlitzRecompiled", "New Blitz/New Blitz.exe", "New Blitz/New Blitz"],

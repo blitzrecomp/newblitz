@@ -33,6 +33,12 @@
 #include "../cart/cart_season.h"
 namespace blitz {
     std::vector<std::string> team_franchises();  // content_pack_tp.cpp
+    bool league_active();                        // content_pack_tp.cpp: a league pak (2-30 teams, Arcade)
+    bool league_plays_mode(int mode);            // its main-menu modes (0 Arcade, 1 Tournament, 2 Season, 3 Play Editor)
+    int team_of_slot(int slot);                  // engine32.cpp: the store's team in a game slot (a league repeats)
+    std::string active_pack_id();                // content_pack_tp.cpp
+    uint16_t league_cart_part(uint16_t id);      // content_pack_tp.cpp: a set's "cart_files" texture for its own file
+    size_t league_cart_files();
 }
 namespace {
 #include "cart_season.inc"  // tools/cart/build.sh: the cart's Advanced season
@@ -398,16 +404,50 @@ namespace {
         for (uint32_t i = 0; i < ovl_rom_end - ovl_rom; i++) ram_byte(ovl_ram + i) = rom[ovl_rom + i];
         blitz_on_dma_done(ram.data(), ovl_rom_end, (int32_t)ovl_ram_end);
         const td::Store& st = td::store();
-        if (st.slots().size() < (size_t)slots) return "the teams aren't loaded";
-        std::vector<td::Team> teams(st.slots().begin(), st.slots().begin() + slots);
+        // A league pak (2-30 teams): its teams over and over through the game's 31 slots (slot s holds team s mod n,
+        // as engine32.cpp does in the app), so whatever slot the game picks on its own is one of them.
+        const int have = (int)st.slots().size();
+        const bool league = !block && blitz::league_active() && have >= 2 && have < slots;
+        if (have < slots && !league) return "the teams aren't loaded";
+        auto team_in = [&](int s) { return league ? s % have : s; };
+        // Each league team's own slot: its highest (slots 22-30 are the ones the game's right-helmet list can name, so
+        // team select, the CPU ladder and the VS screen use those). The NFL's: its slot.
+        auto home_slot = [&](int t) { return league ? t + have * ((slots - 1 - t) / have) : t; };
+        std::vector<td::Team> teams;
+        for (int s = 0; s < slots; s++) teams.push_back(st.slots()[(size_t)team_in(s)]);
         std::vector<std::vector<bool>> clash(slots, std::vector<bool>(slots));
         for (int a = 0; a < slots; a++)
-            for (int b = 0; b < slots; b++) clash[(size_t)a][(size_t)b] = st.clashes((size_t)a, (size_t)b);
+            for (int b = 0; b < slots; b++) clash[(size_t)a][(size_t)b] = st.clashes((size_t)team_in(a), (size_t)team_in(b));
+        // The league's CPU ladder (main) and its last picks (ovl_b), as the pack apply just wrote them on the scratch
+        // RDRAM: put back after each segment is read in again below.
+        constexpr uint32_t ladder = 0x802AB0E0, ladder_size = 9 * 0x14, ladder_done = 0x80338C28, ladder_done_size = 16;
+        std::vector<uint8_t> kept_ladder, kept_done;
+        if (league) {
+            // The pack's ladder names league teams 0..n-1: their own slots instead (words, -1 ends a tier).
+            auto slot_word = [&](uint32_t a, std::vector<uint8_t>& out) {
+                uint32_t v = (uint32_t)ram_byte(a) << 24 | (uint32_t)ram_byte(a + 1) << 16 | (uint32_t)ram_byte(a + 2) << 8 | ram_byte(a + 3);
+                if ((int32_t)v >= 0 && (int32_t)v < have) v = (uint32_t)home_slot((int)v);
+                for (int k = 0; k < 4; k++) out.push_back((uint8_t)(v >> (24 - 8 * k)));
+            };
+            for (uint32_t i = 0; i < ladder_size; i += 4) slot_word(ladder + i, kept_ladder);
+            for (uint32_t i = 0; i < ladder_done_size; i += 4) slot_word(ladder_done + i, kept_done);
+        }
         // Each team's own 20 ids (10 parts x home, away) before the 2026 sets go in: the cart picker's 1999.
         own.assign(teams.size(), {});
         for (size_t t = 0; t < teams.size(); t++)
             for (int i = 0; i < 20; i++) own[t][(size_t)i] = teams[t].uniform[(size_t)(i / 2)][(size_t)(i % 2)];
         uniforms = blitz::uniform_export_2026(teams);
+        // A league set's cart textures (pack.json "cart_files"): drawn for the stock coordinates, since the cart's code
+        // can't apply the app's own (uv_overrides.cpp). The app goes on drawing the set's own files.
+        int swapped = 0;
+        auto cart_id = [&](uint16_t& id) { uint16_t c = blitz::league_cart_part(id); swapped += c != id; id = c; };
+        for (td::Team& t : teams)
+            for (auto& part : t.uniform)
+                for (uint16_t& id : part) cart_id(id);
+        for (auto& ids : own)
+            for (uint16_t& id : ids) cart_id(id);
+        if (blitz::league_cart_files())
+            fprintf(stderr, "[export] cart_files: %zu set part(s), %d slot id(s) swapped\n", blitz::league_cart_files(), swapped);
         for (td::Team& t : teams)
             for (td::Team::Player& p : t.players) p.skin = shade(p.skin);
         for (const td::Team& t : teams) abbrs.push_back(std::string(t.code.data(), strnlen(t.code.data(), t.code.size())));
@@ -417,8 +457,8 @@ namespace {
             for (char& c : out) c = (char)std::tolower((unsigned char)c);
             return out;
         };
-        order.resize(slots);
-        for (int i = 0; i < slots; i++) order[(size_t)i] = i;
+        order.resize((size_t)(league ? have : slots));  // a league: each of its teams once (order_orig.asm's N)
+        for (int i = 0; i < (int)order.size(); i++) order[(size_t)i] = home_slot(i);
         std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
             const td::Team &x = teams[(size_t)a], &y = teams[(size_t)b];
             return std::make_pair(lower(x.city_name.data(), x.city_name.size()), lower(x.select.data(), x.select.size())) <
@@ -437,6 +477,10 @@ namespace {
         for (const Seg& sg : segs) {
             for (uint32_t i = 0; i < sg.rom_end - sg.rom; i++) ram_byte(sg.ram + i) = rom[sg.rom + i];
             td::original::write(ram.data(), sg.seg, cart);
+            if (league && sg.seg == td::original::Segment::Main)
+                for (uint32_t i = 0; i < ladder_size; i++) ram_byte(ladder + i) = kept_ladder[i];
+            if (league && sg.seg == td::original::Segment::OvlB)
+                for (uint32_t i = 0; i < ladder_done_size; i++) ram_byte(ladder_done + i) = kept_done[i];
             if (block && sg.seg == td::original::Segment::Main) {
                 // The 1-player CPU ladder (main 0x802AB0E0: 9 tiers of 4, -1 ended): Houston joins the last, with Denver.
                 constexpr uint32_t last_tier = 0x802AB0E0 + 8 * 0x14;
@@ -580,6 +624,24 @@ namespace {
 #endif
 
 #if BLITZ_ENGINE_ORIGINAL
+    // A league pak's main menu (as content_pack_tp.cpp's blitz_league_menu in the app): the cursor stays on the modes
+    // it plays, Arcade and maybe Tournament (main func_80256AA0's UP wrap 3 and DOWN limit 4 become its last mode), and
+    // the names of the others are blanked. Play Editor can't sit past the gap Season leaves, so a cart goes without it.
+    // Returns what went in ("" for an unknown ROM).
+    std::string install_league_menu(std::vector<uint8_t>& rom) {
+        Rom r{rom};
+        constexpr uint32_t up_wrap = 0x80257074, down_limit = 0x802570D0, names = 0x8028B978;
+        if (r.get(r.at(up_wrap)) != 0x24020003 || r.get(r.at(down_limit)) != 0x28420004) return "";
+        const int last = blitz::league_plays_mode(1) ? 1 : 0;
+        r.put(r.at(up_wrap), Rom::imm(0x24020003, last));
+        r.put(r.at(down_limit), Rom::imm(0x28420004, last + 1));
+        for (int mode = last + 1; mode < 4; mode++) {
+            uint32_t text = r.get(r.at(names + 4 * (uint32_t)mode));
+            if (text >= 0x80248F00 && text < 0x802AD1A0) rom[r.at(text)] = 0;  // main's data
+        }
+        return last ? "Arcade and Tournament only" : "Arcade only";
+    }
+
     // Team select in name order on the original game's ROM (tools/rom_picker/order_orig.asm), after patch_options
     // (Choose CPU Opponent's reset may be at the team select start site: ours goes on to it).
     bool install_order(std::vector<uint8_t>& rom, const std::vector<int>& order) {
@@ -589,12 +651,18 @@ namespace {
         for (const auto& [v, w] : sites)
             if (r.get(Rom::ovl_b(v)) != w) return false;
         uint32_t start = r.get(Rom::ovl_b(0x802F85E0));
-        if ((start >> 26) != 3 || order.size() != 31) return false;  // a jal there (the game's, or the opponent list's)
+        constexpr size_t game_slots = 31;
+        // A jal there (the game's, or the opponent list's); 31 teams, or a league's 2-30 repeated through the slots.
+        if ((start >> 26) != 3 || order.size() < 2 || order.size() > game_slots) return false;
         for (size_t i = 0; i < std::size(rom_order_orig_code); i++) r.put(r.at(rom_order_orig_vram) + 4 * i, rom_order_orig_code[i]);
         r.put(r.at(rom_order_orig_next), 0x80000000u | ((start & 0x03FFFFFFu) << 2));
-        for (size_t p = 0; p < order.size(); p++) {
-            rom[r.at(rom_order_orig_order) + p] = (uint8_t)order[p];
-            rom[r.at(rom_order_orig_pos) + (size_t)order[p]] = (uint8_t)p;
+        rom[r.at(rom_order_orig_n)] = (uint8_t)order.size();
+        for (size_t p = 0; p < order.size(); p++) rom[r.at(rom_order_orig_order) + p] = (uint8_t)order[p];
+        for (size_t slot = 0; slot < game_slots; slot++) {  // each slot's place: its team's (order lists one slot each)
+            const size_t n = order.size();
+            size_t p = 0;
+            while (p < n && (size_t)order[p] % n != slot % n) p++;
+            rom[r.at(rom_order_orig_pos) + slot] = (uint8_t)(p < n ? p : 0);
         }
         r.put(Rom::ovl_b(0x802F85E0), Rom::jal(rom_order_orig_reset));
         r.put(Rom::ovl_b(0x802F9B74), Rom::jal(rom_order_orig_moved));
@@ -602,6 +670,10 @@ namespace {
         r.put(Rom::ovl_b(0x802FA454), Rom::jal(rom_order_orig_above_n));
         r.put(Rom::ovl_b(0x802FA47C), Rom::jal(rom_order_orig_below_0));
         r.put(Rom::ovl_b(0x802FA53C), Rom::jal(rom_order_orig_below_n));
+        // A league cart with Choose CPU Opponent: the list's random first pick lands on that team's own slot too, as a
+        // jump does (opponent.asm ORDER_AT), or the VS screen showed a low slot's team with its left helmet mirrored.
+        if (order.size() < game_slots && r.get(r.at(rom_opp_vram3)) == rom_opp_code3[0])
+            r.put(r.at(rom_opp_order_at), rom_order_orig_order);
         return true;
     }
 #endif
@@ -628,9 +700,11 @@ namespace {
         int total = 0;
         for (size_t t = 0; t < own.size(); t++) {
             int n = 0;
-            for (int k = 0; k < blitz::uniform_set_count((int)t) && n < 10; k++) {
+            const int team = blitz::team_of_slot((int)t);  // a league's teams repeat through the slots
+            for (int k = 0; k < blitz::uniform_set_count(team) && n < 10; k++) {
                 uint16_t parts[10];
-                blitz::uniform_set_parts(live, (int)t, k, own[t].data(), parts);
+                blitz::uniform_set_parts(live, team, k, own[t].data(), parts);
+                for (uint16_t& id : parts) id = blitz::league_cart_part(id);  // an alternate's cart textures ("cart_files")
                 if (std::any_of(std::begin(parts), std::end(parts), [&](uint16_t id) { return files && id > files; })) continue;
                 for (int p = 0; p < 10; p++) {
                     rom[table + t * 0x100 + (size_t)n * 0x18 + 2 * (size_t)p] = (uint8_t)(parts[p] >> 8);
@@ -683,7 +757,8 @@ namespace {
         // Houston on the cart when every site the 32-team cart changes is the game's; else the 31 teams. The 2026
         // season with every uniform set goes to the Expansion Pak (Full); with the 2026 home and away only, under the
         // cart32 block on any N64 (Lite: Season), whose heap is then smaller.
-        const bool houston = opt("export_teams32") && cart32_ready(rom);
+        const bool league = blitz::league_active();  // a league pak: its teams through the 31 slots, no Houston, no Season
+        const bool houston = !league && opt("export_teams32") && cart32_ready(rom);
         const bool every_set = opt("export_uniforms");
         const bool lean = houston && opt("export_season") && !every_set;
         // The file list a plain N64 keeps in its heap: only the files this kind of cart uses (game_init.cpp's order).
@@ -785,7 +860,11 @@ namespace {
                                               : "the 2026 season (32 teams, 8 divisions; with an Expansion Pak)");
             extras.push_back("team select A-Z");
         }
-        else if (install_order(rom, order)) extras.push_back("team select A-Z");
+        else if (install_order(rom, order)) extras.push_back(league ? "team select over the league's " + std::to_string(order.size()) + " teams" : "team select A-Z");
+        if (league) {
+            std::string modes = install_league_menu(rom);
+            if (!modes.empty()) extras.push_back(modes);
+        }
         int picker_sets = 0;
         if (opt("export_picker")) {
             namespace c = blitz::engine32::cart;
@@ -818,6 +897,14 @@ namespace {
 #else
         // BRANDING: exported ROM file names
         std::string name = kind == 2 ? "Classic Blitz Custom" : "Classic Blitz";
+#endif
+#if BLITZ_ENGINE_ORIGINAL
+        if (blitz::league_active()) {  // a league pak's cart says whose: "New Blitz CFL ..."
+            std::string id = blitz::active_pack_id();
+            for (char& c : id) c = (char)std::toupper((unsigned char)c);
+            // BRANDING: exported ROM file names
+            name = "New Blitz " + id;
+        }
 #endif
         // Each export its own name (team): an emulator that has the last one open keeps it, and nothing is overwritten.
         {

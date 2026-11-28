@@ -38,6 +38,8 @@ namespace blitz {
     void post_notice(const std::string& msg);  // notices.cpp
     bool advanced_mode();                      // adv_mode.cpp
     bool league_active();                      // content_pack_tp.cpp: a league pak (no Season)
+    void season_new_started();                 // season_settings.cpp
+    void league_notice(const std::string& header, const std::string& msg);  // season_settings.cpp: our modal
 }
 
 extern "C" {
@@ -168,6 +170,7 @@ extern "C" {
     // one when the teams allow it. The reset leaves 0xFF in team 31's stats (NaN as floats): zero them.
     void blitz_s32_new_season(uint8_t* rdram) {
         if (blitz_adv) return;
+        blitz::season_new_started();  // season_settings.cpp: "Standard or Advanced season?" (league_select.cpp)
         if (capable) {
             for (uint32_t a = team31_stats; a < team31_stats_end; a++) wr8(rdram, a, 0);
             for (uint32_t k = 0; k < 4; k++) wr8(rdram, marker + k, marker_bytes[k]);
@@ -183,8 +186,8 @@ extern "C" {
         if (marked && !capable) {
             // A 32-team season can't run on a 31-team league: leave no season loaded.
             wr8(rdram, rec_week, 0xFF);
-            blitz::post_notice("This season has all 32 teams, but the loaded game data doesn't. "
-                               "Load it with the 2026 Season's rosters (Settings → Teams → Rosters).");
+            blitz::league_notice("Season", "This season has all 32 teams, but the loaded game data doesn't. "
+                                 "Load it with NFL 2026 and the 2026 Season's rosters (Settings → Teams: League, Rosters).");
         }
         set_mode(rdram, marked && capable);
     }

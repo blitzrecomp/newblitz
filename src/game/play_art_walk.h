@@ -167,105 +167,161 @@ inline Route walk(const Read32& rd, uint32_t script, Point start, bool mirrored,
 }
 
 // ---- Geometry ----------------------------------------------------------------------------------------------------
+//
+// The look follows the playbook's own cards (play select): a fat line, lit from the top left so its lower-right edge is
+// a darker shade of its colour, a black drop shadow to the lower right, and a broad barbed arrowhead.
 
 struct Vtx {
     float x, y, z;  // world units
     uint32_t rgba;
 };
 
-// A few vertices and their triangles, drawn from one vertex load.
+// Vertices and their triangles, drawn from one vertex load (at most 32 vertices).
 struct Prim {
-    std::array<Vtx, 4> v{};
-    int nv = 0;
-    std::array<std::array<uint8_t, 3>, 2> t{};
-    int nt = 0;
+    std::vector<Vtx> v;
+    std::vector<std::array<uint8_t, 3>> t;
 };
 
 struct Style {
-    float half_width = 2.2f;   // world units (a 0.55-yard ribbon)
-    float head_length = 9.0f;  // the arrowhead
-    float head_half = 5.5f;
-    float lift = 0.8f;         // above the turf (y = 0)
+    float half_width = 3.0f;    // world units (7.8 a yard): the line
+    float head_length = 14.0f;  // the arrowhead, tip to barbs
+    float head_half = 10.0f;    // half its span at the barbs
+    float notch = 0.4f;         // the barbs swept back: the notch sits this far (of head_length) ahead of them; 0 a plain triangle
+    float shade = 0.5f;         // the shadow side's colour, times the line's (1: flat)
+    float shadow = 2.6f;        // the drop shadow's offset, world units down and right on screen (0: none)
+    float shadow_rim = 0.8f;    // and how much wider than the line it is, each side
+    int shadow_alpha = 200;     // at the line's full alpha
+    float lift = 0.8f;          // above the turf (y = 0)
 };
 
-// A ribbon along a world polyline (x, z pairs) with an arrowhead at its end: a quad per leg, mitred where legs meet
-// (a wedge fills the outside of a turn too sharp to mitre), and a triangle for the head.
-inline void ribbon(const std::vector<std::array<float, 2>>& in, uint32_t rgba, const Style& s, std::vector<Prim>& out) {
-    std::vector<std::array<float, 2>> p;
-    for (const auto& q : in) {
-        if (p.empty() || std::hypot(q[0] - p.back()[0], q[1] - p.back()[1]) > 0.5f) p.push_back(q);
-    }
-    if (p.size() < 2) return;
-    // The last leg stops where the head starts.
-    auto& tip = p.back();
-    const auto& before = p[p.size() - 2];
-    float lx = tip[0] - before[0], lz = tip[1] - before[1], last = std::hypot(lx, lz);
-    float head = std::min(s.head_length, last * 0.6f);
-    std::array<float, 2> point = tip, dir{lx / last, lz / last};
-    tip = {tip[0] - dir[0] * head, tip[1] - dir[1] * head};
+// Where the light comes from, in the world: the unit direction the drop shadow falls (screen down and right: towards the
+// offense's own backfield and its right). Zero: no shadow, no shading.
+struct Light {
+    float x = 0.0f, z = 0.0f;
+};
+
+using Path2 = std::vector<std::array<float, 2>>;
+
+inline uint32_t scaled(uint32_t rgba, float f) {
+    auto ch = [&](int s) { return (uint32_t)std::clamp((int)std::lround((float)((rgba >> s) & 0xFFu) * f), 0, 255) << s; };
+    return ch(24) | ch(16) | ch(8) | (rgba & 0xFFu);
+}
+
+// A vertex's colour: full on the lit side, shade times it on the shadow side (by its offset from the line's centre).
+inline uint32_t lit(uint32_t rgba, float ox, float oz, const Light& light, float shade) {
+    const float len = std::hypot(ox, oz);
+    if (shade >= 1.0f || (light.x == 0.0f && light.z == 0.0f)) return rgba;
+    if (len < 1e-4f) return scaled(rgba, 0.5f + 0.5f * shade);
+    const float t = std::clamp(0.5f + 0.5f * (ox * light.x + oz * light.z) / len, 0.0f, 1.0f);
+    return scaled(rgba, 1.0f - (1.0f - shade) * t);
+}
+
+// A strip along a polyline (x, z pairs, legs over 0.5 units): two vertices a joint, mitred where the turn allows; a turn
+// over 120 degrees gets square ends and a wedge over the outside of the joint. back extends the start backwards.
+inline void strip(const Path2& p, float hw, float back, uint32_t rgba, const Light& light, float shade, float lift,
+                  std::vector<Prim>& out) {
     const size_t n = p.size();
-    // Each leg's unit direction and its left normal.
+    if (n < 2) return;
     std::vector<std::array<float, 2>> t(n - 1), nrm(n - 1);
     for (size_t i = 0; i + 1 < n; i++) {
         float x = p[i + 1][0] - p[i][0], z = p[i + 1][1] - p[i][1], len = std::max(std::hypot(x, z), 1e-4f);
         t[i] = {x / len, z / len};
         nrm[i] = {-t[i][1], t[i][0]};
     }
-    // The offset at each end of each leg: mitred at a joint when the turn allows, square otherwise.
-    auto offset_at = [&](size_t joint, size_t leg) -> std::array<float, 2> {
-        const auto& m0 = nrm[leg];
-        if (joint == 0 || joint == n - 1) return {m0[0] * s.half_width, m0[1] * s.half_width};
-        const auto& a = nrm[joint - 1];
-        const auto& b = nrm[joint];
-        float mx = a[0] + b[0], mz = a[1] + b[1], ml = std::hypot(mx, mz);
-        if (ml < 1e-3f) return {m0[0] * s.half_width, m0[1] * s.half_width};
-        mx /= ml;
-        mz /= ml;
-        float c = mx * a[0] + mz * a[1];
-        if (c < 0.5f) return {m0[0] * s.half_width, m0[1] * s.half_width};  // over 120 degrees: square ends + wedge
-        return {mx * s.half_width / c, mz * s.half_width / c};
+    auto vtx = [&](float cx, float cz, float ox, float oz) { return Vtx{cx + ox, lift, cz + oz, lit(rgba, ox, oz, light, shade)}; };
+    // Runs of stations (a centre and its offset), split at the sharp joints.
+    struct Station {
+        float x, z, ox, oz;
     };
-    auto vtx = [&](float x, float z) { return Vtx{x, s.lift, z, rgba}; };
-    for (size_t i = 0; i + 1 < n; i++) {
-        auto o0 = offset_at(i, i), o1 = offset_at(i + 1, i);
-        Prim q;
-        q.v = {vtx(p[i][0] + o0[0], p[i][1] + o0[1]), vtx(p[i][0] - o0[0], p[i][1] - o0[1]),
-               vtx(p[i + 1][0] + o1[0], p[i + 1][1] + o1[1]), vtx(p[i + 1][0] - o1[0], p[i + 1][1] - o1[1])};
-        q.nv = 4;
-        q.t[0] = {0, 1, 2};
-        q.t[1] = {1, 3, 2};
-        q.nt = 2;
-        out.push_back(q);
-        // A joint too sharp to mitre: a wedge over the gap on each side (one of them lies inside the ribbon).
-        if (i + 2 < n) {
-            const auto& a = nrm[i];
-            const auto& b = nrm[i + 1];
-            float mx = a[0] + b[0], mz = a[1] + b[1], ml = std::hypot(mx, mz);
-            float c = ml < 1e-3f ? 0.0f : (mx * a[0] + mz * a[1]) / ml;
-            if (c < 0.5f) {
-                const auto& j = p[i + 1];
-                for (float side : {1.0f, -1.0f}) {
-                    Prim w;
-                    w.v[0] = vtx(j[0], j[1]);
-                    w.v[1] = vtx(j[0] + side * a[0] * s.half_width, j[1] + side * a[1] * s.half_width);
-                    w.v[2] = vtx(j[0] + side * b[0] * s.half_width, j[1] + side * b[1] * s.half_width);
-                    w.nv = 3;
-                    w.t[0] = {0, 1, 2};
-                    w.nt = 1;
-                    out.push_back(w);
-                }
+    std::vector<std::vector<Station>> runs(1);
+    runs[0].push_back({p[0][0] - t[0][0] * back, p[0][1] - t[0][1] * back, nrm[0][0] * hw, nrm[0][1] * hw});
+    for (size_t j = 1; j + 1 < n; j++) {
+        const auto& a = nrm[j - 1];
+        const auto& b = nrm[j];
+        float mx = a[0] + b[0], mz = a[1] + b[1], ml = std::hypot(mx, mz);
+        float c = ml < 1e-3f ? 0.0f : (mx * a[0] + mz * a[1]) / ml;
+        if (c >= 0.5f) {
+            runs.back().push_back({p[j][0], p[j][1], mx / ml * hw / c, mz / ml * hw / c});
+            continue;
+        }
+        runs.back().push_back({p[j][0], p[j][1], a[0] * hw, a[1] * hw});
+        runs.push_back({{p[j][0], p[j][1], b[0] * hw, b[1] * hw}});
+        Prim w;  // the wedge: the joint, and both legs' corners on each side
+        const float x = p[j][0], z = p[j][1];
+        w.v = {vtx(x, z, 0, 0), vtx(x, z, a[0] * hw, a[1] * hw), vtx(x, z, b[0] * hw, b[1] * hw), vtx(x, z, -a[0] * hw, -a[1] * hw),
+               vtx(x, z, -b[0] * hw, -b[1] * hw)};
+        w.t = {{0, 1, 2}, {0, 3, 4}};
+        out.push_back(w);
+    }
+    runs.back().push_back({p[n - 1][0], p[n - 1][1], nrm[n - 2][0] * hw, nrm[n - 2][1] * hw});
+    // A run of m stations is 2m vertices; one load takes 16 stations, the next starts at the last one again.
+    for (const auto& r : runs) {
+        for (size_t s0 = 0; s0 + 1 < r.size(); s0 += 15) {
+            const size_t s1 = std::min(r.size(), s0 + 16);
+            Prim q;
+            for (size_t s = s0; s < s1; s++) {
+                q.v.push_back(vtx(r[s].x, r[s].z, r[s].ox, r[s].oz));
+                q.v.push_back(vtx(r[s].x, r[s].z, -r[s].ox, -r[s].oz));
             }
+            for (uint8_t k = 0; k + 1 < (uint8_t)(s1 - s0); k++) {
+                q.t.push_back({(uint8_t)(2 * k), (uint8_t)(2 * k + 1), (uint8_t)(2 * k + 2)});
+                q.t.push_back({(uint8_t)(2 * k + 1), (uint8_t)(2 * k + 3), (uint8_t)(2 * k + 2)});
+            }
+            out.push_back(q);
         }
     }
-    const auto& nl = nrm.back();
-    Prim h;
-    h.v[0] = vtx(tip[0] + nl[0] * s.head_half, tip[1] + nl[1] * s.head_half);
-    h.v[1] = vtx(tip[0] - nl[0] * s.head_half, tip[1] - nl[1] * s.head_half);
-    h.v[2] = vtx(point[0], point[1]);
-    h.nv = 3;
-    h.t[0] = {0, 1, 2};
-    h.nt = 1;
-    out.push_back(h);
+}
+
+// A route: a line along a world polyline (x, z pairs) with a barbed arrowhead at its end, over its drop shadow.
+inline void ribbon(const Path2& in, uint32_t rgba, const Style& s, std::vector<Prim>& out, const Light& light = {}) {
+    Path2 p;
+    for (const auto& q : in) {
+        if (p.empty() || std::hypot(q[0] - p.back()[0], q[1] - p.back()[1]) > 0.5f) p.push_back(q);
+    }
+    if (p.size() < 2) return;
+    // The head, scaled down on a short last leg; the line stops at its notch.
+    auto& tip = p.back();
+    const auto& before = p[p.size() - 2];
+    const float lx = tip[0] - before[0], lz = tip[1] - before[1], last = std::hypot(lx, lz);
+    const float head = std::min(s.head_length, last * 0.6f), k = head / s.head_length;
+    const float half = s.head_half * k, notch = s.notch * head;
+    const std::array<float, 2> point = tip, dir{lx / last, lz / last}, nl{-dir[1], dir[0]};
+    const std::array<float, 2> barb_base{point[0] - dir[0] * head, point[1] - dir[1] * head};
+    tip = {barb_base[0] + dir[0] * notch, barb_base[1] + dir[1] * notch};
+    // tip, left barb, notch, right barb (offsets from the head's middle, for the shading)
+    const std::array<std::array<float, 2>, 4> hd{{point,
+                                                  {barb_base[0] + nl[0] * half, barb_base[1] + nl[1] * half},
+                                                  tip,
+                                                  {barb_base[0] - nl[0] * half, barb_base[1] - nl[1] * half}}};
+    const std::array<float, 2> mid{barb_base[0] + dir[0] * head * 0.4f, barb_base[1] + dir[1] * head * 0.4f};
+    auto head_prim = [&](float dx, float dz, float grow, uint32_t c, float shade) {
+        Prim q;
+        for (size_t i = 0; i < 4; i++) {
+            float ox = hd[i][0] - mid[0], oz = hd[i][1] - mid[1];
+            // Grown for the shadow's rim: out from the middle (the notch stays put).
+            const float ol = std::hypot(ox, oz);
+            const float gx = i == 2 || ol < 1e-4f ? 0.0f : ox / ol * grow, gz = i == 2 || ol < 1e-4f ? 0.0f : oz / ol * grow;
+            q.v.push_back(Vtx{hd[i][0] + dx + gx, s.lift, hd[i][1] + dz + gz, shade >= 1.0f ? c : lit(c, ox, oz, light, shade)});
+        }
+        if (s.notch > 0.0f) q.t = {{0, 1, 2}, {0, 2, 3}};
+        else q.t = {{0, 1, 3}};
+        out.push_back(q);
+    };
+    const bool shadow = s.shadow > 0.0f && (light.x != 0.0f || light.z != 0.0f);
+    if (shadow) {
+        const uint32_t a = (uint32_t)std::clamp((int)std::lround((float)s.shadow_alpha * (float)(rgba & 0xFFu) / 255.0f), 0, 255);
+        const float dx = light.x * s.shadow, dz = light.z * s.shadow;
+        Path2 o = p;
+        for (auto& q : o) q = {q[0] + dx, q[1] + dz};
+        // The line runs into the head a little so no gap shows at the notch.
+        o.back() = {o.back()[0] + dir[0] * s.shadow_rim, o.back()[1] + dir[1] * s.shadow_rim};
+        strip(o, s.half_width + s.shadow_rim, s.shadow_rim, a, {}, 1.0f, s.lift, out);
+        head_prim(dx, dz, s.shadow_rim * 1.5f, a, 1.0f);
+    }
+    Path2 f = p;
+    f.back() = {f.back()[0] + dir[0] * notch * 0.5f, f.back()[1] + dir[1] * notch * 0.5f};
+    strip(f, s.half_width, 0.0f, rgba, light, s.shade, s.lift, out);
+    head_prim(0, 0, 0, rgba, s.shade);
 }
 
 // ---- The display list ----------------------------------------------------------------------------------------------
@@ -306,12 +362,13 @@ inline std::vector<uint32_t> build_list(uint32_t base, const std::vector<Prim>& 
     size_t first = 0;
     int count = 0;
     for (size_t i = 0; i < prims.size(); i++) {
-        if (count + prims[i].nv > max_vertices_per_load) {
+        const int nv = (int)prims[i].v.size();
+        if (count + nv > max_vertices_per_load && i > first) {
             batches.emplace_back(first, i);
             first = i;
             count = 0;
         }
-        count += prims[i].nv;
+        count += nv;
     }
     batches.emplace_back(first, prims.size());
 
@@ -328,8 +385,7 @@ inline std::vector<uint32_t> build_list(uint32_t base, const std::vector<Prim>& 
     for (auto [b, e] : batches) {
         batch_addr.push_back(base + (uint32_t)w.size() * 4);
         for (size_t i = b; i < e; i++) {
-            for (int k = 0; k < prims[i].nv; k++) {
-                const Vtx& v = prims[i].v[(size_t)k];
+            for (const Vtx& v : prims[i].v) {
                 w.push_back(vtx_word0(v));
                 w.push_back(vtx_word1(v));
                 w.push_back(0);  // s, t
@@ -351,16 +407,13 @@ inline std::vector<uint32_t> build_list(uint32_t base, const std::vector<Prim>& 
     for (size_t bi = 0; bi < batches.size(); bi++) {
         auto [b, e] = batches[bi];
         uint32_t n = 0;
-        for (size_t i = b; i < e; i++) n += (uint32_t)prims[i].nv;
+        for (size_t i = b; i < e; i++) n += (uint32_t)prims[i].v.size();
         cmd(0x01000000u | (n << 12) | (n << 1), batch_addr[bi]);  // G_VTX n, v0 = 0
         std::vector<std::array<uint32_t, 3>> tris;
         uint32_t at = 0;
         for (size_t i = b; i < e; i++) {
-            for (int k = 0; k < prims[i].nt; k++) {
-                const auto& t = prims[i].t[(size_t)k];
-                tris.push_back({at + t[0], at + t[1], at + t[2]});
-            }
-            at += (uint32_t)prims[i].nv;
+            for (const auto& t : prims[i].t) tris.push_back({at + t[0], at + t[1], at + t[2]});
+            at += (uint32_t)prims[i].v.size();
         }
         auto tri = [](const std::array<uint32_t, 3>& t) { return (t[0] * 2) << 16 | (t[1] * 2) << 8 | (t[2] * 2); };
         for (size_t k = 0; k < tris.size(); k += 2) {
@@ -382,6 +435,44 @@ inline std::vector<uint32_t> build_list(uint32_t base, const std::vector<Prim>& 
 inline std::array<uint32_t, 3> colours(int family) {
     if (family == 1) return {0xFFD23AFFu, 0x6EC1FFFFu, 0xFF5A66FFu};  // Y yellow, RB blue, B red
     return {0x3FE6A0FFu, 0x6EC1FFFFu, 0xFF5A66FFu};                    // triangle green, R1 blue, circle red
+}
+
+// The looks (PLAYART look card|blend|madden):
+//   Card    the play cards exactly: every route the cards' red (the playbook doesn't tell receivers apart).
+//   Blend   the cards' line, shading, shadow and barbed head, in the Receiver Buttons' colours made as saturated as the
+//           cards' red: the colour still says which button throws to whom. The default.
+//   Madden  1.0.5's thin flat translucent ribbons with a plain head.
+enum class Look { Card = 0, Blend = 1, Madden = 2 };
+constexpr Look default_look = Look::Blend;
+
+struct LookSpec {
+    Style style;
+    std::array<uint32_t, 3> colour;  // RGBA, the alpha the look's
+};
+
+inline LookSpec look_spec(Look look, int family) {
+    LookSpec k;
+    if (look == Look::Madden) {
+        k.style.half_width = 3.5f;
+        k.style.head_length = 9.0f;
+        k.style.head_half = 5.5f;
+        k.style.notch = 0.0f;
+        k.style.shade = 1.0f;
+        k.style.shadow = 0.0f;
+        k.colour = colours(family);
+        for (auto& c : k.colour) c = (c & 0xFFFFFF00u) | 208;
+        return k;
+    }
+    if (look == Look::Card) {
+        k.colour = {0xF03A24F5u, 0xF03A24F5u, 0xF03A24F5u};  // the cards' red (240, 58, 36)
+    }
+    else if (family == 1) {
+        k.colour = {0xFFC814F5u, 0x2E9BFFF5u, 0xF5283CF5u};  // Y yellow, RB blue, B red
+    }
+    else {
+        k.colour = {0x18D878F5u, 0x2E9BFFF5u, 0xF5283CF5u};  // triangle green, R1 blue, circle red
+    }
+    return k;
 }
 
 // ---- From the game's memory to the ribbons ------------------------------------------------------------------------
@@ -434,6 +525,9 @@ inline Art build_art(const Read32& rd, int side, Cut cut, const Style& style, co
     }
     if (std::fabs(cx) < 1.0f || std::fabs(cz) < 1.0f) return art.why = "can't place the formation", art;
     const float dir = cx > 0 ? 1.0f : -1.0f, across = cz > 0 ? 1.0f : -1.0f;
+    // The light: the shadow falls to the lower right of the screen, behind the quarterback's camera that's back towards
+    // the offense's own end and to its right.
+    const Light light{-dir * 0.7071f, across * 0.7071f};
     std::array<int, 3> order{4, 5, 6};
     std::sort(order.begin(), order.end(), [&](int a, int b) { return sx[(size_t)a] < sx[(size_t)b]; });
     for (size_t k = 0; k < 3; k++) {
@@ -447,7 +541,7 @@ inline Art build_art(const Read32& rd, int side, Cut cut, const Style& style, co
             world.push_back({wx[s] + dir * (q.d - start.d) * units_per_yard, wz[s] + across * (q.l - start.l) * units_per_yard});
         }
         art.legs[k] = (int)r.pts.size() - 1;
-        ribbon(world, colour[k], style, prims);
+        ribbon(world, colour[k], style, prims, light);
     }
     if (prims.empty()) art.why = "no routes (blocks only)";
     return art;

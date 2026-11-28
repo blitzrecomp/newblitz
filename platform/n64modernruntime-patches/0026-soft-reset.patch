@@ -1,0 +1,538 @@
+diff --git a/librecomp/include/librecomp/game.hpp b/librecomp/include/librecomp/game.hpp
+index ad1973f..aabda22 100644
+--- a/librecomp/include/librecomp/game.hpp
++++ b/librecomp/include/librecomp/game.hpp
+@@ -151,6 +151,12 @@ namespace recomp {
+     bool flashram_allowed();
+ 
+     void start_game(const std::u8string& game_id, const std::string& game_mode_id);
++    // BlitzRecomp: soft reset (recomp.cpp): the running game starts again in place, or stops for the launcher. False while
++    // no game is running or a reset is already under way. `between` runs on the boot thread with nothing of the game
++    // running and before RDRAM is cleared; `failed` if the game's threads didn't stop (the app should end then).
++    bool request_soft_reset(bool to_launcher);
++    void set_soft_reset_callbacks(std::function<void(bool to_launcher)> between, std::function<void()> failed);
++    int soft_reset_count();
+     std::u8string current_game_id();
+     std::string current_mod_game_id();
+ }
+diff --git a/librecomp/src/overlays.cpp b/librecomp/src/overlays.cpp
+index d665a30..a5a9c6f 100644
+--- a/librecomp/src/overlays.cpp
++++ b/librecomp/src/overlays.cpp
+@@ -279,7 +279,13 @@ extern "C" void unload_overlays(int32_t ram_addr, uint32_t size) {
+ 
+ void recomp::overlays::init_overlays() {
+     func_map.clear();
+-    section_addresses = (int32_t *)calloc(sections_info.total_num_sections, sizeof(int32_t));
++    // BlitzRecomp: a soft reset boots again: nothing loaded yet, the same table zeroed (2026-11-27).
++    loaded_sections.clear();
++    if (section_addresses != nullptr) {
++        memset(section_addresses, 0, sections_info.total_num_sections * sizeof(int32_t));
++    } else {
++        section_addresses = (int32_t *)calloc(sections_info.total_num_sections, sizeof(int32_t));
++    }
+ 
+     // Sort the executable sections by rom address
+     std::sort(&sections_info.code_sections[0], &sections_info.code_sections[sections_info.num_code_sections],
+diff --git a/librecomp/src/pi.cpp b/librecomp/src/pi.cpp
+index 4d27809..c1cf31e 100644
+--- a/librecomp/src/pi.cpp
++++ b/librecomp/src/pi.cpp
+@@ -433,7 +433,20 @@ void ultramodern::init_saving(RDRAM_ARG1) {
+ 
+     read_save_file();
+ 
+-    save_context.saving_thread = ultramodern::host_thread(ultramodern::host_threads::saving, saving_thread_func, PASS_RDRAM1);
++    // BlitzRecomp: a soft reset boots again with the saving thread still running (flush_saving ran first).
++    if (!save_context.saving_thread.joinable()) {
++        save_context.saving_thread = ultramodern::host_thread(ultramodern::host_threads::saving, saving_thread_func, PASS_RDRAM1);
++    }
++}
++
++// BlitzRecomp: soft reset: what the game wrote reaches the file before the next boot reads it again (the saving thread
++// answers a swap request only once it has written what was pending).
++void ultramodern::flush_saving() {
++    if (!save_context.saving_thread.joinable()) {
++        return;
++    }
++    save_context.swap_file_pending_sempahore.signal();
++    save_context.swap_file_ready_sempahore.wait();
+ }
+ 
+ void ultramodern::change_save_file(const std::u8string& subfolder, const std::u8string& name) {
+diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
+index fc5d135..fe86465 100644
+--- a/librecomp/src/recomp.cpp
++++ b/librecomp/src/recomp.cpp
+@@ -17,6 +17,10 @@
+ #include <cinttypes>
+ #include <cuchar>
+ #include <charconv>
++#include <algorithm>
++#include <cerrno>
++#include <chrono>
++#include <functional>
+ 
+ #include "recomp.h"
+ #include "librecomp/overlays.hpp"
+@@ -685,6 +689,115 @@ void ultramodern::quit() {
+     current_game.reset();
+ }
+ 
++// BlitzRecomp: soft reset (ultramodern.hpp, 2026-11-27). Restart without leaving the app, the way an N64's reset starts
++// the game again: the boot thread, once the game it booted is running, waits for a request; then the game's threads end,
++// its timers, RSP work and event queues go, the app's callback runs with nothing of the game running, RDRAM is cleared,
++// and the same boot runs again (or, to the launcher, waits for the next start_game). The renderer, the window, the UI,
++// audio and the runtime's own threads stay as they are.
++static std::atomic_int soft_reset_request{0};  // 0 none, 1 boot again, 2 to the launcher
++static std::atomic_bool game_resetting{false};
++static std::atomic_int soft_resets_done{0};
++static std::function<void(bool)> soft_reset_between;
++static std::function<void()> soft_reset_failed;
++
++bool ultramodern::is_game_resetting() {
++    return game_resetting.load();
++}
++
++bool recomp::request_soft_reset(bool to_launcher) {
++    if (exited.load() || game_status.load() != GameStatus::Running || game_resetting.load()) {
++        return false;
++    }
++    int expected = 0;
++    return soft_reset_request.compare_exchange_strong(expected, to_launcher ? 2 : 1);
++}
++
++void recomp::set_soft_reset_callbacks(std::function<void(bool to_launcher)> between, std::function<void()> failed) {
++    soft_reset_between = std::move(between);
++    soft_reset_failed = std::move(failed);
++}
++
++int recomp::soft_reset_count() {
++    return soft_resets_done.load();
++}
++
++// The game's RAM as the first boot found it: zero. The first 16 MB (the N64's 8 MB, the PI handles and the patch area)
++// in place; above that (the mod area and heap) the pages are handed back, so they read zero without being touched.
++static void clear_rdram_for_boot(uint8_t* rdram) {
++    const size_t low = std::min<size_t>(16ull * 1024 * 1024, recomp::mem_size);
++    std::memset(rdram, 0, low);
++    if (recomp::mem_size <= low) {
++        return;
++    }
++    uint8_t* high = rdram + low;
++    const size_t high_size = recomp::mem_size - low;
++#if defined(RECOMP_SMALL_RDRAM)
++    (void)high; (void)high_size;
++#elif defined(_WIN32)
++    if (!VirtualFree(high, high_size, MEM_DECOMMIT) || VirtualAlloc(high, high_size, MEM_COMMIT, PAGE_READWRITE) == nullptr) {
++        fprintf(stderr, "[reset] couldn't hand back the upper RDRAM (%lu): left as it is\n", GetLastError());
++    }
++#elif defined(__PROSPERO__)
++    (void)high; (void)high_size;  // direct memory there: the heap is set up again over it (init_heap)
++#else
++    if (mmap(high, high_size, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_ANON | MAP_PRIVATE, -1, 0) == MAP_FAILED) {
++        fprintf(stderr, "[reset] couldn't hand back the upper RDRAM (%s): left as it is\n", strerror(errno));
++    }
++#endif
++}
++
++static bool wait_for_soft_reset_request() {
++    while (!exited.load()) {
++        if (soft_reset_request.load() != 0) {
++            return true;
++        }
++        ultramodern::sleep_milliseconds(5);
++    }
++    return false;
++}
++
++static bool soft_reset(uint8_t* rdram) {
++    const bool to_launcher = soft_reset_request.load() == 2;
++    const int n = soft_resets_done.load() + 1;
++    auto t0 = std::chrono::steady_clock::now();
++    auto ms = [&] { return (long long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count(); };
++    fprintf(stderr, "[reset] soft reset %d%s: stopping the game (%d thread(s))\n", n, to_launcher ? " to the launcher" : "",
++            ultramodern::live_game_threads());
++    game_resetting.store(true);
++    bool ok = ultramodern::stop_game_threads(rdram, 3000);
++    if (ok) {
++        fprintf(stderr, "[reset] game threads stopped at %lld ms\n", ms());
++        ultramodern::reset_timers();
++        ok = ultramodern::reset_events(rdram, 3000);
++    }
++    if (!ok) {
++        fprintf(stderr, "[reset] soft reset %d failed at %lld ms: the game can't be started again in place\n", n, ms());
++        soft_reset_request.store(0);
++        if (soft_reset_failed) {
++            soft_reset_failed();
++        }
++        return false;
++    }
++    ultramodern::reset_external_messages();
++    ultramodern::reset_thread_queues();
++    ultramodern::flush_saving();
++    if (soft_reset_between) {
++        soft_reset_between(to_launcher);
++    }
++    clear_rdram_for_boot(rdram);
++    ultramodern::reset_external_messages();
++    if (to_launcher) {
++        std::lock_guard<std::mutex> lock(current_game_mutex);
++        game_status.store(GameStatus::None);
++        current_game.reset();
++    }
++    soft_reset_request.store(0);
++    soft_resets_done.store(n);
++    game_resetting.store(false);
++    fprintf(stderr, "[reset] soft reset %d done at %lld ms: %s\n", n, ms(), to_launcher ? "the launcher" : "booting again");
++    return true;
++}
++
+ #if !defined(RECOMP_NO_MODS)
+ void recomp::mods::enable_mod(const std::string& mod_id, bool enabled) {
+     std::lock_guard lock { mod_context_mutex };
+@@ -1057,10 +1170,17 @@ void recomp::start(
+ 
+         ultramodern::preinit(rdram, window_handle);
+ 
+-        recomp_context context{};
++        while (true) {
++            recomp_context context{};
++
++            // Loop until the game starts.
++            while (!wait_for_game_started(rdram, &context)) {}
+ 
+-        // Loop until the game starts.
+-        while (!wait_for_game_started(rdram, &context)) {}
++            // BlitzRecomp: the game runs on its own threads now; a soft reset boots it again from here.
++            if (!wait_for_soft_reset_request() || !soft_reset(rdram)) {
++                break;
++            }
++        }
+     }, window_handle, rdram);
+ 
+     while (!exited) {
+diff --git a/ultramodern/include/ultramodern/ultramodern.hpp b/ultramodern/include/ultramodern/ultramodern.hpp
+index e8d932c..9ef9bf0 100644
+--- a/ultramodern/include/ultramodern/ultramodern.hpp
++++ b/ultramodern/include/ultramodern/ultramodern.hpp
+@@ -129,6 +129,20 @@ struct gfx_callbacks_t {
+ bool is_game_started();
+ void quit();
+ 
++// BlitzRecomp: a soft reset (Restart without leaving the app, 2026-11-27). The game's threads end at their next stop
++// (osRecvMesg, a yield, a wait to be scheduled) by throwing thread_terminated, the runtime's own threads (VI, graphics,
++// RSP tasks, timers, saving) keep running, and the game is booted again on the same RDRAM. recomp.cpp drives it.
++bool is_game_resetting();                         // librecomp: between the request and the next boot
++bool game_threads_stopping();                     // threads.cpp: game threads end at their next stop
++bool stop_game_threads(RDRAM_ARG uint32_t timeout_ms);  // false: a thread didn't stop in time (the game is left as it is)
++int live_game_threads();
++void wake_for_reset_if_stopping();                // a game thread at a stop: throws thread_terminated while stopping
++void reset_timers();                              // timer.cpp: every timer dropped (waits for the timer thread)
++bool reset_events(RDRAM_ARG uint32_t timeout_ms); // events.cpp: no RSP work left, no event queues, the placeholder VI
++void reset_thread_queues();                       // threadqueue.cpp: the running queue emptied
++void reset_external_messages();                   // mesgqueue.cpp: every queued external message dropped
++void flush_saving();                            // pi.cpp: the saving thread writes what's pending, then waits
++
+ #if defined(ULTRAMODERN_LOCKSTEP)
+ // BlitzRecomp (PSP port, psp-host --lockstep, docs/PSP_PORT.md §3.4): the game on virtual time, so two builds can be compared
+ // RDRAM CRC by RDRAM CRC. Once enabled (before recomp::start), a VI happens only when the game asks for one: a game thread
+diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
+index 661fba1..5fdb776 100644
+--- a/ultramodern/src/events.cpp
++++ b/ultramodern/src/events.cpp
+@@ -291,7 +291,8 @@ void vi_thread_func() {
+         events_context.vi.update_vi();
+ 
+         // If the game has started, handle sending VI and AI events.
+-        if (ultramodern::is_game_started()) {
++        // BlitzRecomp: not during a soft reset, while its threads end and the game boots again (reset_events).
++        if (ultramodern::is_game_started() && !ultramodern::is_game_resetting()) {
+             remaining_retraces--;
+             
+             std::lock_guard lock{ events_context.message_mutex };
+@@ -705,6 +706,39 @@ void ultramodern::init_events(RDRAM_ARG ultramodern::renderer::WindowHandle wind
+     events_context.vi.thread = ultramodern::host_thread(ultramodern::host_threads::vi, vi_thread_func);
+ }
+ 
++// BlitzRecomp: soft reset, with the game's threads gone and its timers dropped: the RSP and graphics work already sent
++// finishes (it reads RDRAM), then nothing is left pointing into the old game: no event queues, the placeholder VI mode.
++bool ultramodern::reset_events(RDRAM_ARG uint32_t timeout_ms) {
++    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
++    while (rsp_tasks_in_flight.load() > 0) {
++        if (std::chrono::steady_clock::now() > deadline) {
++            fprintf(stderr, "[reset] %d RSP task(s) still in flight after %u ms\n", rsp_tasks_in_flight.load(), timeout_ms);
++            return false;
++        }
++        ultramodern::sleep_milliseconds(1);
++    }
++    std::lock_guard lock{ events_context.message_mutex };
++    events_context.sp.mq = NULLPTR;
++    events_context.sp.msg = (OSMesg)0;
++    events_context.dp.mq = NULLPTR;
++    events_context.dp.msg = (OSMesg)0;
++    events_context.ai.mq = NULLPTR;
++    events_context.ai.msg = (OSMesg)0;
++    events_context.si.mq = NULLPTR;
++    events_context.si.msg = (OSMesg)0;
++    for (int i = 0; i < 2; i++) {
++        ViState& st = events_context.vi.states[i];
++        st.mode = &dummy_mode;
++        st.control = dummy_mode.comRegs.ctrl;
++        st.framebuffer = 0x807B0000;  // set_dummy_vi's
++        st.mq = NULLPTR;
++        st.msg = (OSMesg)0;
++        st.state = 0;
++        st.retrace_count = 1;
++    }
++    return true;
++}
++
+ void ultramodern::join_event_threads() {
+     events_context.sp.gfx_thread.join();
+     events_context.vi.thread.join();
+diff --git a/ultramodern/src/mesgqueue.cpp b/ultramodern/src/mesgqueue.cpp
+index e9936d6..1410cc0 100644
+--- a/ultramodern/src/mesgqueue.cpp
++++ b/ultramodern/src/mesgqueue.cpp
+@@ -38,12 +38,27 @@ void ultramodern::discard_external_messages() {
+     }
+ }
+ 
++// BlitzRecomp: a soft reset wakes a game thread waiting for an external message with one for no queue (dropped when
++// sent), and then drops whatever is left, the count of must-deliver ones with it.
++void enqueue_reset_wakeup() {
++    external_messages.enqueue({NULLPTR, (OSMesg)0, false, false});
++}
++
++void ultramodern::reset_external_messages() {
++    QueuedMessage m;
++    while (external_messages.try_dequeue(m)) {}
++    must_deliver_pending.store(0);
++}
++
+ // Sends one dequeued external message; must-deliver ones that don't fit go back in the queue.
+ static bool send_external(RDRAM_ARG const QueuedMessage& m);
+ 
+ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block);
+ 
+ static bool send_external(RDRAM_ARG const QueuedMessage& m) {
++    if (m.mq == NULLPTR) {
++        return true;  // a soft reset's wake-up
++    }
+     bool sent = do_send(PASS_RDRAM m.mq, m.mesg, m.jam, false);
+     if (sent && m.requeue_if_blocked) {
+         must_deliver_pending--;
+@@ -79,7 +94,9 @@ void ultramodern::wait_for_external_message(RDRAM_ARG1) {
+         return;
+     }
+ #endif
++    ultramodern::wake_for_reset_if_stopping();
+     external_messages.wait_dequeue(to_send);
++    ultramodern::wake_for_reset_if_stopping();  // BlitzRecomp: woken for a soft reset
+     if (!send_external(PASS_RDRAM to_send) && to_send.requeue_if_blocked) {
+         external_messages.enqueue(to_send);
+     }
+@@ -93,7 +110,10 @@ void ultramodern::wait_for_external_message_timed(RDRAM_ARG u32 millis) {
+         return;
+     }
+ #endif
+-    if (external_messages.wait_dequeue_timed(to_send, std::chrono::milliseconds{millis})) {
++    ultramodern::wake_for_reset_if_stopping();
++    bool got = external_messages.wait_dequeue_timed(to_send, std::chrono::milliseconds{millis});
++    ultramodern::wake_for_reset_if_stopping();  // BlitzRecomp: woken for a soft reset
++    if (got) {
+         if (!send_external(PASS_RDRAM to_send) && to_send.requeue_if_blocked) {
+             external_messages.enqueue(to_send);
+         }
+diff --git a/ultramodern/src/scheduling.cpp b/ultramodern/src/scheduling.cpp
+index a22f747..beb45cd 100644
+--- a/ultramodern/src/scheduling.cpp
++++ b/ultramodern/src/scheduling.cpp
+@@ -16,6 +16,7 @@ void swap_to_thread(RDRAM_ARG OSThread *to) {
+ }
+ 
+ void ultramodern::check_running_queue(RDRAM_ARG1) {
++    ultramodern::wake_for_reset_if_stopping();  // BlitzRecomp: a soft reset ends this thread here
+     // Check if there are any threads in the running queue.
+     if (!thread_queue_empty(PASS_RDRAM running_queue)) {
+         // Check if the highest priority thread in the queue is higher priority than the current thread.
+diff --git a/ultramodern/src/threadqueue.cpp b/ultramodern/src/threadqueue.cpp
+index f9c0fa1..cf45ef8 100644
+--- a/ultramodern/src/threadqueue.cpp
++++ b/ultramodern/src/threadqueue.cpp
+@@ -4,6 +4,10 @@
+ 
+ static PTR(OSThread) running_queue_impl = NULLPTR;
+ 
++void ultramodern::reset_thread_queues() {
++    running_queue_impl = NULLPTR;  // BlitzRecomp: soft reset, with every game thread gone
++}
++
+ static PTR(OSThread)* queue_to_ptr(RDRAM_ARG PTR(PTR(OSThread)) queue) {
+     if (queue == ultramodern::running_queue) {
+         return &running_queue_impl;
+diff --git a/ultramodern/src/threads.cpp b/ultramodern/src/threads.cpp
+index 88a29d1..7c2c8b7 100644
+--- a/ultramodern/src/threads.cpp
++++ b/ultramodern/src/threads.cpp
+@@ -2,6 +2,10 @@
+ #include <thread>
+ #include <cassert>
+ #include <string>
++#include <atomic>
++#include <chrono>
++#include <mutex>
++#include <set>
+ 
+ #include "ultramodern/ultra64.h"
+ #include "ultramodern/ultramodern.hpp"
+@@ -156,8 +160,58 @@ void ultramodern::set_native_thread_name(const std::string& name) { blitz_psp_th
+ void ultramodern::set_native_thread_priority(ThreadPriority pri) { (void)pri; }
+ #endif
+ 
++// BlitzRecomp: soft reset (ultramodern.hpp). Every game thread's context while its host thread lives, so a reset can wake
++// each one; while stopping, a game thread throws thread_terminated at its next stop instead of waiting or running on.
++static std::atomic_bool threads_stopping{false};
++static std::mutex live_contexts_mutex;
++static std::set<UltraThreadContext*> live_contexts;
++
++bool ultramodern::game_threads_stopping() {
++    return threads_stopping.load();
++}
++
++int ultramodern::live_game_threads() {
++    std::lock_guard lock{live_contexts_mutex};
++    return (int)live_contexts.size();
++}
++
++void ultramodern::wake_for_reset_if_stopping() {
++    if (threads_stopping.load() && ::is_game_thread && thread_self != NULLPTR) {
++        throw ultramodern::thread_terminated{};
++    }
++}
++
++void enqueue_reset_wakeup();  // mesgqueue.cpp
++
++bool ultramodern::stop_game_threads(RDRAM_ARG uint32_t timeout_ms) {
++    threads_stopping.store(true);
++    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
++    while (true) {
++        {
++            std::lock_guard lock{live_contexts_mutex};
++            if (live_contexts.empty()) break;
++            // Each one waiting to be scheduled wakes and ends (wait_for_resumed); the one running ends at its next stop.
++            for (UltraThreadContext* c : live_contexts) c->running.signal();
++        }
++        enqueue_reset_wakeup();  // one waiting for an external message (the idle thread) wakes too
++        if (std::chrono::steady_clock::now() > deadline) {
++            fprintf(stderr, "[reset] %d game thread(s) didn't stop in %u ms\n", ultramodern::live_game_threads(), timeout_ms);
++            return false;
++        }
++        ultramodern::sleep_milliseconds(1);
++    }
++    threads_stopping.store(false);
++    return true;
++}
++
+ void wait_for_resumed(RDRAM_ARG UltraThreadContext* thread_context) {
++    if (threads_stopping.load()) {
++        throw ultramodern::thread_terminated{};
++    }
+     thread_context->running.wait();
++    if (threads_stopping.load()) {
++        throw ultramodern::thread_terminated{};
++    }
+     // If this thread's context was replaced by another thread or deleted, destroy it again from its own context.
+     // This will trigger thread cleanup instead.
+     if (TO_PTR(OSThread, ultramodern::this_thread())->context != thread_context) {
+@@ -171,6 +225,9 @@ void resume_thread(OSThread* t) {
+ }
+ 
+ void run_next_thread(RDRAM_ARG1) {
++    if (threads_stopping.load()) {
++        return;  // BlitzRecomp: a soft reset: every game thread is ending, none is handed the CPU
++    }
+     if (ultramodern::thread_queue_empty(PASS_RDRAM ultramodern::running_queue)) {
+         throw std::runtime_error("No threads left to run!\n");
+     }
+@@ -208,13 +265,15 @@ static void _thread_func(RDRAM_ARG PTR(OSThread) self_, PTR(thread_func_t) entry
+     debug_printf("[Thread] Thread waiting to be started: %d\n", self->id);
+ 
+     // Wait until the thread is marked as running.
++    bool terminated_early = false;
+     try {
+         wait_for_resumed(PASS_RDRAM thread_context);
+     } catch (ultramodern::thread_terminated& terminated) {
++        terminated_early = true;  // BlitzRecomp: destroyed, or a soft reset, before it ran: it doesn't run now
+     }
+ 
+     // Make sure the thread wasn't replaced or destroyed before it was started.
+-    if (self->context == thread_context) {
++    if (!terminated_early && self->context == thread_context) {
+         debug_printf("[Thread] Thread started: %d\n", self->id);
+         try {
+             // Run the thread's function with the provided argument.
+@@ -233,6 +292,10 @@ static void _thread_func(RDRAM_ARG PTR(OSThread) self_, PTR(thread_func_t) entry
+         run_next_thread(PASS_RDRAM1);
+     }
+ 
++    {
++        std::lock_guard lock{live_contexts_mutex};
++        live_contexts.erase(thread_context);
++    }
+     // Dispose of this thread now that it's completed or terminated.
+     ultramodern::cleanup_thread(thread_context);
+ }
+@@ -269,6 +332,10 @@ extern "C" void osCreateThread(RDRAM_ARG PTR(OSThread) t_, OSId id, PTR(thread_f
+     // Pass the context as an argument to the thread function to ensure that it can't get cleared before the thread captures its value.
+     UltraThreadContext* context = new UltraThreadContext{};
+     t->context = context;
++    {
++        std::lock_guard lock{live_contexts_mutex};
++        live_contexts.insert(context);
++    }
+     context->host_thread = ultramodern::host_thread(ultramodern::host_threads::game(id, pri), _thread_func, PASS_RDRAM t_, entrypoint, arg, t->context);
+ 
+     // Wait until the thread is initialized to indicate that it's ready to be started.
+diff --git a/ultramodern/src/timer.cpp b/ultramodern/src/timer.cpp
+index 54ab57f..eab2f7d 100644
+--- a/ultramodern/src/timer.cpp
++++ b/ultramodern/src/timer.cpp
+@@ -37,7 +37,12 @@ struct RemoveTimerAction {
+     PTR(OSTimer) timer;
+ };
+ 
+-using Action = std::variant<AddTimerAction, RemoveTimerAction>;
++// BlitzRecomp: soft reset: every timer dropped, then `done` signalled.
++struct ResetTimersAction {
++    ultramodern::host_sem* done;
++};
++
++using Action = std::variant<AddTimerAction, RemoveTimerAction, ResetTimersAction>;
+ 
+ struct {
+     ultramodern::host_thread_t thread;
+@@ -99,6 +104,9 @@ void timer_thread(RDRAM_ARG1) {
+             active_timers.insert(add_action->timer);
+         } else if (const auto* remove_action = std::get_if<RemoveTimerAction>(&action)) {
+             active_timers.erase(remove_action->timer);
++        } else if (const auto* reset_action = std::get_if<ResetTimersAction>(&action)) {
++            active_timers.clear();
++            reset_action->done->signal();
+         }
+     };
+ 
+@@ -145,6 +153,12 @@ void timer_thread(RDRAM_ARG1) {
+     }
+ }
+ 
++void ultramodern::reset_timers() {
++    ultramodern::host_sem done;
++    timer_context.action_queue.enqueue(ResetTimersAction{ &done });
++    done.wait();
++}
++
+ void ultramodern::init_timers(RDRAM_ARG1) {
+     timer_context.thread = ultramodern::host_thread(ultramodern::host_threads::timer, timer_thread, PASS_RDRAM1);
+     timer_context.thread.detach();

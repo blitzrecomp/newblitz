@@ -30,3 +30,5 @@ __pycache__/
 .vscode/
 .claude/settings.local.json
 tools/blitz_logs_worker/.wrangler/
+tools/hub_forwarder/.wrangler/
+tools/rosters_hub_worker/.wrangler/

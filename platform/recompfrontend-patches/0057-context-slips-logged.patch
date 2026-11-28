@@ -1,0 +1,28 @@
+diff --git a/recompui/src/base/ui_state.cpp b/recompui/src/base/ui_state.cpp
+index 09b6a4b..9654735 100644
+--- a/recompui/src/base/ui_state.cpp
++++ b/recompui/src/base/ui_state.cpp
+@@ -385,8 +385,9 @@ public:
+ 
+     void show_context(recompui::ContextId context) {
+         if (std::find_if(shown_contexts.begin(), shown_contexts.end(), [context](auto& c){ return c.context == context; }) != shown_contexts.end()) {
+-            recompui::message_box("Attemped to show the same context twice");
+-            assert(false);
++            // BlitzRecomp: a bookkeeping slip, logged; never a modal that stops the game drawing (1.0.6).
++            fprintf(stderr, "[ERROR] Attemped to show the same context twice (ignored)\n");
++            return;
+         }
+         Rml::ElementDocument* document = context.get_document();
+         shown_contexts.push_back(ContextDetails{
+@@ -434,8 +435,9 @@ public:
+     void hide_context(recompui::ContextId context) {
+         auto remove_it = std::remove_if(shown_contexts.begin(), shown_contexts.end(), [context](auto& c) { return c.context == context; });
+         if (remove_it == shown_contexts.end()) {
+-            recompui::message_box("Attemped to hide a context that isn't shown");
+-            assert(false);
++            // BlitzRecomp: a bookkeeping slip, logged; never a modal: on an iPhone it stopped a game drawing (build 959).
++            fprintf(stderr, "[ERROR] Attemped to hide a context that isn't shown (ignored)\n");
++            return;
+         }
+         shown_contexts.erase(remove_it, shown_contexts.end());
+ 

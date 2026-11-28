@@ -3,7 +3,7 @@
 Written 2026-11-04; the public `.ipa` added 2026-11-14. Two ways onto an iPhone or iPad, both signed with **your** Apple ID, which can be a free one. Nobody else's certificate or name is involved.
 
 - **Recommended: Sideloadly with the public `.ipa` (no Mac needed; the next section, then §3, Route B).** The New Blitz download for Mac, Windows or Linux carries the iPhone app, unsigned. Blitz Builder → Somewhere else → A console or phone → Phone → **Save the iPhone app (.ipa)** saves it to Downloads → New Blitz for iPhone with your ROM and setup beside it, and you install it with Sideloadly (recommended), AltStore or SideStore.
-- **Build it yourself (§2, Route A).** The source, your own NFL Blitz 2000 (USA) v1.1 dump, a Mac with Xcode.
+- **Build it yourself (§2, Route A).** The source, your own NFL Blitz 2000 (USA) dump (v1.1, or v1.0, which is updated to v1.1), a Mac with Xcode.
 
 The last section answers a different question: whether the app can be passed around privately to a group.
 
@@ -55,14 +55,14 @@ A **paid** Apple Developer Program membership ($99 a year, [enrollment](https://
 - An Apple Silicon or Intel Mac on a recent macOS, with **Xcode** from the Mac App Store (free). Open it once and let it install the iOS platform.
 - Homebrew's `cmake`, `ninja` and `python3`. `make env` checks them.
 - An iPhone on **iOS 17 or later** (the build's deployment target is 17.0, `Makefile` `IOS_CMAKE`) and its USB cable. The maintainer's phone runs iOS 27.
-- Your own **NFL Blitz 2000 (USA) v1.1** dump. Nobody can send you one; see CONTRIBUTING.md's one rule.
+- Your own **NFL Blitz 2000 (USA)** dump (v1.1, or v1.0, which is updated to v1.1). Nobody can send you one; see CONTRIBUTING.md's one rule.
 - A **passcode** on the phone. iOS needs it for Developer Mode and pairing.
 
 ### Step 1. Build the game for the Mac side first (same as CONTRIBUTING.md)
 ```sh
 make env && make venv
 tools/build_deps.sh            # SDL2 and FreeType for the Mac (once; it also downloads the sources the iPhone build reuses)
-# put your v1.1 dump in rom/
+# put your v1.1 (or v1.0) dump in rom/
 make rom-import                # writes build/baserom.z64 and pins its SHA-1; the recompiler reads the ROM here
 ```
 **The ROM appears twice in this guide, for different jobs.**
@@ -128,7 +128,7 @@ The first launch on a free account fails with "Untrusted Developer". That's step
 ### Step 8. Trust yourself, then give the app your ROM
 1. **Trust your certificate.** Settings → General → **VPN & Device Management** → under Developer App, your Apple ID → **Trust**, and confirm. The phone needs internet for this; it checks with Apple.
 2. **Open New Blitz.** The launcher asks for the ROM (docs/PLAYING.md, "Load ROM"). You can hand it over either way:
-   - **Load ROM** opens the Files picker. Pick the `.z64`/`.v64`/`.n64`, or a `.zip` with one inside, from iCloud Drive or On My iPhone. The app checks that it's the USA v1.1 cartridge and keeps its own copy.
+   - **Load ROM** opens the Files picker. Pick the `.z64`/`.v64`/`.n64`, or a `.zip` with one inside, from iCloud Drive or On My iPhone. The app checks that it's the USA cartridge (v1.1, or v1.0, which it updates to v1.1) and keeps its own copy.
    - Or put the ROM in the app's own folder: Files → On My iPhone → New Blitz (the app shares its Documents, `UIFileSharingEnabled`). On the Mac you can drag it into the app in Finder → *your iPhone* → **Files**. Then open the app.
 
 ### Step 9. Every week: refresh before day 7

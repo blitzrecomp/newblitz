@@ -7,7 +7,8 @@
 //   ROM drop folder                             x      x       x    x   (a ROM put there is imported at startup; PSP: the
 //                                                                        kit's <app>/rom/blitz.z64, docs/PSP_PORT.md §4.3)
 //   local browser          x      x       x                             (else the Roster Room shows a LAN address)
-//   file browser           x      x       x                             (Open Folder, Reveal)
+//   file browser           x      x       x                             (Open Folder, Reveal; phones' Add-Ons Open Folder
+//                                                                        opens the Files app instead, blitz_host.h)
 //   Export ROM             x      x       x
 //   Restart                x      x       x
 //   engine switch          x      x                                     (Classic <-> Modern in one install)
@@ -83,8 +84,19 @@ namespace blitz::platform {
 #endif
     // Export ROM (a .z64 for a cart or an emulator): only where the file is any use, a computer (team, 2026-10-21).
     inline constexpr bool export_rom = desktop;
-    // Restart (the Settings header, Add-Ons): relaunching itself is what a computer can do (team, 2026-10-21).
-    inline constexpr bool restart = desktop;
+    // Restart (the Settings header, Add-Ons, a restored pak): a computer relaunches its process (team, 2026-10-21); a phone
+    // boots the game again inside the app (soft_restart; 1.0.6, 2026-11-27: "add the restart button back to all
+    // versions"). The PS5 closes with a note instead (untested there: restarting in place would be the same code).
+    inline constexpr bool restart = desktop || phone;
+    inline constexpr bool soft_restart = phone;
+#if defined(BLITZ_PLATFORM_ANDROID)
+    inline constexpr bool android = true;
+#else
+    inline constexpr bool android = false;
+#endif
+    // The whole app started again (Reset Data, which clears the folder the settings came from): a computer relaunches its
+    // process, Android its launcher (blitz::relaunch_app). An iPhone can't start itself; it closes and says so.
+    inline constexpr bool app_restart = desktop || android;
 #if defined(BLITZ_HAS_FILE_BROWSER)
     inline constexpr bool file_browser = true;
 #else

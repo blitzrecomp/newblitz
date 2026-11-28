@@ -52,6 +52,7 @@
 #include "../main/ui_kit.h"
 #include "team_store.h"
 #include "season_pak.h"
+#include "blitz_soft_reset.h"
 namespace blitz { SDL_GameController* pad_on_port(int port); }  // controllers.cpp
 
 namespace live = blitz::teamdata::live;
@@ -209,6 +210,11 @@ namespace {
     bool crews_loaded = false;
 
     fs::path crews_file() { return blitz::rosters_dir() / "crews.json"; }
+    // Restart in place (soft_restart.cpp): saved crews are read again, as at a fresh start.
+    [[maybe_unused]] const bool crews_soft_reset = blitz::on_soft_reset("crews", [] {
+        std::lock_guard lock{crews_mutex};
+        crews_loaded = false;
+    });
 
     void load_crews() {
         if (crews_loaded) return;

@@ -11,7 +11,7 @@ Tested in the Android emulator (Android 16 / API 36, arm64 on Apple Silicon):
 |---|---|
 | Build, APK, install | ✓ Classic 34 MB, Modern 43 MB. Signed, with native libraries aligned for 16 KB pages |
 | Launch, resources, app folder | ✓ Resources unpacked on first launch (124 files in ~20 ms) |
-| ROM import from the drop folder | ✓ "ok, stored" |
+| ROM import from the drop folder | ✓ "ok, stored" (a v1.0 dump is updated to v1.1 as it goes in, since 1.0.6) |
 | Launcher (RmlUi on Vulkan) | ✓ Draws fully; touch drives it as a mouse |
 | Game code, overlays, saves | ✓ Runs; the Controller Pak save is created and reloaded |
 | Touch controls | ✓ A and Start reach the game (it advanced to controller select); hidden in menus |
@@ -20,7 +20,7 @@ Tested in the Android emulator (Android 16 / API 36, arm64 on Apple Silicon):
 | Game graphics | ✗ in the emulator (see below). Needs a real device |
 | Audio | not heard (the emulator ran with `-no-audio`; a phone without audio now plays on silently) |
 | Controllers | the emulator's keyboard shows up as a controller ("qwerty2"); Bluetooth pads untested |
-| File picker (Load ROM, Add-Ons) | built (the system picker via `BlitzActivity.pickFiles`), not tried yet |
+| File picker (Load ROM, Add-Ons) | the system picker via `BlitzActivity.pickFiles`, on its own thread since 1.0.6 (Back/Cancel return cleanly) |
 
 ### The emulator can't show the game's graphics
 
@@ -78,7 +78,15 @@ There's an AVD for this, `Blitz_API36`, so your everyday one stays untouched:
     game. The frontend's path code already honours the first two, so no patch was needed for paths.
   - It provides `httpGet` (HttpURLConnection: the system's TLS and certificates) and `pickFiles` (the system file
     picker; picks are copied into the cache and handed back as paths) to native code through JNI
-    (`src/main/platform_android.cpp`).
+    (`src/main/platform_android.cpp`). Since 1.0.6 the picker waits on a thread of its own (frontend patch 0055), as
+    iOS's does: the button that opened it returns at once, the game and its UI keep running behind the picker, and Back
+    or Cancel there comes back as "no files" to the screen the player was on. A pick whose answer never came (the
+    activity made again behind the picker) gives way to the next pick instead of waiting for ever.
+  - `BlitzFolder` (1.0.6) is a documents provider for the app folder: the Files app lists "New Blitz" in its menu and
+    every picker can reach it (Android 11+ hides `Android/data` from file managers). Add-Ons' Open Folder opens it
+    (`openAppFolder`: ACTION_VIEW on its root, then `android.provider.action.BROWSE`, then the folder's document).
+  - `httpGetProgress` and `networkMetered` (1.0.6): pak downloads with progress, and whether the network is metered
+    (the automatic pak downloads leave big ones for Wi-Fi; docs/design/SEASON_PAK.md).
   - It hides the system bars and keeps the screen on.
 - **App folder**: `Android/data/<package>/files`, reachable with `adb push` and USB file transfer. A ROM put there is
   imported at startup, as on iOS (Documents) and the PS5 (`/data/blitzrecomp`). Note: a file the adb *shell* creates

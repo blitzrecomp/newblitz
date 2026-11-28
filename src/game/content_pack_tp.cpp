@@ -35,6 +35,9 @@
 #include "season_pak.h"
 #include "rosters_live.h"
 #include "team_store.h"
+#include "league_sets.h"
+#include "uv_overrides.h"
+#include "blitz_soft_reset.h"
 namespace blitz {
     std::map<int, LineupPlayer> crew_players(const std::string& franchise);  // crew.cpp: the saved crew, slot by slot
 }
@@ -46,8 +49,13 @@ namespace blitz {
     const std::vector<uint8_t>* art_assets_of(const std::string& franchise);  // art_dropin.cpp
     bool advanced_mode();                       // adv_mode.cpp
     bool rom_rebranded();                       // art_dropin.cpp
-    uint32_t rosters_setting();                 // season_settings.cpp: 0 Auto, 1 Blitz 2026, 2 the ROM's own, 3+ another pack
-    std::string rosters_pack_id();              // season_settings.cpp: that pack's id
+    uint32_t rosters_setting();                 // season_settings.cpp: 0 Auto, 1 Blitz 2026, 2 the ROM's own
+    std::string rosters_pack_id();              // season_settings.cpp: League's pack id ("" the NFL)
+    bool league_selected();                     // season_settings.cpp
+    std::string league_id();                    // season_settings.cpp
+    std::string league_title(const std::string& id);  // season_settings.cpp: "CFL 2026", NFL 2026 for ""
+    void league_menu_notice(const std::string& title, const std::string& modes);  // season_settings.cpp
+    void league_notice(const std::string& header, const std::string& msg);       // season_settings.cpp: our modal
     void adv_on_ovl_b(uint8_t* rdram, const std::vector<std::string>& franchise_of_slot);  // adv_season.cpp
     bool fs_register_file(const std::string& name, std::vector<uint8_t> data);  // art_dropin.cpp: added game files
     int32_t fs_file_index(const std::string& name);
@@ -103,6 +111,11 @@ namespace {
         std::array<std::optional<int>, 5> ratings;
         std::vector<PlayerEdit> players;
     };
+    // A set's "uv_override" (uv_ref): its table, its texture ("" for the set's own) and per-cap textures.
+    struct UvRef {
+        std::string table, file;
+        std::vector<std::pair<std::string, std::string>> caps;  // cap name -> texture file
+    };
     // A league pak's team: a whole new team in slot k, built on an NFL franchise's block (CPU plays,
     // skill, uniforms and art). Its images come from the pak's files/ folder, named after the base
     // team's files (no NFL team is on the field in a league pak, so replacing theirs is safe).
@@ -114,8 +127,20 @@ namespace {
         std::vector<std::string> clashes_with;
         std::optional<std::string> vs_helmet_right;  // files/added/<name>.wms: its own right-side VS helmet
         std::map<uint32_t, std::string> uniform_files;  // part*2 + side (0 home, 1 away) -> files/added/<name>.wms
+        std::vector<blitz::LeagueUniformSet> uniform_sets;  // its alternates, after home and away in the Uniform Picker
+        std::map<std::string, UvRef> uv;  // set ("home", "away", an alternate's id) -> its override
+        std::map<std::string, std::array<std::string, 10>> cart;  // set -> per part: the file an exported cart wears instead ("" none)
         std::array<std::optional<int>, 5> ratings;
         std::vector<PlayerEdit> players;
+        // "uniform_sets": the team's sets for the Uniform Picker and the clash check. "home" and "away" (the
+        // uniform_files) carry a name, dark flag and clashes; every other set is an alternate with its own parts.
+        struct Set {
+            std::string id, name;
+            std::optional<bool> dark;
+            std::array<std::string, 10> files;  // alternates: files/added/<name>.wms per part ("" keeps the away part)
+            std::vector<std::pair<std::string, std::string>> clashes;  // (team id, set id) this set mustn't meet
+        };
+        std::vector<Set> sets;
     };
     struct League {
         std::string name;
@@ -123,6 +148,7 @@ namespace {
         std::vector<std::vector<std::string>> ladder;  // CPU tiers, easiest first
         std::vector<std::string> ladder_done;          // the 4 picks once every team is beaten
         std::vector<LeagueTeam> teams;
+        std::vector<std::pair<std::string, std::string>> cart_files;  // Export ROM: (a set's own part file, the cart's)
     };
     struct Pack {
         std::string id, title, version;
@@ -130,11 +156,24 @@ namespace {
         std::vector<TeamEdit> teams;
         std::optional<blitz::SeasonData> season;
         std::optional<League> league;
+        std::optional<blitz::UvOverrides> uv;  // a league's per-set texture coordinates (uv_overrides.h)
     };
 
     std::once_flag load_once;
     std::optional<Pack> active;
     bool reported = false;
+    std::optional<blitz::SeasonData> builtin_season;  // pack_season's fallback: the built-in pack's
+    std::once_flag builtin_once;
+
+    // Restart in place (soft_restart.cpp): the pack (rosters, a league pak, the 2026 Season) is read again, as a fresh
+    // start reads it.
+    [[maybe_unused]] const bool pack_soft_reset = blitz::on_soft_reset("roster pack", [] {
+        blitz::reset_once(load_once);
+        active.reset();
+        reported = false;
+        blitz::reset_once(builtin_once);
+        builtin_season.reset();
+    });
 
     struct PackError {
         std::string msg;
@@ -297,6 +336,121 @@ namespace {
         return out;
     }
 
+    // A set's "uv_override": {"table": <a "uv_overrides" name>, "file"?: <its texture in files/added>, "caps"?:
+    // {"<one of the table's caps>": <the texture on that cap>}}. Without "file" the set's own part texture is drawn
+    // wherever no cap texture is (a set needs "file", "caps" or both).
+    UvRef uv_ref(const json& r, const std::string& where) {
+        only_keys(r, {"table", "file", "caps"}, where);
+        auto wms_name = [&](const json& v, const std::string& what) {
+            std::string f = v.is_string() ? v.get<std::string>() : "";
+            for (char& c : f) c = (char)std::tolower((unsigned char)c);
+            if (f.size() < 5 || f.size() > 14 || f.substr(f.size() - 4) != ".wms") fail(where + ": " + what + " is a .wms in files/added, at most 14 characters");
+            return f;
+        };
+        UvRef out;
+        out.table = r.contains("table") && r["table"].is_string() ? r["table"].get<std::string>() : "";
+        if (out.table.empty()) fail(where + ": \"table\" names one of the pack's \"uv_overrides\"");
+        if (r.contains("file")) out.file = wms_name(r["file"], "\"file\"");
+        if (r.contains("caps")) {
+            if (!r["caps"].is_object() || r["caps"].empty() || r["caps"].size() > 4) fail(where + ": \"caps\" gives 1-4 caps a texture each");
+            for (auto& [cap, f] : r["caps"].items()) out.caps.emplace_back(cap, wms_name(f, "cap \"" + cap + "\""));
+        }
+        if (out.file.empty() && out.caps.empty()) fail(where + ": a set's override needs \"file\", \"caps\" or both");
+        return out;
+    }
+
+    // A set's "cart_files": {"<part>": <a texture in files/added>}: what Export ROM puts on the cart for that part of the
+    // set instead of its own file. The cart runs the game's own code, so app-only drawing (a "uv_override"'s texture
+    // coordinates) doesn't come along: such a set needs a texture drawn for the stock coordinates. The app never draws it.
+    std::array<std::string, 10> cart_ref(const json& r, const std::string& where) {
+        static const char* const parts[10] = {"helmet_side", "helmet_stripe_front", "helmet_stripe_back", "facemask", "shoulder",
+                                              "jersey", "pant_stripe", "pants", "socks", "numbers"};
+        if (!r.is_object() || r.empty()) fail(where + ": \"cart_files\" must be an object of part: file (e.g. \"shoulder\")");
+        std::array<std::string, 10> out;
+        for (auto& [key, val] : r.items()) {
+            int k = -1;
+            for (int p = 0; p < 10; p++) if (key == parts[p]) k = p;
+            if (k < 0) fail(where + ": unknown uniform part \"" + key + "\" (e.g. shoulder, jersey)");
+            std::string f = val.is_string() ? val.get<std::string>() : "";
+            for (char& c : f) c = (char)std::tolower((unsigned char)c);
+            if (f.size() < 5 || f.size() > 14 || f.substr(f.size() - 4) != ".wms") fail(where + " " + key + ": a .wms in files/added, at most 14 characters");
+            out[(size_t)k] = f;
+        }
+        return out;
+    }
+
+    // "uv_overrides": {"<name>": {"part": "shoulder", "source"?: {...}, "meshes": [{"model", "block", "end",
+    // "vertices": [{"at", "st": [[S, T], ...], "uv": [[S, T], ...]}]}]}} (tools/uv_override.py): per model block of
+    // main's player models, the vertex buffers' stock S/T (checked in RDRAM before use) and the set's S/T.
+    blitz::UvOverrides parse_uv_overrides(const json& u) {
+        blitz::UvOverrides out;
+        if (!u.is_object() || u.size() > 4) fail("\"uv_overrides\" must be an object of at most 4 tables");
+        auto hex = [](const json& v, const std::string& where) {
+            std::string s = v.is_string() ? v.get<std::string>() : "";
+            uint32_t a = 0;
+            if (s.size() != 8 || std::sscanf(s.c_str(), "%8X", &a) != 1) fail(where + ": an address is 8 hex digits");
+            if (a < 0x80240000u || a >= 0x802B0000u || (a & 7)) fail(where + ": " + s + " isn't in main's player models");
+            return a;
+        };
+        for (auto& [name, t] : u.items()) {
+            std::string where = "uv_overrides " + name;
+            only_keys(t, {"part", "source", "caps", "meshes"}, where);
+            blitz::UvTable table;
+            table.name = name;
+            table.part = t.value("part", "");
+            if (table.part != "shoulder") fail(where + ": \"part\" must be \"shoulder\" (the one this build draws)");
+            if (t.contains("caps")) {
+                // {"right": "0B000300", "left": "0B000340"}: each cap's G_MTX (segment 11's bone matrices).
+                if (!t["caps"].is_object() || t["caps"].empty() || t["caps"].size() > 4) fail(where + ": \"caps\" names 1-4 caps");
+                for (auto& [cap, v] : t["caps"].items()) {
+                    std::string s = v.is_string() ? v.get<std::string>() : "";
+                    uint32_t a = 0;
+                    if (s.size() != 8 || std::sscanf(s.c_str(), "%8X", &a) != 1 || (a >> 24) != 0x0B || (a & 0x3F)) {
+                        fail(where + ": cap \"" + cap + "\" is a bone matrix's G_MTX address, 0Bxxxxxx (8 hex digits)");
+                    }
+                    for (const blitz::UvCap& c : table.caps) if (c.mtx == a) fail(where + ": two caps on one bone");
+                    table.caps.push_back({cap, a});
+                }
+            }
+            if (!t.contains("meshes") || !t["meshes"].is_array() || t["meshes"].size() > 16) fail(where + ": \"meshes\" must list at most 16 blocks");
+            for (const json& m : t["meshes"]) {
+                only_keys(m, {"model", "block", "end", "vertices"}, where + " mesh");
+                blitz::UvMesh mesh;
+                mesh.model = m.contains("model") && m["model"].is_number_integer() ? m["model"].get<int>() : -1;
+                mesh.block = hex(m.value("block", json()), where + " block");
+                mesh.end = hex(m.value("end", json()), where + " end");
+                if (mesh.end <= mesh.block || mesh.end - mesh.block > 8 * 48) fail(where + ": a block of 1-48 commands");
+                if (!m.contains("vertices") || !m["vertices"].is_array() || m["vertices"].empty() || m["vertices"].size() > 4) {
+                    fail(where + ": each block lists 1-4 vertex buffers");
+                }
+                for (const json& v : m["vertices"]) {
+                    only_keys(v, {"at", "st", "uv"}, where + " vertices");
+                    blitz::UvVerts vs;
+                    vs.at = hex(v.value("at", json()), where + " vertices");
+                    auto pairs = [&](const char* key) {
+                        std::vector<std::array<int16_t, 2>> out;
+                        if (!v.contains(key) || !v[key].is_array() || v[key].empty() || v[key].size() > 32) fail(where + ": \"" + key + "\" lists 1-32 [S, T]");
+                        for (const json& p : v[key]) {
+                            if (!p.is_array() || p.size() != 2 || !p[0].is_number_integer() || !p[1].is_number_integer() ||
+                                p[0].get<int>() < -32768 || p[0].get<int>() > 32767 || p[1].get<int>() < -32768 || p[1].get<int>() > 32767) {
+                                fail(where + ": \"" + key + "\" entries are [S, T], 16-bit");
+                            }
+                            out.push_back({(int16_t)p[0].get<int>(), (int16_t)p[1].get<int>()});
+                        }
+                        return out;
+                    };
+                    vs.st = pairs("st");
+                    vs.uv = pairs("uv");
+                    if (vs.st.size() != vs.uv.size()) fail(where + ": \"st\" and \"uv\" list the same vertices");
+                    mesh.verts.push_back(std::move(vs));
+                }
+                table.meshes.push_back(std::move(mesh));
+            }
+            out.tables.push_back(std::move(table));
+        }
+        return out;
+    }
+
     // "league": {"name", "modes": ["arcade", "tournament"?, "play_editor"?], "ladder"?: tiers of team ids,
     // "ladder_done"?: 4 ids}, with "teams" as the complete list of the league's teams (2-31).
     League parse_league(const json& l, const json& teams) {
@@ -316,7 +470,7 @@ namespace {
             fail("a league pak's \"teams\" must list 2-31 teams");
         }
         for (const json& t : teams) {
-            only_keys(t, {"id", "base", "city", "nickname", "select", "abbr", "announcer", "cpu_skill", "uniform", "uniform_files", "clashes_with", "vs_helmet_right", "ratings", "players"}, "league team");
+            only_keys(t, {"id", "base", "city", "nickname", "select", "abbr", "announcer", "cpu_skill", "uniform", "uniform_files", "uniform_sets", "clashes_with", "vs_helmet_right", "uv_override", "cart_files", "ratings", "players"}, "league team");
             LeagueTeam lt;
             lt.id = text(t, "id", 4, false, "league team");
             std::string where = "team " + lt.id;
@@ -354,6 +508,83 @@ namespace {
                     }
                     if (!found) fail(where + ": unknown uniform part \"" + key + "\" (e.g. jersey_home, pants_away)");
                     if (f.size() < 5 || f.size() > 14 || f.substr(f.size() - 4) != ".wms") fail(where + " " + key + ": a .wms in files/added, at most 14 characters");
+                }
+            }
+            if (t.contains("uniform_sets")) {
+                // [{"id": "home"|"away"|<alternate>, "name", "dark"?, "files"? {part: file}, "clashes"? ["TEAM.set", ...]}]
+                static const char* const parts[10] = {"helmet_side", "helmet_stripe_front", "helmet_stripe_back", "facemask", "shoulder",
+                                                      "jersey", "pant_stripe", "pants", "socks", "numbers"};
+                if (!t["uniform_sets"].is_array() || t["uniform_sets"].size() > 12) fail(where + ": \"uniform_sets\" must be a list of at most 12 sets");
+                for (const json& s : t["uniform_sets"]) {
+                    only_keys(s, {"id", "name", "dark", "files", "clashes", "uv_override", "cart_files"}, where + " uniform set");
+                    LeagueTeam::Set set;
+                    // The id and name are the app's (toasts, logs), never drawn by the game: any printable ASCII.
+                    auto ascii = [&](const char* key, size_t max, bool id_chars, const std::string& w) {
+                        std::string v = s.contains(key) && s[key].is_string() ? s[key].get<std::string>() : "";
+                        if (v.empty() || v.size() > max ||
+                            !std::all_of(v.begin(), v.end(), [&](char c) {
+                                return id_chars ? (std::isalnum((unsigned char)c) || c == '_' || c == '-') : (c >= 0x20 && c < 0x7F);
+                            })) {
+                            fail(w + ": \"" + key + "\" must be 1-" + std::to_string(max) + (id_chars ? " letters, digits, _ or -" : " ASCII characters"));
+                        }
+                        return v;
+                    };
+                    set.id = ascii("id", 24, true, where + " uniform set");
+                    std::string sw = where + " set " + set.id;
+                    if (std::any_of(lt.sets.begin(), lt.sets.end(), [&](const LeagueTeam::Set& o) { return o.id == set.id; })) fail(sw + " appears twice");
+                    set.name = s.contains("name") ? ascii("name", 31, false, sw) : set.id;
+                    if (s.contains("dark")) {
+                        if (!s["dark"].is_boolean()) fail(sw + ": \"dark\" must be true or false");
+                        set.dark = s["dark"].get<bool>();
+                    }
+                    bool base_set = set.id == "home" || set.id == "away";
+                    if (s.contains("files")) {
+                        if (base_set) fail(sw + ": home and away take their parts from \"uniform_files\"");
+                        if (!s["files"].is_object()) fail(sw + ": \"files\" must be an object");
+                        for (auto& [key, val] : s["files"].items()) {
+                            std::string f = val.is_string() ? val.get<std::string>() : "";
+                            for (char& c : f) c = (char)std::tolower((unsigned char)c);
+                            int k = -1;
+                            for (int p = 0; p < 10; p++) if (key == parts[p]) k = p;
+                            if (k < 0) fail(sw + ": unknown uniform part \"" + key + "\" (e.g. jersey, pants)");
+                            if (f.size() < 5 || f.size() > 14 || f.substr(f.size() - 4) != ".wms") fail(sw + " " + key + ": a .wms in files/added, at most 14 characters");
+                            set.files[(size_t)k] = f;
+                        }
+                    }
+                    else if (!base_set) fail(sw + ": an alternate set needs \"files\"");
+                    if (s.contains("clashes")) {
+                        if (!s["clashes"].is_array()) fail(sw + ": \"clashes\" must be a list of \"TEAM.set\"");
+                        for (const json& c : s["clashes"]) {
+                            std::string v = c.is_string() ? c.get<std::string>() : "";
+                            size_t dot = v.find('.');
+                            if (dot == std::string::npos || dot == 0 || dot + 1 == v.size()) fail(sw + ": clash \"" + v + "\" isn't \"TEAM.set\"");
+                            set.clashes.emplace_back(v.substr(0, dot), v.substr(dot + 1));
+                        }
+                    }
+                    if (s.contains("uv_override")) lt.uv[set.id] = uv_ref(s["uv_override"], sw + " " + set.id);
+                    if (s.contains("cart_files")) lt.cart[set.id] = cart_ref(s["cart_files"], sw + " cart_files");
+                    if (!base_set) {  // the picker's alternates (league_sets.h)
+                        blitz::LeagueUniformSet alt;
+                        alt.id = set.id;
+                        alt.name = set.name;
+                        alt.dark = set.dark.value_or(true);
+                        alt.files = set.files;
+                        lt.uniform_sets.push_back(std::move(alt));
+                    }
+                    lt.sets.push_back(std::move(set));
+                }
+            }
+            if (t.contains("uv_override")) {
+                // {"home": {"table": "shoulder_caps", "file": "csu_shu_h.wms"}, "away": {...}} (tools/uv_override.py)
+                only_keys(t["uv_override"], {"home", "away"}, where + " uv_override");
+                for (auto& [side, ref] : t["uv_override"].items()) lt.uv[side] = uv_ref(ref, where + " uv_override " + side);
+            }
+            if (t.contains("cart_files")) {
+                // {"home": {"shoulder": "csu_shl_hc.wms"}, "away": {...}} (tools/make_league_pak.py --cart)
+                only_keys(t["cart_files"], {"home", "away"}, where + " cart_files");
+                for (auto& [side, ref] : t["cart_files"].items()) {
+                    if (lt.cart.count(side)) fail(where + " " + side + ": \"cart_files\" given twice (the team's and its set's)");
+                    lt.cart[side] = cart_ref(ref, where + " cart_files " + side);
                 }
             }
             if (t.contains("vs_helmet_right")) {
@@ -399,6 +630,18 @@ namespace {
             if (!teams[k]["clashes_with"].is_array()) fail("team " + out.teams[k].id + ": \"clashes_with\" must be a list of team ids");
             for (const json& c : teams[k]["clashes_with"]) out.teams[k].clashes_with.push_back(team_id(c, "team " + out.teams[k].id + " clashes_with"));
         }
+        for (const LeagueTeam& t : out.teams) {
+            for (const LeagueTeam::Set& s : t.sets) {
+                for (const auto& [team, set] : s.clashes) {
+                    team_id(json(team), "team " + t.id + " set " + s.id + " clashes");
+                    const LeagueTeam& o = *std::find_if(out.teams.begin(), out.teams.end(), [&](const LeagueTeam& x) { return x.id == team; });
+                    if (set != "home" && set != "away" &&
+                        std::none_of(o.sets.begin(), o.sets.end(), [&](const LeagueTeam::Set& x) { return x.id == set; })) {
+                        fail("team " + t.id + " set " + s.id + " clashes: " + team + " has no set \"" + set + "\"");
+                    }
+                }
+            }
+        }
         if (l.contains("ladder")) {
             if (!l["ladder"].is_array() || l["ladder"].empty() || l["ladder"].size() > 9) fail("league: \"ladder\" must list 1-9 tiers");
             for (const json& tier : l["ladder"]) {
@@ -416,7 +659,7 @@ namespace {
 
     Pack parse(const json& root) {
         Pack pack;
-        only_keys(root, {"format", "id", "title", "version", "requires_rom", "order", "teams", "season", "league"}, "pack");
+        only_keys(root, {"format", "id", "title", "version", "requires_rom", "order", "teams", "season", "league", "uv_overrides"}, "pack");
         if (root.value("format", "") != "blitz-pack/2") {
             fail("\"format\" must be \"blitz-pack/2\" for the 2026 build");
         }
@@ -439,8 +682,59 @@ namespace {
                 fail("a league pak has no \"order\" or \"season\" (it plays Arcade, not Season)");
             }
             pack.league = parse_league(root["league"], root.contains("teams") ? root["teams"] : json::array());
+            if (root.contains("uv_overrides")) pack.uv = parse_uv_overrides(root["uv_overrides"]);
+            // Each set with an override: keyed on the set's own part file (what the side is dressed in).
+            for (const LeagueTeam& t : pack.league->teams) {
+                for (const auto& [set, ref] : t.uv) {
+                    std::string where = "team " + t.id + " " + set + " uv_override";
+                    if (!pack.uv) fail(where + ": the pack has no \"uv_overrides\"");
+                    auto table = std::find_if(pack.uv->tables.begin(), pack.uv->tables.end(), [&](const blitz::UvTable& x) { return x.name == ref.table; });
+                    if (table == pack.uv->tables.end()) fail(where + ": no table \"" + ref.table + "\"");
+                    std::vector<blitz::UvCapTexture> caps;
+                    for (const auto& [cap, file] : ref.caps) {
+                        auto c = std::find_if(table->caps.begin(), table->caps.end(), [&](const blitz::UvCap& x) { return x.name == cap; });
+                        if (c == table->caps.end()) fail(where + ": table \"" + ref.table + "\" has no cap \"" + cap + "\"");
+                        caps.push_back({cap, file, c->mtx, {}});
+                    }
+                    constexpr uint32_t part = 4;  // shoulder (the one part a table draws in this build)
+                    std::string stock;
+                    if (set == "home" || set == "away") {
+                        auto f = t.uniform_files.find(part * 2 + (set == "away" ? 1 : 0));
+                        if (f != t.uniform_files.end()) stock = f->second;
+                    } else {
+                        for (const blitz::LeagueUniformSet& s : t.uniform_sets) if (s.id == set) stock = s.files[part];
+                    }
+                    if (stock.empty()) fail(where + ": the set needs its own shoulder file to be told apart");
+                    pack.uv->entries.push_back({t.id, set, stock, ref.file, (size_t)(table - pack.uv->tables.begin()), {}, std::move(caps)});
+                }
+            }
+            // Each set's cart textures: keyed on the set's own part file (what its side's block points at).
+            for (const LeagueTeam& t : pack.league->teams) {
+                for (const auto& [set, files] : t.cart) {
+                    for (uint32_t part = 0; part < 10; part++) {
+                        const std::string& cart = files[part];
+                        if (cart.empty()) continue;
+                        std::string where = "team " + t.id + " " + set + " cart_files", stock;
+                        if (set == "home" || set == "away") {
+                            auto f = t.uniform_files.find(part * 2 + (set == "away" ? 1 : 0));
+                            if (f != t.uniform_files.end()) stock = f->second;
+                        } else {
+                            auto s = std::find_if(t.uniform_sets.begin(), t.uniform_sets.end(), [&](const blitz::LeagueUniformSet& u) { return u.id == set; });
+                            if (s == t.uniform_sets.end()) fail(where + ": the team has no set \"" + set + "\"");
+                            stock = s->files[part];
+                        }
+                        if (stock.empty()) fail(where + ": the set needs its own file for that part to be told apart");
+                        if (stock == cart) fail(where + ": the cart file is the set's own");
+                        auto& list = pack.league->cart_files;
+                        auto same = std::find_if(list.begin(), list.end(), [&](const auto& e) { return e.first == stock; });
+                        if (same == list.end()) list.emplace_back(stock, cart);
+                        else if (same->second != cart) fail(where + ": " + stock + " already goes to the cart as " + same->second);
+                    }
+                }
+            }
             return pack;
         }
+        if (root.contains("uv_overrides")) fail("\"uv_overrides\" belong to a league pak");
 
         if (root.contains("order")) {
             if (!root["order"].is_array()) {
@@ -546,34 +840,68 @@ namespace {
         return file.filename() == "pack.json" && file.has_parent_path() ? file.parent_path().filename().string() : file.filename().string();
     }
 
+    // The pack file `active` was parsed from. A pack that failed to load never sets it, so nothing of that pack (its
+    // files/added, art, sets, team edits) is picked up anywhere (active_pack_dir).
+    std::filesystem::path loaded_file;
+
+    // Parses `file` into `active`; throws PackError / json::exception, leaving `active` and `loaded_file` untouched.
+    void load_pack_file(const std::filesystem::path& file) {
+        std::ifstream in{file};
+        if (!in) {
+            fail("can't open it");
+        }
+        json root;
+        try {
+            root = json::parse(in);
+        }
+        catch (const json::exception& e) {
+            fail(std::string("not valid JSON: ") + e.what());
+        }
+        std::optional<Pack> parsed = parse(root);
+        if (parsed->uv) {
+            // Each override's texture, from the pak's files/added (a set without one just stays stock).
+            auto read = [&](const std::string& name, std::vector<uint8_t>& to) {
+                if (name.empty()) return;
+                std::ifstream t{file.parent_path() / "files" / "added" / name, std::ios::binary};
+                to.assign(std::istreambuf_iterator<char>(t), {});
+            };
+            for (blitz::UvEntry& e : parsed->uv->entries) {
+                read(e.texture_file, e.texture);
+                for (blitz::UvCapTexture& c : e.caps) read(c.file, c.texture);
+            }
+        }
+        active = std::move(parsed);
+        loaded_file = file;
+        fprintf(stderr, "[pack] '%s' (%s%s%s): %zu %s\n", active->title.c_str(), active->id.c_str(),
+                active->version.empty() ? "" : ", version ", active->version.c_str(),
+                active->league ? active->league->teams.size() : active->teams.size(), active->league ? "league teams" : "team edits");
+    }
+
     void load_pack() {
         std::filesystem::path file = find_pack_file();
         if (file.empty()) {
             return;
         }
+        std::string why;
         try {
-            std::ifstream in{file};
-            if (!in) {
-                fail("can't open it");
-            }
-            json root;
-            try {
-                root = json::parse(in);
-            }
-            catch (const json::exception& e) {
-                fail(std::string("not valid JSON: ") + e.what());
-            }
-            active = parse(root);
-            fprintf(stderr, "[pack] '%s' (%s%s%s): %zu %s\n", active->title.c_str(), active->id.c_str(),
-                    active->version.empty() ? "" : ", version ", active->version.c_str(),
-                    active->league ? active->league->teams.size() : active->teams.size(), active->league ? "league teams" : "team edits");
+            load_pack_file(file);
+            return;
         }
-        catch (const PackError& e) {
-            blitz::post_notice("Content pack \"" + label(file) + "\" wasn't loaded: " + e.msg + ". Playing without it.");
+        catch (const PackError& e) { why = e.msg; }
+        catch (const json::exception& e) { why = e.what(); }
+        // A pack that fails contributes nothing: no files, art, sets or team edits (active_pack_dir needs loaded_file).
+        active.reset();
+        loaded_file.clear();
+        if (!blitz::league_selected()) {
+            blitz::league_notice("Content Pack", "Content pack \"" + label(file) + "\" wasn't loaded: " + why + ". Playing without it.");
+            return;
         }
-        catch (const json::exception& e) {
-            blitz::post_notice("Content pack \"" + label(file) + "\" wasn't loaded: " + e.what() + ". Playing without it.");
-        }
+        // A League pak: our modal, then the NFL 2026 roster pack (the same one League = NFL 2026 plays) if there is one.
+        blitz::league_notice("League Pak", blitz::league_title(blitz::league_id()) + " couldn't be loaded: " + why + ". Playing " + "NFL 2026" + ".");
+        std::filesystem::path nfl = content_pack_file("blitz2026");
+        if (nfl.empty() || nfl == file) return;
+        try { load_pack_file(nfl); }
+        catch (...) { active.reset(); loaded_file.clear(); }
     }
 
     // Guest memory access (sign-extended KSEG0 addresses, as the recompiled code holds them).
@@ -888,9 +1216,9 @@ namespace blitz {
         if (active && active->season) {
             return &*active->season;
         }
-        static std::optional<SeasonData> builtin;
-        static std::once_flag builtin_once;
+        std::optional<SeasonData>& builtin = builtin_season;
         std::call_once(builtin_once, [] {
+            std::optional<SeasonData>& builtin = builtin_season;
             std::filesystem::path file = content_pack_file("blitz2026");
             if (file.empty()) {
                 fprintf(stderr, "[pack] no built-in season (no 2026 Season: Advanced steps aside)\n");
@@ -914,8 +1242,8 @@ namespace blitz {
 
     // The active pack's folder (its files/ are game images, applied at art_init), or empty.
     std::filesystem::path active_pack_dir() {
-        std::filesystem::path file = find_pack_file();
-        return file.empty() || !blitz::file_exists(file) ? std::filesystem::path{} : file.parent_path();
+        std::call_once(load_once, load_pack);  // only a pack that parsed: a rejected one adds nothing
+        return !active || loaded_file.empty() || !blitz::file_exists(loaded_file) ? std::filesystem::path{} : loaded_file.parent_path();
     }
 
     // At on_init, before the file system loads: a league pak's files/added/*.wms become new game files
@@ -933,7 +1261,7 @@ namespace blitz {
             std::ifstream f{e.path(), std::ios::binary};
             std::vector<uint8_t> data{std::istreambuf_iterator<char>(f), {}};
             if (data.size() < 32 || data[0] != 'w' || data[1] != 'n' || !blitz::fs_register_file(name, std::move(data))) {
-                blitz::post_notice("League pak file \"" + name + "\" wasn't added (a .wms of at most 14 characters).");
+                blitz::league_notice("League Pak", "League pak file \"" + name + "\" wasn't added (a .wms of at most 14 characters).");
                 continue;
             }
             n++;
@@ -945,6 +1273,90 @@ namespace blitz {
     bool league_active() {
         std::call_once(load_once, load_pack);
         return active && active->league;
+    }
+
+    // A league team's uniform sets (team: its index in the store, which is the pak's order), numbered as the Uniform
+    // Picker counts them: 0 home, 1 away, 2 + k its k-th alternate ("uniform_sets" entries other than home and away).
+    namespace {
+        const LeagueTeam* league_team(int team) {
+            if (!league_active() || team < 0 || (size_t)team >= active->league->teams.size()) return nullptr;
+            return &active->league->teams[(size_t)team];
+        }
+        const LeagueTeam::Set* league_set(const LeagueTeam& t, int set) {
+            int alt = -1;
+            for (const LeagueTeam::Set& s : t.sets) {
+                if (set == 0 && s.id == "home") return &s;
+                if (set == 1 && s.id == "away") return &s;
+                if (s.id != "home" && s.id != "away" && ++alt == set - 2) return &s;
+            }
+            return nullptr;
+        }
+        std::string league_set_id(const LeagueTeam& t, int set) {
+            if (set == 0) return "home";
+            if (set == 1) return "away";
+            const LeagueTeam::Set* s = league_set(t, set);
+            return s ? s->id : "";
+        }
+    }
+    // A set's name ("" when the pak gives none) and shade (1 a colour jersey, 0 a white one, -1 not said).
+    std::string league_set_name(int team, int set) {
+        const LeagueTeam* t = league_team(team);
+        const LeagueTeam::Set* s = t ? league_set(*t, set) : nullptr;
+        return s ? s->name : "";
+    }
+    int league_set_dark(int team, int set) {
+        const LeagueTeam* t = league_team(team);
+        const LeagueTeam::Set* s = t ? league_set(*t, set) : nullptr;
+        return s && s->dark ? (*s->dark ? 1 : 0) : -1;
+    }
+    // Whether the pak lists these two sets as a clash (either way round). False when it lists no set clashes.
+    bool league_sets_clash(int team_a, int set_a, int team_b, int set_b) {
+        const LeagueTeam* a = league_team(team_a);
+        const LeagueTeam* b = league_team(team_b);
+        if (!a || !b) return false;
+        std::string ia = league_set_id(*a, set_a), ib = league_set_id(*b, set_b);
+        auto lists = [](const LeagueTeam& x, const std::string& xs, const LeagueTeam& y, const std::string& ys) {
+            for (const LeagueTeam::Set& s : x.sets) {
+                if (s.id != xs) continue;
+                for (const auto& [team, set] : s.clashes) if (team == y.id && set == ys) return true;
+            }
+            return false;
+        };
+        return lists(*a, ia, *b, ib) || lists(*b, ib, *a, ia);
+    }
+    // The pak lists clashes per set (then they decide; the team-level clash matrix only picks the game's first try).
+    bool league_has_set_clashes() {
+        if (!league_active()) return false;
+        for (const LeagueTeam& t : active->league->teams)
+            for (const LeagueTeam::Set& s : t.sets)
+                if (!s.clashes.empty()) return true;
+        return false;
+    }
+
+    // The active league pak's per-set texture coordinates (uv_overrides.cpp), or nullptr.
+    const UvOverrides* league_uv_overrides() {
+        if (!league_active() || !active->uv) return nullptr;
+        return &*active->uv;
+    }
+
+    // Export ROM (export_rom.cpp): a uniform part's file id as the cart wears it: a league set's "cart_files" texture
+    // in place of the set's own file (ids are TOC index + 1, as the team blocks hold them); any other id as it is.
+    uint16_t league_cart_part(uint16_t id) {
+        if (id == 0 || !league_active()) return id;
+        for (const auto& [own, cart] : active->league->cart_files) {
+            int32_t a = fs_file_index(own), b = fs_file_index(cart);
+            if (a >= 0 && b >= 0 && id == (uint16_t)(a + 1)) return (uint16_t)(b + 1);
+        }
+        return id;
+    }
+    // How many set parts an exported cart wears from "cart_files" (the export's log).
+    size_t league_cart_files() { return league_active() ? active->league->cart_files.size() : 0; }
+
+    // A league team's alternates (uniform_sets), by its index in the store (the pak's order), or nullptr.
+    const std::vector<LeagueUniformSet>* league_uniform_sets(int team) {
+        if (!league_active() || team < 0 || (size_t)team >= active->league->teams.size()) return nullptr;
+        const auto& sets = active->league->teams[(size_t)team].uniform_sets;
+        return sets.empty() ? nullptr : &sets;
     }
 }
 
@@ -973,6 +1385,11 @@ namespace {
     }
 }
 
+namespace blitz {
+    // Export ROM (export_rom.cpp): whether a league pak plays this main-menu mode (0 Arcade .. 3 Play Editor).
+    bool league_plays_mode(int mode) { return league_active() && !mode_off(mode); }
+}
+
 // Main menu (main func_80256AA0) with a league pak: only its modes can be picked. 0: after the entries
 // are made (0x80256D30); 1: where UP and DOWN meet (0x802570E4, v0 stays 0xF); 2: after the redraw's grey
 // loop (0x8025712C); 3: before the button dispatch (0x80257250, s0 = the button).
@@ -983,14 +1400,13 @@ extern "C" void blitz_league_menu(uint8_t* rdram, recomp_context* ctx, int32_t w
         case 0: {
             if (mode_off(mode)) MEM_W(0, guest(menu_mode)) = 0;
             grey_off_modes(rdram, ctx);
-            static bool told = false;
-            if (!told) {
-                told = true;
+            static std::string told;  // once per league pack (a restart in place can bring another)
+            if (told != active->id) {
+                told = active->id;
                 const League& lg = *active->league;
                 std::string modes = lg.tournament && lg.play_editor ? "Arcade, Tournament and Play Editor"
                                   : lg.tournament ? "Arcade and Tournament" : lg.play_editor ? "Arcade and Play Editor" : "Arcade";
-                blitz::post_notice(active->title + " plays " + modes + ". Season is off for league paks; pick another "
-                                   "roster in Settings \u2192 Season \u2192 Rosters to play one.");
+                blitz::league_menu_notice(active->title, modes);  // our modal, with a way back to NFL 2026 (season_settings.cpp)
             }
             break;
         }
@@ -1133,7 +1549,7 @@ extern "C" void blitz_on_dma_done(uint8_t* rdram, uint32_t rom_end, int32_t ram_
     if (auto problem = apply(rdram, active ? &*active : nullptr)) {
         if (!reported) {
             reported = true;
-            blitz::post_notice(std::string(active ? "Content pack '" + active->title + "'" : adv ? "Advanced mode" : "The art drop-in") +
+            blitz::league_notice("Content Pack", std::string(active ? "Content pack '" + active->title + "'" : adv ? "Advanced mode" : "The art drop-in") +
                                " wasn't applied: " + *problem + ".");
         }
         if (!adv) {
@@ -1172,6 +1588,8 @@ extern "C" void blitz_e32_on_ovl_a(uint8_t* rdram);
 
 namespace {
     bool teams_built = false;
+    // Restart in place (soft_restart.cpp): the store is built again from this boot's pack, or the ROM's own teams.
+    [[maybe_unused]] const bool teams_soft_reset = blitz::on_soft_reset("teams", [] { teams_built = false; });
 
     void build_teams(uint8_t* rdram) {
         blitz::e32_build_store([](const std::string& nick) { auto f = franchise_of(nick); return f ? *f : std::string{}; });
@@ -1184,7 +1602,7 @@ namespace {
         }
         else if (active) {
             if (auto problem = check_expects(st, *active)) {
-                blitz::post_notice("Content pack '" + active->title + "' wasn't applied: " + *problem + ".");
+                blitz::league_notice("Content Pack", "Content pack '" + active->title + "' wasn't applied: " + *problem + ".");
             }
             else {
                 edit_teams(st, *active);

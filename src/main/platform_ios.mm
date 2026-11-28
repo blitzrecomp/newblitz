@@ -224,10 +224,37 @@ namespace blitz {
         const char* home = getenv("HOME");
         return std::filesystem::path(home ? home : "") / "Documents";
     }
+
+    // Add-Ons' Open Folder (blitz_host.h): the Files app at that Documents folder, by its shareddocuments:// address (the
+    // Files app's own; it opens an app's shared folder as Files → On My iPhone → New Blitz shows it). The app folder itself
+    // (Application Support) isn't one Files can show: a ROM or a .nbpak pak put in Documents goes in at the next start.
+    void open_app_folder_in_files(std::function<void(bool)> done) {
+        std::error_code ec;
+        std::filesystem::path docs = rom_drop_folder();
+        std::filesystem::create_directories(docs, ec);
+        NSString* path = [NSString stringWithUTF8String:docs.string().c_str()];
+        NSString* escaped = [path stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLPathAllowedCharacterSet]];
+        NSURL* url = escaped ? [NSURL URLWithString:[@"shareddocuments://" stringByAppendingString:escaped]] : nil;
+        if (url == nil) {
+            if (done) done(false);
+            return;
+        }
+        auto* cb = new std::function<void(bool)>(std::move(done));
+        [url retain];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:^(BOOL ok) {
+                fprintf(stderr, "[folder] Files app at %s: %s\n", [[url absoluteString] UTF8String], ok ? "opened" : "refused");
+                if (*cb) (*cb)(ok);
+                delete cb;
+            }];
+            [url release];
+        });
+    }
 }
 
 namespace blitz {
     void window_created(SDL_Window*) {}
+    bool relaunch_app() { return false; }  // blitz_host.h: Android only
 }
 
 namespace blitz {

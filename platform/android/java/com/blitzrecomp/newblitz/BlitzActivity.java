@@ -437,6 +437,92 @@ public class BlitzActivity extends SDLActivity {
         }
     }
 
+    /** httpGet for a pak's download (src/game/season_pak.cpp): nativeHttpProgress as it reads, on the calling thread. */
+    public static byte[] httpGetProgress(String url, int[] status) {
+        HttpURLConnection c = null;
+        try {
+            c = (HttpURLConnection) new URL(url).openConnection();
+            c.setConnectTimeout(15000);
+            c.setReadTimeout(30000);  // with nothing arriving: a slow line still finishes
+            // BRANDING: HTTP User-Agent
+            c.setRequestProperty("User-Agent", "BlitzRecomp");
+            status[0] = c.getResponseCode();
+            if (status[0] != 200) return null;
+            long total = c.getContentLengthLong();
+            java.io.ByteArrayOutputStream b = new java.io.ByteArrayOutputStream(total > 0 && total < (64 << 20) ? (int) total : 1 << 16);
+            try (InputStream in = c.getInputStream()) {
+                byte[] buf = new byte[1 << 16];
+                long got = 0, said = 0;
+                for (int n; (n = in.read(buf)) > 0; ) {
+                    b.write(buf, 0, n);
+                    got += n;
+                    if (got - said >= (128 << 10)) { nativeHttpProgress(got, total); said = got; }
+                }
+                nativeHttpProgress(got, total);
+            }
+            return b.toByteArray();
+        } catch (Exception e) {
+            Log.w(TAG, "httpGetProgress " + url + ": " + e);
+            return null;
+        } finally {
+            if (c != null) c.disconnect();
+        }
+    }
+
+    static native void nativeHttpProgress(long got, long total);
+
+    /** Whether the network costs by the byte (mobile data, a hotspot): the automatic pak downloads hold big ones for Wi-Fi. */
+    public static boolean networkMetered() {
+        BlitzActivity a = current;
+        if (a == null) return false;
+        try {
+            android.net.ConnectivityManager cm = (android.net.ConnectivityManager) a.getSystemService(CONNECTIVITY_SERVICE);
+            return cm != null && cm.isActiveNetworkMetered();
+        } catch (Exception e) {
+            Log.w(TAG, "networkMetered: " + e);
+            return false;
+        }
+    }
+
+    /**
+     * Add-Ons' Open Folder: the system's Files app at New Blitz's folder, through the app's own documents provider
+     * (BlitzFolder), which also lists it in the Files app's sidebar and every picker. False when no app takes it: the game
+     * then says where the folder is.
+     */
+    public static boolean openAppFolder() {
+        final BlitzActivity a = current;
+        if (a == null) return false;
+        android.net.Uri root = android.provider.DocumentsContract.buildRootUri(a.getPackageName() + ".folder", BlitzFolder.ROOT);
+        android.net.Uri doc = android.provider.DocumentsContract.buildDocumentUri(a.getPackageName() + ".folder", BlitzFolder.ROOT_DOC);
+        // The Files app (DocumentsUI) opens a provider's root by this; some phones' own file managers take a folder's document.
+        Intent[] tries = {
+            new Intent(Intent.ACTION_VIEW).setDataAndType(root, android.provider.DocumentsContract.Root.MIME_TYPE_ITEM),
+            new Intent("android.provider.action.BROWSE").setData(root),
+            new Intent(Intent.ACTION_VIEW).setDataAndType(doc, android.provider.DocumentsContract.Document.MIME_TYPE_DIR),
+        };
+        for (Intent i : tries) {
+            // Tried, not looked up first: Android 11's package visibility would hide the Files app from resolveActivity.
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            final Intent go = i;
+            final boolean[] ok = {false};
+            final java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
+            a.runOnUiThread(() -> {
+                try {
+                    a.startActivity(go);
+                    ok[0] = true;
+                } catch (Exception e) {
+                    Log.w(TAG, "openAppFolder " + go + ": " + e);
+                }
+                done.countDown();
+            });
+            try { done.await(3, java.util.concurrent.TimeUnit.SECONDS); } catch (InterruptedException e) { /* as it is */ }
+            report("[folder] " + go.getAction() + " " + go.getData() + ": " + (ok[0] ? "opened" : "refused"));
+            if (ok[0]) return true;
+        }
+        report("[folder] no app opens New Blitz's folder");
+        return false;
+    }
+
     /** A POST of a body (crash reports, src/main/crash_report.cpp): the HTTP status, or 0 when it couldn't connect. */
     public static int httpPost(String url, String contentType, byte[] body) {
         HttpURLConnection c = null;
@@ -1453,6 +1539,25 @@ public class BlitzActivity extends SDLActivity {
         v.setLongClickable(false);
         v.setFocusable(false);
         v.setFocusableInTouchMode(false);
+    }
+
+    /**
+     * From native code (platform_android.cpp relaunch_app), just before the process ends: the whole app starts again, from the
+     * launcher, once this process has ended (BlitzRestart). False if that couldn't be started.
+     */
+    public static boolean relaunch() {
+        final BlitzActivity a = current;
+        if (a == null) return false;
+        try {
+            Intent restart = new Intent(a, BlitzRestart.class);
+            restart.putExtra(BlitzRestart.PID, android.os.Process.myPid());
+            restart.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            a.startActivity(restart);
+            return true;
+        } catch (Exception e) {
+            Log.w("BlitzRecomp", "[restart] couldn't start BlitzRestart: " + e);
+            return false;
+        }
     }
 
     /** From native code, the UI's first ticks (ds_view.cpp). */

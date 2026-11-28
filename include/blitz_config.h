@@ -52,7 +52,8 @@ namespace blitz {
 
     // Per-platform features: include/blitz_platform.h (the one table of what each device has).
     constexpr bool export_available = platform::export_rom;
-    constexpr bool restart_available = platform::restart;
+    constexpr bool restart_available = platform::restart;          // the game started again (in place on a phone)
+    constexpr bool app_restart_available = platform::app_restart;  // the whole app (Reset Data)
 
     void init_config();
 }

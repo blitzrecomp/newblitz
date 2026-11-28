@@ -143,5 +143,23 @@
     "file": "touch-controls.png",
     "caption": "Touch controls in the phone app: choose a play",
     "what": "Native phone app at defensive play selection, with the touch stick and Page, Pick and Flip buttons visible"
+  },
+  {
+    "slot": "cloud-sync",
+    "file": "cloud-sync.png",
+    "caption": "Cloud Sync: turn it on, or Join with a 6-digit number",
+    "what": "The Cloud Sync panel with Turn On Cloud Sync, Join and Cancel buttons"
+  },
+  {
+    "slot": "league-paks",
+    "file": "league-settings.png",
+    "caption": "Settings \u2192 Teams \u2192 League: look with \u25c0 \u25b6, press \u00d7 to choose",
+    "what": "The Teams settings with the League row open, arrows either side of a league pak's name"
+  },
+  {
+    "slot": "uniforms-addons",
+    "file": "uniforms-addons.png",
+    "caption": "Add-Ons: the 2026 Season with its uniforms, and a league pak downloading",
+    "what": "The Add-Ons tab with the 2026 Season row, a league pak row and a download progress bar"
   }
 ]

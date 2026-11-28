@@ -1,5 +1,6 @@
-// Play art (Settings → Rules → Play Art; the team, 2026-11-26): Madden-style route ribbons painted on the turf before the
-// snap. At the line (play phase 1), the human offense's three receivers each get a ribbon with an arrowhead along the
+// Play art (Settings → Rules → Play Art; 2026-11-26): the routes painted on the turf before the snap, drawn the way
+// the playbook's play cards draw them (2026-11-28; play_art_walk.h's looks). At the line (play phase 1), the human
+// offense's three receivers each get a line with an arrowhead along the
 // route the play gives them, in the Receiver Buttons order and colours (left to right as they line up: △ green, R1
 // blue, ○ red; Y yellow on an Xbox pad); at the snap (phase 2) it's gone. Research: docs/notes/PLAY_ART.md.
 //
@@ -13,8 +14,8 @@
 // receiver's actual spot; the play's world axes come from the players' spots against the formation's numbers, so
 // side, direction and a flipped play need no flags (play_art_walk.h).
 //
-// Live (dev_input.cpp): "PLAYART off|first|full|auto" (auto: the setting), "PLAYART width 2.2", "lift 0.8",
-// "alpha 208", "ztest 0|1", "h2h 0|1" (show it when the defense is human too), "turbo 0|1" (only while Turbo is held, on by
+// Live (dev_input.cpp): "PLAYART off|first|full|auto" (auto: the setting), "PLAYART look card|blend|madden|auto",
+// "PLAYART width 3" (half width; -1 the look's), "shadow 2.6" (its offset; 0 none), "lift 0.8", "alpha 245", "ztest 0|1", "h2h 0|1" (show it when the defense is human too), "turbo 0|1" (only while Turbo is held, on by
 // default). Log: [playart].
 #include <cstring>
 #include <algorithm>
@@ -54,13 +55,14 @@ namespace {
     constexpr uint32_t gameplay_camera = 0x80318CB0, camera_callback = 0x8002B6A0;
     constexpr uint32_t list_capacity = 0x5DC0;   // the frame's list (gfx_ext.cpp, NOTES.md 14)
     constexpr uint32_t list_room = 0x2000;       // drawn only while the list so far plus this stays under 8 KB
-    constexpr uint32_t max_bytes = 0xC00;
+    constexpr uint32_t max_bytes = 0x1000;       // Full routes with their shadows reach 3.6 KB (tests/play_art_test.cpp)
     constexpr int fade_frames = 6;
 
     // Session settings: the live command's. mode -1: the setting.
     std::atomic<int> live_mode{-1};
-    std::atomic<float> half_width{3.5f}, lift{0.8f};
-    std::atomic<int> alpha{208}, ztest{1}, h2h{0};
+    std::atomic<float> half_width{-1.0f}, shadow{-1.0f}, lift{0.8f};  // -1: the look's own
+    std::atomic<int> alpha{-1}, ztest{1}, h2h{0};
+    std::atomic<int> look{(int)playart::default_look};  // PLAYART look card|blend|madden
     std::atomic<bool> turbo_gate{true};  // only while Turbo is held (PLAYART turbo 0|1)
 
     // The frame lists the game builds in (two, alternating), from blitz_gfx_prologue.
@@ -211,14 +213,17 @@ namespace {
             frames_shown = 0;
             return;
         }
-        std::array<uint32_t, 3> colour = playart::colours(blitz::port_glyph_family(port));
+        playart::LookSpec spec = playart::look_spec((playart::Look)look.load(), blitz::port_glyph_family(port));
+        std::array<uint32_t, 3>& colour = spec.colour;
         frames_shown++;
         const float fade = std::min(1.0f, (float)frames_shown / (float)fade_frames);
-        const uint32_t a = (uint32_t)std::clamp((int)std::lround((float)alpha.load() * fade), 0, 255);
-        for (auto& c : colour) c = (c & 0xFFFFFF00u) | a;
-
-        playart::Style style;
-        style.half_width = half_width.load();
+        for (auto& c : colour) {
+            const int want = alpha.load() >= 0 ? alpha.load() : (int)(c & 0xFFu);
+            c = (c & 0xFFFFFF00u) | (uint32_t)std::clamp((int)std::lround((float)want * fade), 0, 255);
+        }
+        playart::Style& style = spec.style;
+        if (half_width.load() >= 0.0f) style.half_width = half_width.load();
+        if (shadow.load() >= 0.0f) style.shadow = shadow.load();
         style.lift = lift.load();
         const playart::Cut cut = mode == 2 ? playart::Cut::Full : playart::Cut::FirstBreak;
         playart::Read32 read = [&](uint32_t addr, int32_t& out) {
@@ -227,7 +232,7 @@ namespace {
             return true;
         };
         std::vector<playart::Prim> prims;
-        const playart::Art art = playart::build_art(read, side, cut, style, colour, prims);
+        playart::Art art = playart::build_art(read, side, cut, style, colour, prims);
         const uint32_t record = art.record;
         if (art.why != nullptr) {
             log_once(std::string("none: ") + art.why + " (play " + play_name(rdram, record) + ")");
@@ -250,7 +255,14 @@ namespace {
         o.ex_group_push = {c[0].values.word0, c[0].values.word1, c[1].values.word0, c[1].values.word1};
         gEXPopMatrixGroup(c, G_MTX_MODELVIEW);
         o.ex_group_pop = {c[0].values.word0, c[0].values.word1};
-        const std::vector<uint32_t> words = playart::build_list(cursor, prims, o);
+        std::vector<uint32_t> words = playart::build_list(cursor, prims, o);
+        // A route long and bent enough (a Play Editor play) to pass the room: the same lines without their shadows.
+        if (words.size() * 4 > max_bytes && style.shadow > 0.0f) {
+            style.shadow = 0.0f;
+            prims.clear();
+            art = playart::build_art(read, side, cut, style, colour, prims);
+            words = playart::build_list(cursor, prims, o);
+        }
         const uint32_t bytes = (uint32_t)words.size() * 4;
         std::string what = "play " + play_name(rdram, record) + " side " + std::to_string(side) + " " + mode_name(mode) +
                            ": routes " + legs + " legs, " + std::to_string(prims.size()) + " prims, " + std::to_string(bytes) +
@@ -291,7 +303,7 @@ namespace blitz {
     // Settings → Rules (house_rules.cpp).
     void add_play_art_option(recomp::config::Config& c) {
         c.add_enum_option("play_art", "Play Art",
-                          "At the line before the snap, hold <b>Turbo</b> to see your receivers' routes painted on the field, Madden style, "
+                          "At the line before the snap, hold <b>Turbo</b> to see your receivers' routes painted on the field the way the playbook draws them, "
                           "in the colours of their Receiver Buttons (left to right: <b>△</b> green, <b>R1</b> blue, "
                           "<b>○</b> red), with the icons over their heads. Gone at the snap. <b>Off</b> never shows them. <b>First Break</b>: each route to its first cut. "
                           "<b>Full</b>: the whole route. Only your own plays; not when a human is on defense too.",
@@ -310,17 +322,33 @@ namespace blitz {
         else if (what == "full") live_mode = 2;
         else if (what == "auto") live_mode = -1;
         else if (what == "turbo" && has) turbo_gate = v != 0.0f;
+        else if (what == "look") {
+            std::stringstream again{args};
+            std::string w, name;
+            again >> w >> name;
+            if (name == "card") look = (int)playart::Look::Card;
+            else if (name == "blend") look = (int)playart::Look::Blend;
+            else if (name == "madden") look = (int)playart::Look::Madden;
+            else if (name == "auto") look = (int)playart::default_look;
+            else {
+                fprintf(stderr, "[playart] PLAYART look card|blend|madden|auto\n");
+                return;
+            }
+        }
+        else if (what == "shadow" && has) shadow = v;
         else if (what == "width" && has) half_width = v;
         else if (what == "lift" && has) lift = v;
         else if (what == "alpha" && has) alpha = (int)v;
         else if (what == "ztest" && has) ztest = (int)v;
         else if (what == "h2h" && has) h2h = (int)v;
         else {
-            fprintf(stderr, "[playart] PLAYART off|first|full|auto, or width|lift|alpha|ztest|h2h <n>\n");
+            fprintf(stderr, "[playart] PLAYART off|first|full|auto, look card|blend|madden|auto, or width|shadow|lift|alpha|ztest|h2h <n> (-1: the look's)\n");
             return;
         }
         relog = true;  // the next frame logs what it draws
-        fprintf(stderr, "[playart] live: mode %d (-1 the setting), half width %.2f, lift %.2f, alpha %d, ztest %d, h2h %d\n",
-                live_mode.load(), half_width.load(), lift.load(), alpha.load(), ztest.load(), h2h.load());
+        static const char* looks[] = {"card", "blend", "madden"};
+        fprintf(stderr, "[playart] live: mode %d (-1 the setting), look %s, half width %.2f, shadow %.2f, lift %.2f, alpha %d, ztest %d, h2h %d\n",
+                live_mode.load(), looks[std::clamp(look.load(), 0, 2)], half_width.load(), shadow.load(), lift.load(), alpha.load(),
+                ztest.load(), h2h.load());
     }
 }

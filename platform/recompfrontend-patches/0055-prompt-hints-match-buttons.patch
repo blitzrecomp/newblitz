@@ -1,0 +1,71 @@
+--- a/recompui/src/composites/ui_prompt.cpp
++++ b/recompui/src/composites/ui_prompt.cpp
+@@ -1,3 +1,4 @@
++#include <atomic>
+ #include <mutex>
+ 
+ #include "recompui.h"
+@@ -23,6 +24,9 @@
+     std::mutex mutex;
+ } prompt_state;
+ 
++// Blitz: the buttons the prompt up shows (2 a choice, 1 an info prompt's OK, 0 a notification), for its hint row.
++static std::atomic<int> prompt_buttons{2};
++
+ static std::function<recompui::Element*(recompui::ContextId, recompui::Element*, const char*)> panel_decorator;
+ 
+ void recompui::set_panel_decorator(std::function<Element*(ContextId, Element*, const char*)> decorator) {
+@@ -89,6 +93,7 @@
+     class PromptHints : public recompui::Element {
+         recompinput::InputDevice shown_device = recompinput::InputDevice::COUNT;
+         int shown_profile = -2;
++        int shown_buttons = -1;
+     protected:
+         std::string_view get_type_name() override { return "PromptHints"; }
+         void process_event(const recompui::Event& e) override {
+@@ -96,13 +101,16 @@
+                 return;
+             }
+             auto [device, profile] = recompui::hint_input_info();
+-            if (device != shown_device || profile != shown_profile) {
++            const int buttons = prompt_buttons.load();
++            if (device != shown_device || profile != shown_profile || buttons != shown_buttons) {
+                 shown_device = device;
+                 shown_profile = profile;
+-                recompui::build_hint_row(recompui::get_current_context(), this, {
+-                    { { recompui::MenuAction::Accept }, "Choose" },
+-                    { { recompui::MenuAction::Back }, "Cancel" },
+-                }, device, profile);
++                shown_buttons = buttons;
++                // An info prompt's one button is its OK (either press closes it); a notification has none.
++                std::vector<recompui::HintItem> items;
++                if (buttons == 2) items = { { { recompui::MenuAction::Accept }, "Choose" }, { { recompui::MenuAction::Back }, "Cancel" } };
++                else if (buttons == 1) items = { { { recompui::MenuAction::Accept }, "OK" } };
++                recompui::build_hint_row(recompui::get_current_context(), this, items, device, profile);
+             }
+             queue_update();
+         }
+@@ -295,6 +303,7 @@
+     prompt_state.prompt_controls->set_display(Display::Flex);
+     prompt_state.confirm_button->set_display(Display::Flex);
+     prompt_state.cancel_button->set_display(Display::Flex);
++    prompt_buttons = 2;
+     prompt_state.confirm_button->set_text(confirm_label_text);
+     prompt_state.cancel_button->set_text(cancel_label_text);
+     prompt_state.confirm_action = confirm_action;
+@@ -332,6 +341,7 @@
+     prompt_state.prompt_controls->set_display(Display::Flex);
+     prompt_state.confirm_button->set_display(Display::None);
+     prompt_state.cancel_button->set_display(Display::Flex);
++    prompt_buttons = 1;
+     prompt_state.cancel_button->set_text(okay_label_text);
+     prompt_state.confirm_action = {};
+     prompt_state.cancel_action = okay_action;
+@@ -365,6 +375,7 @@
+     prompt_state.prompt_controls->set_display(Display::None);
+     prompt_state.confirm_button->set_display(Display::None);
+     prompt_state.cancel_button->set_display(Display::None);
++    prompt_buttons = 0;
+     prompt_state.confirm_action = {};
+     prompt_state.cancel_action = {};
+ 

@@ -16,12 +16,48 @@ checks every 1.0.4 General id still exists and is either kept on General or plac
 | **Two Screens** (only with a second screen, or the Development rows shown) | SCREENS: Two Screens, DS Screens, Swap Screens; CAMERA: Field Ahead, Camera Zoom Out; CUSTOM LAYOUT: Custom Layout, its 21 dials, Reset Custom Layout | General (SCREENS, CAMERA); the dials were only the live `TALL` command |
 | **Controls** | CONTROLLER, above the button mappings: Player 1 Rumble, Rumble Strength, Joystick Deadzone, Button Icons, Fullscreen Button (computers), Touch Controls (phones), Background Input (computers) | General |
 | **Players** | unchanged | — |
-| **Teams** | its own rows (Game, Rosters, Lineups, Roster Room, Season, Tiebreakers…), then BRACKET: Player Names, Each Round, Matchups, Create Tournament, Show Standings | Bracket tab (hidden now; `party.json` unchanged) |
+| **Teams** | its own rows (Game, League, Rosters, Lineups, Roster Room, Season, Tiebreakers…), then BRACKET: Player Names, Each Round, Matchups, Create Tournament, Show Standings | Bracket tab (hidden now; `party.json` unchanged) |
 | **Rules** | its own rows, then DO-OVERS: Redo Play, Instant Replay; GAME FLOW: Skip Intro Screens, Skip Rumble Pak Screen | General |
 | **Saves** (new, `saves.json`) | SAVE STATES: Save State Buttons, Resume Interrupted Games; CONTROLLER PAK: Controller Pak Backups, Save Sync (when that branch is in); then rows other features add; ALL YOUR DATA: Reset Data, Restore a Backup | General |
 | **Add-Ons** | unchanged | — |
 
 Sound and Export stay hidden as before (Volume is on General; Export has its own screen).
+
+## League (1.0.6, branch `league-select`)
+
+The top of Teams:
+
+```
+GAME      New Blitz | Original 1999
+LEAGUE    <  NFL 2026  >                               every installed league pack, any number
+ROSTERS   Auto | 2026 Season | ROM's Own               NFL only: hidden for a league pack
+LINEUPS   Current (Week XX) | All Starters (Healthy)   NFL only: hidden for a league pack
+```
+
+- **League** (`season.json` `league`: "" for NFL 2026, else the pack's id) is a string option drawn as a cycling row
+  (RecompFrontend patch 0058, `recompui::config::set_option_cycle(..., confirm = true)`): one focusable < name >. Left /
+  right (D-pad, arrow keys, a tap on an arrow) only browse, and wrap: the name dims with "PRESS × TO CHOOSE" and the hint
+  row says Choose. Accept (×, Enter, a tap on the name) sets the option. Leaving the row with a browse
+  (`set_option_browse_left`) or closing / changing tab (`set_close_guard`) asks "CFL 2026 isn't chosen yet." Restart to
+  Switch / Keep NFL 2026. Rosters, Lineups and the rest follow the chosen value, never the browse. Its list (season_settings.cpp
+  `league_choices`) is NFL 2026 then every `blitz-pack/2` pack in the content folders (Resources, each installed pak,
+  `<app folder>/packs`), read again whenever a pak goes in or out (`content_dirs_generation`) and when Settings shows
+  again. A pack that's gone puts League back to NFL 2026 with a toast (league_select.cpp).
+- **Rosters** keeps Auto, 2026 Season and ROM's Own. **Lineups** is Current (labelled with the freshest lineup's week)
+  or All Starters (Healthy); Built-In and the pinned Week N are gone. Every week's lineup still downloads and stays:
+  an Advanced season plays each week with that week's lineup (`lineup_now(adv_week)`).
+- **Migration** (src/game/league_migrate.h, `make test-league`): a saved Rosters that names a pack becomes League = that
+  pack and Rosters = Auto; Lineups' `packed` and week keys become `week` (Current). Read as `season.json` loads, so a
+  file that comes in through Cloud Sync is moved the same way, and the file is written again. A 1.0.5 device reading a
+  1.0.6 file ignores `league` and plays the NFL.
+- **Restart prompts** (src/game/league_select.cpp): Game, League, Rosters and Season Mode are read as the game starts.
+  Changed during a game, they ask "Switch to CFL 2026? New Blitz restarts to load its teams." League's answers are
+  Restart Now / Later (kept for the next start); the others' Restart / Cancel (Back is the second button). The ↻ Restart button in the header shows a dot while a change waits (patch 0058's
+  `set_restart_pending`), and its prompt lists it. Lineups is read by every game, so it asks nothing.
+- **Our own modals, one at a time** from the UI tick, never over a play: the restart question, "Play CFL 2026 now?"
+  (after a league pak installs; only on the launcher or over Settings), the league pack's main-menu note (it was a
+  system dialog), the content pack and pak messages that were system dialogs, and "Standard or Advanced season?" at a
+  new season.
 
 ## For Save Sync (branch `cloud-sync`)
 

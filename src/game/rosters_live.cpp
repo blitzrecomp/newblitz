@@ -55,10 +55,12 @@ namespace {
     using json = nlohmann::json;
 
     constexpr const char* opt_lineups = "lineups";
-    enum Choice : uint32_t { ThisWeek = 0, Full = 1, Packed = 2, FirstWeek = 10 };
+    // 1.0.6 ("Current (Week XX) | All Starters (Healthy)... just do whatever is freshest from our pulls"): Built-In (2)
+    // and the pinned Week N (10+) are gone; a saved one reads as Current (season_settings.cpp). Every week's lineup still
+    // downloads and stays: an Advanced season plays each week with that week's lineup (lineup_now's adv_week).
+    enum Choice : uint32_t { Current = 0, Full = 1 };
 
     std::mutex mutex;
-    std::vector<std::string> week_keys;      // the Lineups choices 10, 11, ...: saved checkpoints at startup
     std::vector<std::string> pending_messages;  // "Rosters updated: Week 7", "Update available", shown once the game is running
     int generation = 0;                      // bumped by each download; the cache below follows it
     std::map<std::string, std::shared_ptr<const blitz::Lineup>> cache;  // label -> lineup
@@ -488,7 +490,9 @@ namespace blitz {
     // Every UI tick (main.cpp): "Rosters updated" and "Update available" toasts, once the game is running, one at a
     // time; and another check every few hours, for a phone or console that's left running (or suspended) for days.
     // By the wall clock, which keeps going while a phone sleeps.
+    void refresh_lineups_label();  // below
     void rosters_update() {
+        refresh_lineups_label();
         if (last_check != std::chrono::system_clock::time_point{} && std::chrono::system_clock::now() - last_check > std::chrono::hours(3)) {
             start_check();  // (the first check is rosters_check_start's, at launch)
         }
@@ -502,61 +506,72 @@ namespace blitz {
         }
     }
 
-    // Settings → Season → Lineups (season_settings.cpp).
-    void add_lineups_option(recomp::config::Config& config) {
-        std::vector<recomp::config::ConfigOptionEnumOption> o = {
-            {ThisWeek, "week", "This Week"}, {Full, "full", "Full Strength"}, {Packed, "packed", "Built-In"}};
-        // One week button (a row of 18 won't fit): the latest, or the week the player pinned there before a
-        // newer one arrived (read from season.json, since the option doesn't exist yet).
+    // "Current (Week 12)": the button's label, from the freshest lineup saved.
+    std::string current_label() {
         std::vector<std::string> weeks = saved_weeks();
-        std::string pinned;
+        return weeks.empty() ? "Current" : "Current (" + display(weeks.back()) + ")";
+    }
+
+    // The Lineups button was labelled when Settings was built; a lineup that has arrived since (a download, or the 2026
+    // Season pak's snapshot going in mid-run: both bump `generation`) puts its week on the label.
+    void refresh_lineups_label() {
+        static int labelled = -1;
+        {
+            std::lock_guard lock{mutex};
+            if (labelled == generation) return;
+            labelled = generation;
+        }
         try {
-            json saved = json::parse(read_file(recomp::get_config_path() / "season.json"));
-            pinned = saved.value(opt_lineups, "");
+            recomp::config::Config& season = recompui::config::get_config("season");
+            std::string label = current_label();
+            // (the label is the enum's own text, with no setter; the UI thread, which calls this, is its only reader)
+            auto& opt = const_cast<recomp::config::ConfigOption&>(season.get_option(std::string{opt_lineups}));
+            for (recomp::config::ConfigOptionEnumOption& o : std::get<recomp::config::ConfigOptionEnum>(opt.variant).options) {
+                if (o.value == Current) o.name = label;
+            }
         }
-        catch (...) {
-        }
-        week_keys.clear();
-        if (std::find(weeks.begin(), weeks.end(), pinned) != weeks.end()) week_keys.push_back(pinned);
-        else if (!weeks.empty()) week_keys.push_back(weeks.back());
-        for (size_t i = 0; i < week_keys.size(); i++) o.emplace_back((uint32_t)(FirstWeek + i), week_keys[i], display(week_keys[i]));
+        catch (...) {}
+    }
+
+    // Settings → Teams → Lineups (season_settings.cpp): Current, labelled with the freshest lineup's week, or All Starters.
+    void add_lineups_option(recomp::config::Config& config) {
+        std::string current = current_label();
         config.add_enum_option(
             opt_lineups,
             "Lineups",
-            "Which week's players take the field, with the 2026 Season's rosters. With <b>Keep Rosters and Uniforms Up to Date</b> on, new "
-            "lineups download when the app starts: on Thursdays and Saturdays during the season."
+            "Who takes the field for the NFL's teams. With <b>Keep Rosters and Uniforms Up to Date</b> on, new lineups "
+            "download when the app starts: on Thursdays and Saturdays during the season."
             "<br /><br />"
-            "<b>This Week</b>: who's starting this week, injuries and all. In an Advanced season, each week plays "
-            "that week's lineup."
+            "<b>Current</b>: the freshest lineup New Blitz has, injuries and all (the week it's from is on the button). "
+            "In an Advanced season, each week plays that week's lineup."
             "<br /><br />"
-            "<b>Full Strength</b>: every team at its best, as if everyone were healthy."
-            "<br /><br />"
-            "<b>Built-In</b>: the rosters the 2026 Season came with."
-            "<br /><br />"
-            "<b>Week N</b>: keeps that week's lineup after newer ones arrive."
+            "<b>All Starters (Healthy)</b>: every team at its best, as if everyone were healthy."
             "<br /><br />"
             "Takes effect from the next game.",
-            o, ThisWeek);
+            {{Current, "week", current}, {Full, "full", "All Starters (Healthy)"}}, Current);
     }
 
     // Settings → Teams → Roster Updates (season_settings.cpp), after Lineups.
     void add_live_rosters_option(recomp::config::Config& config) {
-        // (Was Roster Updates: since 2026-11-15 a newer 2026 Season pak follows it too, season_pak.cpp.)
+        // (Was Roster Updates: since 2026-11-15 a newer 2026 Season pak follows it too, and since 1.0.6 every pak the server
+        // posts, season_pak.cpp. On by default everywhere since 1.0.6: before, a public build had it off until asked.)
         config.add_bool_option(
             "live_rosters",
             "Keep Rosters and Uniforms Up to Date",
             "New lineups download when the app starts, on Thursdays and Saturdays during the season (and every few "
-            "hours while it runs). A newer 2026 Season (uniforms, team art) downloads too, and goes in the next time "
-            "the app starts."
+            "hours while it runs). The add-on paks New Blitz posts (the 2026 Season, the league paks) install and update "
+            "themselves when the app starts: what arrives during a game goes in the next time it starts. On mobile data, "
+            "big downloads wait for Wi-Fi."
             "<br /><br />"
-            "<b>Off</b>: nothing is downloaded; the rosters and uniforms stay as they are (the 2026 Season's, or the "
-            "last update).",
-            rosters_build_source());
+            "<b>Off</b>: nothing is downloaded by itself; the rosters, uniforms and paks stay as they are. Add-Ons' Check "
+            "still gets what's new when you press it.",
+            true);
         config.add_option_change_callback("live_rosters", [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant,
                                                              recomp::config::OptionChangeContext ctx) {
             if (ctx == recomp::config::OptionChangeContext::Permanent && std::get<bool>(cur)) {
                 recompui::config::get_config("season").save_config();  // the download thread reads season.json
                 start_check();
+                blitz::pak_sync_start(false, {}, nullptr);  // and the posted paks (season_pak.cpp)
             }
         });
     }
@@ -570,13 +585,10 @@ namespace blitz {
 
     std::shared_ptr<const Lineup> lineup_now(int adv_week) {
         std::lock_guard lock{mutex};
-        uint32_t c = choice();
-        if (c == Packed) return nullptr;
-        if (c == Full) return load("full");
+        if (choice() == Full) return load("full");
         std::vector<std::string> weeks = saved_weeks();
         if (weeks.empty()) return load("full");  // nothing downloaded yet: full strength if there's that, else the pack
-        if (c >= FirstWeek && c - FirstWeek < week_keys.size()) return load(week_keys[c - FirstWeek]);
-        if (adv_week < 0) return load(weeks.back());
+        if (adv_week < 0) return load(weeks.back());  // Current: the freshest
         // An Advanced season's week: that NFL week's checkpoint, or the latest before it; before the first
         // one, full strength.
         int year = ordinal(weeks.back()) / 100;

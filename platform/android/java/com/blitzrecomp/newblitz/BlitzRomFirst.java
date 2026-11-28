@@ -147,7 +147,7 @@ public class BlitzRomFirst extends Activity {
         head("Set up New Blitz from your computer");
         add(look.para("Open New Blitz on your Mac, Windows or Linux computer → Blitz Builder → Phone or Handheld. It sends the "
                 + "game, your ROM and your setup here over USB, and New Blitz starts here when they arrive.", 15, BlitzLook.TEXT), 8);
-        add(look.para("No computer? Pick a File Instead: your NFL Blitz 2000 ROM, the USA cartridge, v1.1 (.z64, .n64, .v64 or a "
+        add(look.para("No computer? Pick a File Instead: your NFL Blitz 2000 ROM, the USA cartridge, v1.1 or v1.0 (.z64, .n64, .v64 or a "
                 + ".zip). No touch screen? Press L1 in the file picker for its sidebar.", 13, BlitzLook.GOLD), 12);
         twoScreensNote();
         primary = look.button("Pick a File Instead", false, 38);
@@ -160,7 +160,7 @@ public class BlitzRomFirst extends Activity {
     private void showRom(String problem) {
         head("That ROM didn't work");
         add(look.para(problem, 15, BlitzLook.TEXT), 8);
-        add(look.para("The right file is NFL Blitz 2000 for the N64, USA, version 1.1. Or send it from Blitz Builder on your "
+        add(look.para("The right file is NFL Blitz 2000 for the N64, USA, version 1.1 or 1.0. Or send it from Blitz Builder on your "
                 + "computer. No touch screen? Press L1 in the file picker for its sidebar.", 13, BlitzLook.GOLD), 12);
         twoScreensNote();
         primary = look.button("Try Another", true, 46);

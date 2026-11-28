@@ -76,6 +76,8 @@ extern "C" void blitz_redo_clear() {}
 extern "C" void blitz_team_select_frame() {}
 extern "C" void blitz_savestate_tick(uint8_t*, recomp_context*) {}
 namespace blitz {
+    bool on_soft_reset(const char*, std::function<void()>) { return true; }  // no restart in place on the PSP
+    int soft_reset_count() { return 0; }
     void savestate_register(const std::string&, std::function<std::vector<uint8_t>()>, std::function<void(const std::vector<uint8_t>&)>,
                             std::function<std::string(const std::vector<uint8_t>&)>) {}
 }

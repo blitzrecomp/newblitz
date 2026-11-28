@@ -90,5 +90,61 @@ class SettingsLayout(unittest.TestCase):
         self.assertEqual(dial_ids & self.general, set())
 
 
+class TeamsRows(unittest.TestCase):
+    """Settings → Teams' top rows in 1.0.6 (branch league-select, docs/SETTINGS_LAYOUT.md "League"): Game, League (a cycling
+    row over NFL 2026 and every league pack), then the NFL's Rosters and Lineups. Saved ids stay: season.json's game,
+    rosters and lineups keep their keys; league is new."""
+
+    def setUp(self):
+        self.season = (GAME / "season_settings.cpp").read_text()
+        self.lineups = (GAME / "rosters_live.cpp").read_text()
+        self.adv = (GAME / "adv_mode.cpp").read_text()
+        self.select = (GAME / "league_select.cpp").read_text()
+
+    def test_row_order(self):
+        tab = self.season[self.season.index("void create_season_tab()"):]
+        at = [tab.index(m) for m in ("add_game_option(c)", "opt_league,", "opt_rosters,", "add_lineups_option(c)")]
+        self.assertEqual(at, sorted(at), "Game, League, Rosters, Lineups")
+
+    def test_league_is_a_cycling_row(self):
+        self.assertIn('constexpr const char* opt_league = "league"', self.season)
+        self.assertRegex(self.season, r"add_string_option\(\s*opt_league,")
+        self.assertIn('set_option_cycle("season", opt_league', self.season)
+        self.assertIn('nfl_label = "NFL 2026"', self.season)
+
+    def test_rosters_nfl_choices_only(self):
+        keys = re.findall(r'\{Rosters::\w+, "([a-z0-9]+)", "[^"]+"\}', self.season)
+        self.assertEqual(keys, ["auto", "blitz2026", "rom"])
+        self.assertNotIn("pack_choices", self.season, "packs are League's now")
+
+    def test_lineups_current_and_all_starters(self):
+        block = self.lineups[self.lineups.index("void add_lineups_option"):]
+        block = block[:block.index("\n    }\n")]
+        self.assertEqual(re.findall(r'\{(\w+), "([a-z]+)", ', block), [("Current", "week"), ("Full", "full")])
+        self.assertIn('"All Starters (Healthy)"', block)
+        self.assertIn("current_label()", block)
+        self.assertIn('"Current ("', self.lineups)
+        for gone in ("Built-In", "packed", "Week N"):
+            self.assertNotIn(gone, block, gone)
+        for gone in ("Packed", "FirstWeek", "week_keys"):  # Built-In and the pinned week, gone from the code too
+            self.assertNotIn(gone, self.lineups, gone)
+
+    def test_advanced_keeps_its_weeks(self):
+        # An Advanced season plays each week's own lineup from the kept week files (2026-11-28: Advanced kept as it is).
+        now = self.lineups[self.lineups.index("std::shared_ptr<const Lineup> lineup_now(int adv_week)"):]
+        self.assertIn("saved_weeks()", now)
+        self.assertIn("adv_week + 1", now)
+
+    def test_nfl_rows_hide_for_a_league(self):
+        self.assertIn('season.update_option_hidden("rosters", o || league)', self.adv)
+        self.assertRegex(self.adv, r'\{"lineups", "roster_room"\}\) season\.update_option_hidden\(id, o \|\| none \|\| league\)')
+
+    def test_restart_watch(self):
+        # What the game reads only as it starts asks to restart; Lineups is read by every game, so it doesn't.
+        watched = re.findall(r'\{"([a-z_]+)", "[A-Za-z ]+"\}', self.select[self.select.index("watched[] ="):])
+        self.assertEqual(watched[:4], ["game", "league", "rosters", "season_mode"])
+        self.assertNotIn("lineups", watched[:4])
+
+
 if __name__ == "__main__":
     unittest.main()

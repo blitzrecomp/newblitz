@@ -4,7 +4,9 @@
 #ifndef BLITZ_HOST_H
 #define BLITZ_HOST_H
 
+#include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <string>
 
 struct SDL_Window;
@@ -26,6 +28,18 @@ namespace blitz {
     // A blocking HTTP GET over the system's own TLS (call it off the main thread): true with the body when the server
     // answers 200. Rosters at launch (rosters_live.cpp), headshots (crew.cpp).
     bool http_get(const std::string& url, const std::string& bearer, const std::string& accept, std::string& body, int& status);
+    // The same for a download that shows its progress (Add-Ons' paks, season_pak.cpp): progress(got, total) on the calling
+    // thread as it reads (total 0 when the server doesn't say). Macs and iPhones (NSURLSession) and Android
+    // (HttpURLConnection) report as they go; Windows, Linux and the PS5 once, at the end.
+    bool http_get_progress(const std::string& url, std::string& body, int& status, const std::function<void(uint64_t got, uint64_t total)>& progress);
+    // The connection costs by the byte as far as the system can tell: Android's metered network (mobile data, a hotspot),
+    // an Apple device's expensive or Low Data path. False where it can't be told (computers' wired and Wi-Fi, the PS5).
+    bool network_metered();
+    // Open Folder on a phone (Add-Ons): the system's Files app at New Blitz's folder. iOS: the app's Documents (Files → On
+    // My iPhone → New Blitz, the drop folder) by the shareddocuments:// address; Android: the app folder through New Blitz's
+    // own documents provider (BlitzFolder.java). done(opened) once it's known (on another thread); false: say where it is.
+    // Computers use os_shell.cpp's file browser instead.
+    void open_app_folder_in_files(std::function<void(bool opened)> done);
     // A blocking HTTP POST of a body (call it off the main thread): true when the server answers 2xx. Crash reports
     // (crash_report.cpp). The PS5 has none (false).
     bool http_post(const std::string& url, const std::string& content_type, const std::string& body, int& status);
@@ -44,6 +58,10 @@ namespace blitz {
     // Once the game's window exists (main.cpp): Android follows the app's window to and from the background.
     // Elsewhere nothing.
     void window_created(SDL_Window* window);
+    // The whole app started again once this process ends (main.cpp restart_fresh, and a restart in place that failed):
+    // Android schedules its launcher activity and returns true. Elsewhere false: a computer relaunches itself in main.cpp
+    // (restart_app), an iPhone and a PS5 can't.
+    bool relaunch_app();
 #ifdef __ANDROID__
     // The window the renderer is made on: the game's surface as it is now (held), waiting while there's none
     // (platform_android.cpp). The one create_window returned may have gone with a trip to the background.

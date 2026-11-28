@@ -177,8 +177,24 @@ def cmd_scan(args) -> int:
     return 0
 
 
+def update_v10(info: dict) -> dict:
+    """A dump known_roms.json marks "updates_to" (USA v1.0) -> the one it becomes (v1.1), with the patch the app applies
+    at import (assets/rom/v10_to_v11.nbdiff; tools/make_rom_patch.py, which needs the zstd command). The SHA-1 is checked."""
+    import make_rom_patch  # tools/, beside this file
+    m = info["match"]
+    z64 = make_rom_patch.apply(info["z64"], (ROOT / m["patch"]).read_bytes())
+    h = hashes(z64)
+    target = next(r for r in known()["roms"] if r["id"] == m["updates_to"])
+    if target["md5"] != h["md5"]:
+        raise SystemExit(f"{m['patch']} made something other than {target['id']}")
+    print(f"{info['path'].name}: {m['title']} [{m['id']}], updated to [{target['id']}] with {m['patch']}")
+    return {**info, "z64": z64, "header": header(z64), "match": target, **h}
+
+
 def cmd_import(args) -> int:
     found = [i for i in scan_rom_dir() if i["match"]]
+    # USA v1.0 goes in as the v1.1 it updates to (as the app does): one game either way.
+    found = [update_v10(i) if i["match"].get("updates_to") else i for i in found]
     if args.target:
         found = [i for i in found if i["match"]["id"] == args.target]
     ids = {i["match"]["id"] for i in found}

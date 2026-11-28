@@ -124,6 +124,7 @@ namespace {
 #ifdef BLITZ_SAVESTATES
 #include "ss_runtime.h"
 #include "ss_sites.h"
+#include "zstd/lib/zstd.h"  // the menu steps' RDRAM, packed
 extern "C" ss_stack* ss_current_stack(void);  // ss_runtime.c
 extern "C" void blitz_overlay_current(int* segment, int* stadium);  // overlays.cpp
 extern "C" void blitz_overlay_load(int segment, int stadium);
@@ -249,13 +250,28 @@ namespace {
     // game, each A press is held back a frame or two while the screen it was pressed on is snapshotted, then let
     // through. Redo there goes back one press at a time, to the mode select if need be. The game's own □ BACK still
     // works where it does; this covers what it doesn't (a confirmed team, the mode).
+    // A step's RDRAM is kept zstd-packed: twelve 8 MB copies took about 100 MB on a phone (the team's Duo, 2026-11-28). A press
+    // on a screen that hasn't changed since the newest step (one the game ignored) keeps no second copy of it: those piled
+    // up, and each Back then brought back the same screen.
     constexpr size_t step_keep = 12;
-    std::deque<Snapshot> step_ring;  // oldest first
+    struct MenuStep {
+        Snapshot snap;                // its rdram is empty while packed
+        std::vector<uint8_t> packed;  // the RDRAM, a zstd frame (empty: snap.rdram has it)
+        uint64_t screen = 0;          // screen_signature() when it was taken
+    };
+    std::deque<MenuStep> step_ring;  // oldest first
     std::atomic_bool step_capture{false};
     std::atomic_bool in_menus{false};  // the menus (phase 1), where steps are kept
+    std::atomic<uint32_t> step_restores{0};    // menu steps restored so far: blitz_menu_step_input starts clean after one
+    std::atomic<int64_t> step_restored_ms{0};  // when the last was (steady_ms), for the press log after it
+    std::atomic<uint32_t> dispatcher_ticks{0};  // blitz_savestate_tick calls: a held-back press lasts at least two
+    int64_t steady_ms() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
     int step_wait = 0;
     std::atomic_int request{0};            // op (1 save, 2 load) | slot << 4; slot 0 is quit.state
     std::atomic_bool in_game{false};       // a game is being played (phase 2), for the quit prompt
+    std::atomic_int game_phase{0};         // 0x802EA420 at the last dispatcher tick (2 a play, 3 between quarters), for the freeze rescue
     std::atomic_bool quit_now{false};      // the quit's save finished: quit on the UI thread (savestate_startup_prompt)
     std::atomic_int offense_side{0};       // side with the ball (0 left team, 1 right), for phone controllers
     std::atomic_int port_side[4] = {-1, -1, -1, -1};  // each controller's team (0 left, 1 right, -1 none)
@@ -278,6 +294,8 @@ namespace {
     int waited = 0;  // dispatcher ticks, one per retrace (about 60 a second, whatever the frame rate)
     std::map<std::string, int> wait_tally;  // what each refused tick was waiting on
     std::atomic<bool> ask_resume_again{false};  // a Resume gave up: offer the pick-up toast again
+    // When the pick-up toast may come: the game's frames this many in (savestate_startup_prompt; UINT64_MAX: not counted yet).
+    std::atomic<uint64_t> resume_frames_at_start{UINT64_MAX}, resume_started_ms{0};
     std::atomic<bool> offer_open{false};     // the pick-up toast is up (UI thread sets; the game's input reads)
     std::atomic<bool> offer_pressed{false};  // C-left pressed while it was (game's input; the UI thread takes it)
     std::atomic<bool> offer_dismiss{false};  // A in the menus, □ or Start while it was: the player's doing something else
@@ -446,6 +464,47 @@ namespace {
     void take_snapshot(uint8_t* rdram, recomp_context* ctx, int32_t self) {
         snap = make_snapshot(rdram, ctx, self);
         fprintf(stderr, "[savestate] saved: %zu processes, %zu other threads\n", snap.processes.size(), snap.fixed.size());
+    }
+
+    // Which menu screen the game is on, as far as a step goes: its processes (entry and, for one asleep, where), the overlay,
+    // and what a confirm there changes (mode, Controller Select's sides, the teams chosen). Equal: nothing was picked between.
+    uint64_t screen_signature(uint8_t* rdram) {
+        uint64_t h = 1469598103934665603ULL;
+        auto mix = [&](uint64_t v) { h = (h ^ v) * 1099511628211ULL; };
+        int seg = -1, stadium = -1;
+        blitz_overlay_current(&seg, &stadium);
+        mix((uint32_t)seg);
+        mix((uint32_t)MEM_W(0, (gpr)(int32_t)0x8028B998));  // the mode
+        for (uint32_t i = 0; i < 4; i++) mix((uint32_t)MEM_W(0, (gpr)(int32_t)(0x802942A0 + 4 * i)));  // the sides
+        for (uint32_t i = 0; i < 2; i++) mix((uint32_t)MEM_W(0, (gpr)(int32_t)(0x802EA434 + 4 * i)));  // the teams chosen
+        for (int32_t p : processes(rdram)) {
+            mix((uint32_t)MEM_W(process_entry, p));
+            auto it = sleepers.find(p + process_thread);
+            if (it == sleepers.end()) continue;
+            const StackImage& s = it->second.stack;
+            for (uint32_t i = 0; i < std::min<uint32_t>(s.depth, SS_MAX_DEPTH); i++) mix(((uint64_t)s.e[i].site << 32) | s.e[i].target);
+        }
+        return h;
+    }
+
+    MenuStep pack_step(Snapshot&& s, uint64_t screen) {
+        MenuStep m;
+        m.screen = screen;
+        std::vector<uint8_t> out(ZSTD_compressBound(s.rdram.size()));
+        size_t n = ZSTD_compress(out.data(), out.size(), s.rdram.data(), s.rdram.size(), 1);
+        if (!ZSTD_isError(n)) {
+            m.packed.assign(out.begin(), out.begin() + (std::ptrdiff_t)n);
+            std::vector<uint8_t>().swap(s.rdram);
+        }
+        m.snap = std::move(s);
+        return m;
+    }
+
+    bool unpack_step(MenuStep& m) {
+        if (m.packed.empty()) return m.snap.rdram.size() == rdram_size;
+        m.snap.rdram.resize(rdram_size);
+        size_t n = ZSTD_decompress(m.snap.rdram.data(), rdram_size, m.packed.data(), m.packed.size());
+        return !ZSTD_isError(n) && n == rdram_size;
     }
 
     // The fixed threads must be the same ones, at the same call sites, as in the snapshot.
@@ -990,7 +1049,9 @@ namespace blitz {
 // has the same need (rt64_blitz_replay.cpp: a present every VI while it's set).
 extern "C" { extern volatile int blitz_replay_keep_presenting; }
 namespace {
-    enum class Rescue { none, writing, kept };
+    // kept: rescue.state written (or a newer Save & Quit save stands in); told: nothing could be kept (no snapshot, or the
+    // snapshots locked), but the player is told the game stopped, so the toast, the presents and the quit prompt work alike.
+    enum class Rescue { none, writing, kept, told };
     std::atomic<Rescue> rescue{Rescue::none};
     std::atomic<uint64_t> rescue_gen{0};    // each clear: a write that began before it keeps nothing
     std::mutex rescue_files_mutex;          // rescue.state's writing and removal (never held while waiting on threads_mutex)
@@ -1024,6 +1085,21 @@ namespace {
         return std::string("The game stopped responding. ") + how + (where.empty() ? " to pick up your game." : " to pick up from " + where + ".");
     }
 
+    // Nothing to keep (1.0.6: this was only a log line, and the player was left with a frozen screen and no word): still
+    // told the game stopped, without the promise of picking it up.
+    void rescue_nothing_kept(uint64_t gen) {
+#if defined(__ANDROID__) || defined(BLITZ_IOS) || defined(__PROSPERO__)
+        const char* how = "Close New Blitz and open it again.";
+#else
+        const char* how = "Quit New Blitz and open it again.";
+#endif
+        std::lock_guard files{rescue_files_mutex};
+        if (gen != rescue_gen.load()) return;  // the game runs again
+        rescue = Rescue::told;
+        rescue_toast = true;
+        say_held(std::string("The game stopped responding, at a moment with nothing to pick up from. ") + how);
+    }
+
     // On its own thread (or the one going to the background): the newest Redo Play snapshot to rescue.state.
     void rescue_write() {
         const uint64_t gen = rescue_gen.load();
@@ -1031,13 +1107,16 @@ namespace {
         {
             std::unique_lock lock{threads_mutex, std::defer_lock};
             if (!lock.try_lock_for(std::chrono::seconds(2))) {  // stuck holding it: a snapshot might be half made
-                fprintf(stderr, "[rescue] the game stopped with its snapshots locked: nothing kept\n");
-                rescue = Rescue::none;
+                fprintf(stderr, "[rescue] the game stopped with its snapshots locked: nothing kept, the player told\n");
+                rescue_nothing_kept(gen);
                 return;
             }
             if (redo_ring.empty()) {
-                fprintf(stderr, "[rescue] the game stopped, with no Redo Play snapshot to keep\n");
-                rescue = Rescue::none;
+                // Redo Play off (Settings, or Potato Mode under 800 MB), or a stop before the game's first play top.
+                fprintf(stderr, "[rescue] the game stopped, with no Redo Play snapshot to keep%s: nothing kept, the player told\n",
+                        blitz::redo_play_enabled() ? "" : " (Redo Play is off)");
+                lock.unlock();
+                rescue_nothing_kept(gen);
                 return;
             }
             copy = redo_ring.back();
@@ -1171,11 +1250,22 @@ namespace blitz {
                 blitz_replay_keep_presenting = 1;
                 presenting = true;
             }
-            if (this_stall || !in_game.load() || in_background.load() || blitz::background_hold.load() || blitz::replay_is_open()) return;
+            if (this_stall || in_background.load() || blitz::background_hold.load() || blitz::replay_is_open()) return;
             this_stall = true;
+            // A game on: a play (phase 2), or between quarters and at half time (3), where the Redo ring still holds the
+            // plays before. (1.0.6: only phase 2 counted, so a game stopped at a quarter break went without a word; seen in
+            // Original 1999, HANG at Q1's end.) Elsewhere (the menus, the attract demo) there's no game to pick up, and
+            // a long stall there may be a load: logged, nothing kept, nothing said.
+            const int phase = game_phase.load();
+            if (phase != 2 && phase != 3) {
+                fprintf(stderr, "[rescue] no game frame for %.0f s outside a game (phase %d): no snapshot can exist there, "
+                                "nothing kept\n", away, phase);
+                return;
+            }
             Rescue expected = Rescue::none;
             if (!rescue.compare_exchange_strong(expected, Rescue::writing)) return;
-            fprintf(stderr, "[rescue] no game frame for %.0f s mid-game: keeping the newest Redo Play snapshot\n", away);
+            fprintf(stderr, "[rescue] no game frame for %.0f s mid-game (%s): keeping the newest Redo Play snapshot\n", away,
+                    phase == 2 ? "a play" : "between quarters");
             try {
                 std::thread(rescue_write).detach();
             } catch (...) {
@@ -1192,7 +1282,7 @@ namespace blitz {
             presenting = false;
             if (!blitz::replay_is_open()) blitz_replay_keep_presenting = 0;
         }
-        if (rescue.load() != Rescue::kept) {
+        if (rescue.load() != Rescue::kept && rescue.load() != Rescue::told) {
             flowing = {};
             return;
         }
@@ -1224,12 +1314,36 @@ extern "C" void blitz_redo_clear() {
     redo_ring.clear();
 }
 
+namespace {
+    // Restart in place (soft_restart.cpp), with the game's threads gone: Redo Play and the menu steps can't go back into
+    // the game before, a save or load still waiting is over (its caller hears it failed), and what was known about the
+    // game's threads goes with them. A state saved before (a slot, the one in memory) still loads, as after a fresh start.
+    [[maybe_unused]] const bool ss_soft_reset = blitz::on_soft_reset("save states", [] {
+        blitz_redo_clear();
+        {
+            std::lock_guard lock{threads_mutex};
+            step_ring.clear();
+            sleepers.clear();
+            pending_resume.clear();
+        }
+        redo_request = false;
+        step_capture = false;
+        in_menus = false;
+        in_game = false;
+        if (int r = request.exchange(0); r != 0) finish(false, r >> 4);
+        // A game saved on leaving (Main Menu's Save and Leave) is offered once the next boot's frames show, as at a start.
+        ask_resume_again = true;
+        resume_frames_at_start = UINT64_MAX;
+    });
+}
+
 extern "C" void blitz_redo_request() {
     if (!blitz::redo_play_enabled()) return;
     redo_request = true;
 }
 
 // Team select's loop, each frame (uniform_picker.cpp): there the game takes □ (B) as a pick, and has no back.
+extern "C" int32_t blitz_uniform_back(int32_t pad);  // uniform_picker.cpp
 static std::atomic<int64_t> team_select_ms{0};
 static int64_t now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -1244,14 +1358,35 @@ extern "C" void blitz_team_select_frame() {
 // While the pick-up toast is up, C-left (△ by position) is its button: it loads the game saved on quitting and stays away
 // from the game until let go; an A press in the menus, □ or Start (team, 2026-11-24) means the player's started something
 // else, and the toast goes (they go on to the game as usual).
+// The held-back press goes through as A alone, for at least two of the game's frames. Controller Select takes a confirm
+// only when its controller's buttons change to exactly A (main 0x802662E0, per player), so with any other button down too
+// (a C button from a stick resting off centre, a shoulder or trigger the pad never reported let go) it took no confirm at
+// all, while each press still kept a step: stuck there after Back on the team's Duo (2026-11-28), until R1 was pressed.
 extern "C" void blitz_menu_step_input(int port, uint16_t* buttons) {
     constexpr uint16_t A = 0x8000, B = 0x4000, START = 0x1000, C_LEFT = 0x0002;
     static uint16_t prev[4];
-    static int waiting[4], releasing[4];
+    static int waiting[4], releasing[4], released[4];
+    static uint32_t release_tick[4];
     static bool eat_b[4];  // □ went back: it stays away from the game until let go (else it backs out again)
     static bool eat_cl[4];  // C-left took the pick-up toast: away from the game until let go
+    static uint32_t restores_seen = 0;
+    static int64_t logging_for = 0;  // the restore whose presses are being logged
+    static int logged = 0, alone_said = 0;
     if (port < 0 || port > 3) return;
     uint16_t raw = *buttons;
+    // Back (a menu step restored): a press held back or being let through was the screen before's. Start clean.
+    if (uint32_t n = step_restores.load(); n != restores_seen) {
+        restores_seen = n;
+        for (int p = 0; p < 4; p++) waiting[p] = releasing[p] = 0;
+    }
+    // For 30 s after Back, each change of a controller's buttons in the log (40 at most): what a stuck screen was sent.
+    if (int64_t at = step_restored_ms.load(); at != 0 && steady_ms() - at < 30000 && raw != prev[port]) {
+        if (logging_for != at) {
+            logging_for = at;
+            logged = 0;
+        }
+        if (logged++ < 40) fprintf(stderr, "[menu step] after Back: player %d buttons 0x%04X (were 0x%04X)\n", port + 1, raw, prev[port]);
+    }
     bool edge = (raw & A) && !(prev[port] & A);
     bool b_edge = (raw & B) && !(prev[port] & B);
     bool cl_edge = (raw & C_LEFT) && !(prev[port] & C_LEFT);
@@ -1269,19 +1404,27 @@ extern "C" void blitz_menu_step_input(int port, uint16_t* buttons) {
     if (!(raw & B)) eat_b[port] = false;
     if (b_edge && in_menus.load() && menu_steps_on() && now_ms() - team_select_ms.load() < 250) {
         eat_b[port] = true;
-        blitz_redo_request();
+        // With a uniform picked, □ is the picker's way back to Auto (uniform_picker.cpp); the next □ goes back a step.
+        if (!blitz_uniform_back(port)) blitz_redo_request();
     }
     if (eat_b[port]) *buttons &= (uint16_t)~B;
-    if (releasing[port] > 0) {  // the held-back press, now
-        releasing[port]--;
-        *buttons |= A;
+    if (releasing[port] > 0) {  // the held-back press, now: A alone, 4 reads and 2 ticks at least (60 reads at most)
+        if (released[port] == 0 && (raw & ~A) != 0 && alone_said++ < 20) {
+            fprintf(stderr, "[menu step] player %d: A let through alone (0x%04X held too)\n", port + 1, raw & ~A);
+        }
+        released[port]++;
+        const bool long_enough = released[port] >= 4 && dispatcher_ticks.load() - release_tick[port] >= 2;
+        if (long_enough || released[port] >= 60) releasing[port] = 0;
+        *buttons = A;
         return;
     }
     if (waiting[port] > 0) {
         *buttons &= (uint16_t)~A;
         if (!step_capture.load() || ++waiting[port] > 20) {
             waiting[port] = 0;
-            releasing[port] = 4;
+            releasing[port] = 1;
+            released[port] = 0;
+            release_tick[port] = dispatcher_ticks.load();
         }
         return;
     }
@@ -1366,10 +1509,15 @@ namespace blitz {
     void toast_offer_close();
 
     bool savestate_quit_prompt() {
-        if (!in_game.load() || !ultramodern::is_game_started()) return false;
-        if (rescue.load() == Rescue::kept && frames_away.load() >= rescue_after_s()) {  // stuck: a Save & Quit can't happen
+        if (!ultramodern::is_game_started()) return false;
+        // Stuck (the rescue kept the game, or told the player there was nothing to keep; between quarters too): a Save &
+        // Quit can't happen, and a plain quit would wait on the game's thread for ever.
+        const Rescue r = rescue.load();
+        if ((r == Rescue::kept || r == Rescue::told) && frames_away.load() >= rescue_after_s()) {
             recompui::open_choice_prompt(
-                "Quit New Blitz?", "The game stopped responding. Next time, New Blitz offers to pick up from the start of that play.",
+                "Quit New Blitz?",
+                r == Rescue::kept ? "The game stopped responding. Next time, New Blitz offers to pick up from the start of that play."
+                                  : "The game stopped responding. There's no moment of this game to pick up from.",
                 "Quit", "Keep Waiting",
                 [] {
                     ultramodern::quit();
@@ -1385,6 +1533,7 @@ namespace blitz {
                 [] {}, recompui::ButtonStyle::Success, recompui::ButtonStyle::Tertiary, false);  // Quit first: nothing else helps
             return true;
         }
+        if (!in_game.load()) return false;
         if (quit_saving.load()) {  // Quit again while the save's on its way: it quits once it's done
             say_held("Saving your game: a moment...");
             return true;
@@ -1498,7 +1647,8 @@ namespace blitz {
         if (asked || !ultramodern::is_game_started()) return;
         // Not at the very moment the game starts but once its frames show (about a second in; 10 s at most): a PS5
         // start straight into the game hung right there with quit.state to offer (2026-11-15), its renderer starting up.
-        static uint64_t frames_at_start = UINT64_MAX, started_ms = 0;
+        std::atomic<uint64_t>& frames_at_start = resume_frames_at_start;
+        std::atomic<uint64_t>& started_ms = resume_started_ms;
         if (frames_at_start == UINT64_MAX) {
             frames_at_start = blitz::game_frames();
             started_ms = guard_now_ms();
@@ -1669,7 +1819,9 @@ static std::atomic_int pause_then_save{0};       // ticks waited for the pause m
 // DS's lid shuts) and SDL's event (3 s later than that); the second does nothing new.
 extern "C" void blitz_app_background(void) {
     if (in_background.exchange(true)) return;
-    if (!in_game.load()) {
+    // Between quarters a stuck game is rescued as one mid-play is (below); anything else outside a play just holds.
+    const bool stuck_between_quarters = game_phase.load() == 3 && frames_away.load() >= 2.0;
+    if (!in_game.load() && !stuck_between_quarters) {
         blitz::background_hold = true;
         fprintf(stderr, "[background] in the menus: the game holds\n");
         return;
@@ -1721,8 +1873,10 @@ extern "C" void blitz_savestate_tick(uint8_t* rdram, recomp_context* ctx) {
     static const bool validate = getenv("BLITZ_SS_VALIDATE") != nullptr;
     static const bool watching = [] { SDL_AddEventWatch(auto_save_watch, nullptr); return true; }();
     (void)watching;
+    dispatcher_ticks++;
     int32_t phase = MEM_W(0, (gpr)(int32_t)0x802EA420);
     in_game = phase == 2;
+    game_phase = phase;
     in_menus = phase == 1;
     if (phase == 2 && !step_ring.empty()) {  // kickoff: the menu steps are spent
         std::lock_guard lock{threads_mutex};
@@ -1895,9 +2049,18 @@ extern "C" void blitz_savestate_tick(uint8_t* rdram, recomp_context* ctx) {
     // Menu steps: a snapshot for the A press waiting on it; Redo in the menus goes back one.
     if (op == 0 && step_capture.load()) {
         if (r == ok) {
-            step_ring.push_back(make_snapshot(rdram, ctx, self));
-            while (step_ring.size() > step_keep) step_ring.pop_front();
-            fprintf(stderr, "[savestate] menu step %zu kept\n", step_ring.size());
+            const uint64_t screen = screen_signature(rdram);
+            if (!step_ring.empty() && step_ring.back().screen == screen) {
+                static int said = 0;  // a press the game didn't take: no second copy of the same screen
+                if (said++ < 10) fprintf(stderr, "[savestate] menu step: the screen of step %zu still, none kept\n", step_ring.size());
+            }
+            else {
+                const int64_t t0 = steady_ms();
+                step_ring.push_back(pack_step(make_snapshot(rdram, ctx, self), screen));
+                while (step_ring.size() > step_keep) step_ring.pop_front();
+                fprintf(stderr, "[savestate] menu step %zu kept (%zu KB, %lld ms)\n", step_ring.size(),
+                        (step_ring.back().packed.empty() ? rdram_size : step_ring.back().packed.size()) / 1024, (long long)(steady_ms() - t0));
+            }
             step_capture = false;
             step_wait = 0;
         }
@@ -1915,10 +2078,20 @@ extern "C" void blitz_savestate_tick(uint8_t* rdram, recomp_context* ctx) {
         }
         else {
             std::string why = r == ok ? "" : refusal_names[r];
-            if (r == ok && !fixed_match(rdram, self, step_ring.back(), why)) r = fixed_not_waiting;
-            if (r == ok) {
-                restore_snapshot(rdram, ctx, self, step_ring.back());
+            if (r == ok && !fixed_match(rdram, self, step_ring.back().snap, why)) r = fixed_not_waiting;
+            if (r == ok && !unpack_step(step_ring.back())) {  // can't happen; if it did, the step is no use to anyone
+                fprintf(stderr, "[savestate] menu step %zu wouldn't unpack: dropped\n", step_ring.size());
                 step_ring.pop_back();
+                say("Can't go back here");
+                redo_request = false;
+                redo_wait = 0;
+            }
+            else if (r == ok) {
+                restore_snapshot(rdram, ctx, self, step_ring.back().snap);
+                step_ring.pop_back();
+                step_capture = false;
+                step_restores++;
+                step_restored_ms = steady_ms();
                 say("Back a step");
                 redo_request = false;
                 redo_wait = 0;

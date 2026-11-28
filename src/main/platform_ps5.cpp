@@ -238,10 +238,19 @@ namespace blitz {
     // Copied over FTP (docs/PS5_HOMEBREW.md): a ROM put here is imported at startup.
     // BRANDING: PS5 app folder /data/blitzrecomp (user-visible over FTP)
     std::filesystem::path rom_drop_folder() { return "/data/blitzrecomp"; }
+    void open_app_folder_in_files(std::function<void(bool)> done) { if (done) done(false); }  // reached over FTP
+    // Progress once, at the end.
+    bool http_get_progress(const std::string& url, std::string& body, int& status, const std::function<void(uint64_t, uint64_t)>& progress) {
+        bool ok = http_get(url, "", "", body, status);
+        if (ok && progress) progress(body.size(), body.size());
+        return ok;
+    }
+    bool network_metered() { return false; }
 }
 
 namespace blitz {
     void window_created(SDL_Window*) {}
+    bool relaunch_app() { return false; }  // blitz_host.h: Android only
 }
 
 // The PS5's watch (2026-11-15: the team's Save & Quit froze, and the next start hung, with nothing in blitz.log to say where):

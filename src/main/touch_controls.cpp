@@ -203,9 +203,12 @@ namespace {
             const float t = std::clamp(std::sqrt(ux * ux + uy * uy) / 1.4f, 0.0f, 1.0f);
             Rgb c = t < 0.58f ? mix(hex(c0), hex(c1), t / 0.58f) : mix(hex(c1), hex(c2), (t - 0.58f) / 0.42f);
             if (on) c = {std::min(255.0f, c.r * 1.35f), std::min(255.0f, c.g * 1.35f), std::min(255.0f, c.b * 1.35f)};
-            const float fy = (y + 0.5f - cy) / inner;
-            if (fy > 0.86f) c = mix(c, hex(0x000000), 0.25f);  // the lip, below
-            if (fy < -0.88f) c = mix(c, hex(0xFFFFFF), 0.18f);  // and the shine, above
+            // The lip below and the shine above: crescents along the cap's edge, as the phone page's inset shadows draw them
+            // (6 px and 5 px on a 158 px cap). Bands cut straight across read as the cap clipped at its top and bottom
+            // (the team's Duo, 2026-11-28).
+            const float px_ = x + 0.5f, py_ = y + 0.5f;
+            if (std::hypot(px_ - cx, py_ - (cy - inner * 0.076f)) > inner) c = mix(c, hex(0x000000), 0.25f);
+            if (std::hypot(px_ - cx, py_ - (cy + inner * 0.063f)) > inner) c = mix(c, hex(0xFFFFFF), 0.18f);
             put(px, n, x, y, c, std::clamp(inner - d, 0.0f, 1.0f));
         }
         return px;
@@ -253,17 +256,15 @@ namespace {
     }
 
     // Where PASS, JUMP and TURBO sit in that mode, as the phone page lays them out in its button area (54% wide, below the
-    // top row): in units of the screen's height. False for the others, which keep their places.
+    // top row): in units of the screen's height. False for the others, which keep their places: START stays at the bottom
+    // centre, as on the touch controls and the phone page (team, 2026-11-28), so the area's unit is kept small enough that
+    // JUMP (its left edge 1 unit in from the right) clears it. At 4:3 (a Surface Duo's or an RG DS's lower screen) that's
+    // what limits it; at 16:9 the 0.86 still does, near enough.
+    constexpr float start_clear = 0.034f + 0.02f;  // START's radius and a gap, in screen heights
     bool pad_place(const Button& b, float& cx, float& cy, float& radius) {
         if (!pad_look.load() || b.action != Action::None) return false;
-        if (b.mask == START && b.anchor == Anchor::Middle) {  // up in the top row, as the phone page has it, clear of JUMP
-            radius = b.radius;
-            cx = screen_w * 0.5f;
-            cy = 0.09f * screen_h;
-            return true;
-        }
         if (b.anchor != Anchor::Right) return false;
-        const float W = screen_w / std::max(screen_h, 1.0f), u = std::min(0.54f * W, 0.86f);
+        const float W = screen_w / std::max(screen_h, 1.0f), u = std::min({0.54f * W, 0.86f, 0.5f * W - start_clear});
         float d, right, bottom;
         if (b.mask == A && b.text == Text::Pass) { d = 0.52f * u; right = 0.04f * u; bottom = 0.06f * u; }
         else if (b.mask == B && b.text == Text::Jump) { d = 0.40f * u; right = 0.60f * u; bottom = 0.04f * u; }
@@ -742,6 +743,11 @@ namespace blitz {
         }
         const bool look = pad_look.load();
         bool layout = sw != drawn_w || sh != drawn_h || look != drawn_pad_look;
+        if (layout && ui_window != nullptr) {  // the sizes the layout is made from (the Duo's controller clipped, 2026-11-28)
+            int pw = 0, ph = 0;
+            SDL_GetWindowSizeInPixels(ui_window, &pw, &ph);
+            fprintf(stderr, "[touch] layout %s: window %.0fx%.0f, pixels %dx%d\n", look ? "controller" : "overlay", sw, sh, pw, ph);
+        }
         if (layout || h != drawn_held || bx != drawn_bx || by != drawn_by || dx != drawn_dx || dy != drawn_dy) {
             context.open();
             const float reach = stick_reach();

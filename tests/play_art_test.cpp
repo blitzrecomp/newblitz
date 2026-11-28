@@ -254,7 +254,7 @@ int main(int argc, char** argv) {
                     // Into the world as play_art.cpp does it (offense going +x, + across = +z), from a spot at the 30.
                     std::vector<std::array<float, 2>> world;
                     for (const auto& p : r.pts) world.push_back({-156.0f + p.d * playart::units_per_yard, p.l * playart::units_per_yard});
-                    playart::ribbon(world, 0x3FE6A0D0u, playart::Style{}, prims[m]);
+                    playart::ribbon(world, 0x3FE6A0D0u, playart::Style{}, prims[m], playart::Light{-0.7071f, 0.7071f});
                 }
             }
         }
@@ -270,9 +270,9 @@ int main(int argc, char** argv) {
             const std::string name = "play " + std::to_string(i) + (m ? " full list" : " first list");
             int tris = check_list(w, base, name);
             int want = 0;
-            for (const auto& p : prims[m]) want += p.nt;
+            for (const auto& p : prims[m]) want += (int)p.t.size();
             if (tris != want) fail(name + ": " + std::to_string(tris) + " triangles of " + std::to_string(want));
-            if (w.size() * 4 > 0xC00) fail(name + ": " + std::to_string(w.size() * 4) + " bytes, over play_art.cpp's 3 KB");
+            if (w.size() * 4 > 0x1000) fail(name + ": " + std::to_string(w.size() * 4) + " bytes, over play_art.cpp's 4 KB");
             biggest = std::max(biggest, w.size() * 4);
         }
     }

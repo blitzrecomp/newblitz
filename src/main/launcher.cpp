@@ -120,12 +120,12 @@ namespace {
 #if BLITZ_TEAMPLUS
         static constexpr const char* need_text = "Load NFL Blitz 2000 with Zoinkity's Team Extension, or a community update built on it";
 #else
-        static constexpr const char* need_text = "Load your NFL Blitz 2000 ROM: the USA cartridge, v1.1 (.z64, .n64, .v64 or a .zip)";
+        static constexpr const char* need_text = "Load your NFL Blitz 2000 ROM: the USA cartridge, v1.1 or v1.0 (.z64, .n64, .v64 or a .zip)";
 #endif
         // One app with both games: either ROM is fine, and the right game takes it.
         static constexpr const char* both_text = "Load your NFL Blitz 2000 ROM: the USA v1.1 plays Classic Blitz, a Team Extension ROM plays Modern";
         // BRANDING: app name in the Load ROM prompt
-        static constexpr const char* shared_text = "Load your NFL Blitz 2000 ROM: the USA cartridge, v1.1. It plays New Blitz and the original";
+        static constexpr const char* shared_text = "Load your NFL Blitz 2000 ROM: the USA cartridge, v1.1 or v1.0. It plays New Blitz and the original";
 
     public:
         RomNeededNote(ResourceId rid, Element* parent, std::vector<Element*> rom_items, Element* switch_to, Element* finish)
@@ -259,8 +259,9 @@ namespace {
                 shown_glyph = glyph;
                 select_glyph->set_text(glyph);
             }
-            // Touch alone (a phone with no controller): the items themselves are tapped, so no button to name.
-            int touch = blitz::ui::touch_only() ? 1 : 0;
+            // Touch alone (a phone with no controller): the items themselves are tapped, so no button to name. A prompt
+            // over the launcher (an import's message) names its own buttons: its hint row is the only one then.
+            int touch = blitz::ui::touch_only() || recompui::is_prompt_open() ? 1 : 0;
             if (touch != shown_touch) {
                 shown_touch = touch;
                 select_glyph->set_display(touch ? Display::None : Display::Block);

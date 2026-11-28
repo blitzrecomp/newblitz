@@ -26,6 +26,7 @@
 #include "recomp.h"
 #include "blitz_savestate.h"
 #include "team_store.h"
+#include "uv_overrides.h"
 
 extern "C" void func_80256580(uint8_t* rdram, recomp_context* ctx);  // the uniform builder (side, team, alt)
 
@@ -135,6 +136,11 @@ namespace {
 }
 
 namespace blitz {
+    // uv_overrides.cpp: a render entry wearing his own set (his side and roster slot).
+    bool mixed_player_of(uint8_t* rdram, int32_t entry, int& side, int& slot) {
+        return who(rdram, entry, side, slot) && slot >= 0;
+    }
+
     // Pro Bowl (pro_bowl.cpp), before kickoff: player `slot` of `side` wears `team`'s set `set` (uniform_set_parts).
     void mixed_plan(int side, int slot, int team, int set) {
         if (side >= 0 && side < 2 && slot >= 0 && slot < 15) plan[side][slot] = {team, set};
@@ -160,6 +166,7 @@ extern "C" {
     void blitz_mixed_kickoff(uint8_t* rdram, recomp_context* ctx, int32_t team0, int32_t team1) {
         std::memset(active, 0, sizeof(active));
         std::memset(side_mixed, 0, sizeof(side_mixed));
+        blitz::uvo_mixed_reset();
         int32_t team[2] = {team0, team1};
         int n = (int)team_ids.size();
         if (enabled() && n > 0) {  // the eyeball test: everyone a different team
@@ -190,6 +197,7 @@ extern "C" {
                 ctx->r6 = 0;  // home
                 func_80256580(rdram, ctx);
                 *ctx = saved;
+                blitz::uvo_mixed_dressed(s, k);  // his set's coordinates, if it has a table (uv_overrides.cpp)
                 copy_words(rdram, buffer_of(s, k), side_buffers + (uint32_t)s * side_size, side_size);
                 write_sublist(rdram, sublist_of(s, k, 0), buffer_of(s, k), body_cmds);
                 write_sublist(rdram, sublist_of(s, k, 1), buffer_of(s, k), helmet_cmds);

@@ -133,3 +133,12 @@ game's own debug flag at 0x80322B58: the next tackle's fumble chance is 100000 o
 - Frame rate at full fidelity (Auto resolution, MSAA 2x) on two screens. At 2x without antialiasing it held 30.
 - With no controller the on-screen controls stay up on the lower panel, and tile taps give way to them (BLITZ_DS.md).
 - The launcher and the ROM screen still lock to landscape.
+
+## Status after 1.0.6 (2026-11-28)
+
+The Duo layout merged into 1.0.5 (public) and its playtest rounds are above. On the 1.0.6 line the owner tried the
+league selector on build 992 and it all worked. Since then: Controller mode's START and caps were reworked (pad-polish),
+untried on the Duo (docs/HUMAN_TESTS.md). The Duo runs debug-signed test builds; a release APK won't install over one
+(uninstall first, and ask). Its app folder may still hold a `test_env.txt` pointing `BLITZ_PAK_SERVER` at a Mac:
+remove it (unverified whether it's gone). After the Duo sleeps, Wireless debugging may stop advertising: read the
+IP:port from it and `adb connect` it (docs/STATE.md, "Test recipes").

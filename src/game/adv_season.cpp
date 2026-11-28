@@ -18,6 +18,7 @@ extern "C" void rand_mod(uint8_t* rdram, recomp_context* ctx);
 
 namespace blitz {
     void adv_save_new_season();  // adv_save.cpp
+    void season_new_started();   // season_settings.cpp: "Standard or Advanced season?" (league_select.cpp)
     void lineup_overlay_now(uint8_t* rdram);  // content_pack_tp.cpp: this week's lineup
 }
 
@@ -58,6 +59,7 @@ extern "C" {
         season_seed = ((uint64_t)rd() << 32) | rd();
         blitz::adv_save_new_season();
         fprintf(stderr, "[adv] new season, seed %016llX\n", (unsigned long long)season_seed);
+        blitz::season_new_started();
     }
 
     // Host version of ovl_b 0x802FBAAC (each week, before the games): every team's CPU skill from its

@@ -325,7 +325,7 @@ namespace {
 
     // True when the app is on its way out (nothing more to show).
     bool finish_or_restart() {
-        if (blitz::restart_available && st.backup.empty()) {
+        if (blitz::app_restart_available && st.backup.empty()) {
             blitz::firstrun_ui::hide();
             st = State{};
             blitz::restart_fresh();
@@ -379,11 +379,11 @@ namespace {
                     where += " Settings \xE2\x86\x92 Saves \xE2\x86\x92 Restore a Backup brings it back.\n\n";
                 }
                 s.title = st.restoring ? "Ready to restore" : !st.backup.empty() ? "Backed up" : "Ready to start over";
-                s.body = where + (blitz::restart_available
+                s.body = where + (blitz::app_restart_available
                                       ? std::string(st.restoring ? "New Blitz restarts with your backup." : "New Blitz restarts into the first run.")
                                       : std::string(st.restoring ? "New Blitz closes now. Open it again and your backup is back."
                                                                  : "New Blitz closes now. Open it again and the first run begins."));
-                s.actions = {{blitz::restart_available ? "Restart" : "Close New Blitz", [] { press(Restart); }}};
+                s.actions = {{blitz::app_restart_available ? "Restart" : "Close New Blitz", [] { press(Restart); }}};
                 if (!st.backup.empty() && blitz::platform::file_browser) s.actions.push_back({"Show Backup", [] { press(ShowBackup); }});
                 break;
             }

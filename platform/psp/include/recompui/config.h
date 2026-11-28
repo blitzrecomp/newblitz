@@ -6,6 +6,7 @@
 #define _RECOMP_UI_CONFIG_H_
 
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -55,6 +56,18 @@ namespace recompui {
         void set_option_section(const std::string &config_id, const std::string &option_id, const std::string &label,
                                 std::function<std::string()> count = {});
         void set_option_action(const std::string &config_id, const std::string &option_id, const std::string &button_text);
+        struct CycleChoice {  // RecompFrontend patch 0058: the League row
+            std::string value;
+            std::string label;
+        };
+        void set_option_cycle(const std::string &config_id, const std::string &option_id,
+                              std::function<std::vector<CycleChoice>()> choices, bool confirm = false);
+        std::optional<std::string> get_option_browse(const std::string &config_id, const std::string &option_id);
+        void set_option_browse(const std::string &config_id, const std::string &option_id, std::optional<std::string> value);
+        void set_option_browse_left(std::function<void(const std::string &config_id, const std::string &option_id)> callback);
+        void set_close_guard(std::function<bool(bool modal_close)> guard);
+        void set_accept_hint(const std::string &label);
+        void set_restart_pending(std::function<std::string()> pending);
         void describe_header_button(const std::string &title, const std::string &text);
 
         recomp::config::Config &get_config(const std::string &id);

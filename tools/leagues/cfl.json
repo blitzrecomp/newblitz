@@ -1,0 +1,21 @@
+{
+ "_doc": "League config for tools/make_league_pak.py --league cfl --handoff <league_pak_art_out/cfl> --research <league_pak_research/cfl>. Nine clubs on one NFL base each (the base's parts and 2D slots, chosen in the design kit). Arcade and Tournament only: no Season, Advanced or Play Editor, and no CFL rules. The art and rosters come from the handoff and stay out of git; this file holds only the team map.",
+ "id": "cfl",
+ "title": "CFL 2026",
+ "version": "2026.11.28.2",
+ "name": "CFL",
+ "modes": ["arcade", "tournament"],
+ "out": "build/league_paks/cfl",
+ "helmet_backwards": "none",
+ "teams": [
+  {"id": "BCL", "base": "BUF", "city": "BC", "nickname": "Lions", "select": "BC", "abbr": "BCL", "primary": "#171717", "secondary": "#F15623"},
+  {"id": "CGY", "base": "KC", "city": "Calgary", "nickname": "Stampeders", "select": "Calgary", "abbr": "CGY", "primary": "#C8102E", "secondary": "#202124"},
+  {"id": "EDM", "base": "SF", "city": "Edmonton", "nickname": "Elks", "select": "Edmonton", "abbr": "EDM", "primary": "#005941", "secondary": "#FFB81C"},
+  {"id": "SSK", "base": "SEA", "city": "Saskatchewan", "nickname": "Roughriders", "select": "Saskatchewan", "abbr": "SSK", "primary": "#006341", "secondary": "#FFFFFF"},
+  {"id": "WPG", "base": "WAS", "city": "Winnipeg", "nickname": "Blue Bombers", "select": "Winnipeg", "abbr": "WPG", "primary": "#003087", "secondary": "#C5B783"},
+  {"id": "HAM", "base": "GB", "city": "Hamilton", "nickname": "Tiger-Cats", "select": "Hamilton", "abbr": "HAM", "primary": "#231F20", "secondary": "#FCB525"},
+  {"id": "TOR", "base": "NYG", "city": "Toronto", "nickname": "Argonauts", "select": "Toronto", "abbr": "TOR", "primary": "#5E9CD3", "secondary": "#041E42"},
+  {"id": "OTT", "base": "CHI", "city": "Ottawa", "nickname": "REDBLACKS", "select": "Ottawa", "abbr": "OTT", "primary": "#171717", "secondary": "#AC1F2D"},
+  {"id": "MTL", "base": "PIT", "city": "Montreal", "nickname": "Alouettes", "select": "Montreal", "abbr": "MTL", "primary": "#00205B", "secondary": "#C8102E"}
+ ]
+}

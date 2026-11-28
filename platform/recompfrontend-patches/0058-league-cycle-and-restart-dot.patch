@@ -1,0 +1,533 @@
+diff --git a/recompui/include/recompui/config.h b/recompui/include/recompui/config.h
+--- a/recompui/include/recompui/config.h
++++ b/recompui/include/recompui/config.h
+@@ -2,6 +2,7 @@
+ #define _RECOMP_UI_CONFIG_H_
+ 
+ #include <functional>
++#include <optional>
+ #include <vector>
+ 
+ #include "librecomp/config.hpp"
+@@ -160,6 +161,31 @@
+         void set_option_section(const std::string &config_id, const std::string &option_id, const std::string &label,
+                                 std::function<std::string()> count = {});
+         void set_option_action(const std::string &config_id, const std::string &option_id, const std::string &button_text);
++        // Blitz: a string option drawn as a cycling selector, < value >, over a list that may change while the app runs
++        // (the League row: NFL 2026 and every installed league pack). `choices` is asked each frame the row shows (keep it
++        // cheap); its value is the option's stored string, its label what the row shows. Left / right (the D-pad, the
++        // arrow keys, a tap on an arrow) step through the list and wrap. With `confirm`, stepping only browses: the name
++        // shows dimmed with "Press × to choose" until Accept (×, Enter, a tap on the name) chooses it, which sets the
++        // option; until then the option keeps its value.
++        struct CycleChoice {
++            std::string value;
++            std::string label;
++        };
++        void set_option_cycle(const std::string &config_id, const std::string &option_id,
++                              std::function<std::vector<CycleChoice>()> choices, bool confirm = false);
++        // A confirm row's browsed value that isn't chosen yet (nothing: it shows the option's own value).
++        std::optional<std::string> get_option_browse(const std::string &config_id, const std::string &option_id);
++        void set_option_browse(const std::string &config_id, const std::string &option_id, std::optional<std::string> value);
++        // Focus left a confirm row while it shows a value not chosen (moving off it, a tab change, closing): the app asks.
++        void set_option_browse_left(std::function<void(const std::string &config_id, const std::string &option_id)> callback);
++        // Asked before Settings closes or changes tab: false keeps it as it is (the app shows its own question and then
++        // closes or switches itself). modal_close: closing, not a tab change.
++        void set_close_guard(std::function<bool(bool modal_close)> guard);
++        // The hint row's label for Accept while an element wants its own ("Choose"); "" puts back the default.
++        void set_accept_hint(const std::string &label);
++        // Blitz: while this returns a non-empty text (what is waiting for a restart: "League: CFL 2026"), the header's
++        // Restart shows a dot and its prompt names the waiting changes.
++        void set_restart_pending(std::function<std::string()> pending);
+         // Blitz settings layout: draws a config's option on another tab (an options tab, or the Controls tab's top)
+         // instead of its own. Its value stays in its own config and that config's file; only where the row is drawn
+         // moves. A tab draws the rows placed on it in the order placed: `first` ones before its own rows, the rest after.
+diff --git a/recompui/src/config/ui_config.cpp b/recompui/src/config/ui_config.cpp
+--- a/recompui/src/config/ui_config.cpp
++++ b/recompui/src/config/ui_config.cpp
+@@ -21,6 +21,45 @@
+     static recompui::TabbedModal *config_modal = nullptr;
+     static std::function<void()> restart_callback;
+ 
++    static std::function<std::string()> restart_pending;
++    static std::function<bool(bool)> close_guard;
++    void config::set_close_guard(std::function<bool(bool modal_close)> guard) {
++        close_guard = std::move(guard);
++    }
++    void config::set_restart_pending(std::function<std::string()> pending) {
++        restart_pending = std::move(pending);
++    }
++
++    // Blitz: a dot on the header's Restart while a change waits for a restart (set_restart_pending), checked each frame.
++    class RestartDot : public Element {
++        bool shown = false;
++    protected:
++        std::string_view get_type_name() override { return "RestartDot"; }
++        void process_event(const Event &e) override {
++            if (e.type != EventType::Update) {
++                return;
++            }
++            bool now = restart_pending && !restart_pending().empty();
++            if (now != shown) {
++                shown = now;
++                set_display(now ? Display::Block : Display::None);
++            }
++            queue_update();
++        }
++    public:
++        RestartDot(ResourceId rid, Element *parent) : Element(rid, parent, 0, "div", false) {
++            set_position(Position::Absolute);
++            set_top(-6.0f);
++            set_right(-6.0f);
++            set_width(18.0f);
++            set_height(18.0f);
++            set_border_radius(9.0f);
++            set_background_color(theme::color::Warning);
++            set_display(Display::None);
++            queue_update();
++        }
++    };
++
+     void config::set_restart_callback(std::function<void()> callback) {
+         restart_callback = std::move(callback);
+     }
+@@ -98,6 +137,10 @@
+                     );
+                     return false;
+                 }
++                // Blitz: the app's own question first (a League browsed but not chosen).
++                if (close_guard && !close_guard(close_context == TabCloseContext::ModalClose)) {
++                    return false;
++                }
+ 
+                 return true;
+             },
+@@ -174,14 +217,18 @@
+         if (restart_callback) {
+             auto restart_button = config_modal->modal_root_context.create_element<IconButton>(header_right, "icons/Reset.svg", ButtonStyle::Basic);
+             frame_icon(restart_button, "RESTART GAME", "Back to the title screen. A game you haven't saved is lost.");
++            restart_button->set_position(Position::Relative);
++            config_modal->modal_root_context.create_element<RestartDot>(restart_button);
+             restart_button->add_pressed_callback([]() {
+                 if (!ultramodern::is_game_started()) {  // from the launcher there's nothing to restart
+                     recompui::open_info_prompt("Nothing to restart", "The game isn't running yet.", "OK", []() {}, ButtonStyle::Secondary);
+                     return;
+                 }
++                std::string waiting = restart_pending ? restart_pending() : std::string{};
+                 recompui::open_choice_prompt(
+                     "Restart the game?",
+-                    "The game starts over from the beginning. Anything not saved to the Controller Pak is lost.",
++                    "The game starts over from the beginning. Anything not saved to the Controller Pak is lost." +
++                        (waiting.empty() ? std::string{} : "\n\nWaiting for the restart: " + waiting + "."),
+                     "Restart", "Cancel",
+                     []() { restart_callback(); }, []() {},
+                     ButtonStyle::Warning, ButtonStyle::Basic, true);
+diff --git a/recompui/src/config/ui_config_option.cpp b/recompui/src/config/ui_config_option.cpp
+--- a/recompui/src/config/ui_config_option.cpp
++++ b/recompui/src/config/ui_config_option.cpp
+@@ -301,6 +301,221 @@
+     text_input->set_enabled(!disabled);
+ };
+ 
++// ConfigOptionCycle
++namespace {
++    std::function<void(const std::string &, const std::string &)> &browse_left_callback() {
++        static std::function<void(const std::string &, const std::string &)> cb;
++        return cb;
++    }
++}
++
++void config::set_option_browse_left(std::function<void(const std::string &, const std::string &)> callback) {
++    browse_left_callback() = std::move(callback);
++}
++
++CycleValue::CycleValue(ResourceId rid, Element *parent, ConfigOptionCycle *owner)
++    : Element(rid, parent, Events(EventType::Click, EventType::Focus, EventType::Hover, EventType::Navigate, EventType::Enable), "button", false),
++      owner(owner) {
++    set_display(Display::Flex);
++    set_flex_direction(FlexDirection::Row);
++    set_align_items(AlignItems::Center);
++    set_gap(10.0f);
++    set_padding_left(10.0f);
++    set_padding_right(10.0f);
++    set_padding_top(4.0f);
++    set_padding_bottom(4.0f);
++    set_border_width(theme::border::width);
++    set_border_radius(theme::border::radius_md);
++    set_border_color(theme::color::BorderSoft);
++    set_background_color(theme::color::Background3);
++    set_cursor(Cursor::Pointer);
++    enable_focus();
++    set_focusable(true);
++    set_nav_none(NavDirection::Left);   // left and right step through the list (as a slider's do)
++    set_nav_none(NavDirection::Right);
++}
++
++void CycleValue::process_event(const Event &e) {
++    switch (e.type) {
++    case EventType::Navigate: {
++        NavDirection dir = std::get<EventNavigate>(e.variant).direction;
++        if (dir == NavDirection::Left) owner->step(-1);
++        else if (dir == NavDirection::Right) owner->step(1);
++        break;
++    }
++    case EventType::Click: {
++        // A tap or a click lands somewhere: the outer quarters are the arrows, the middle the name. Accept (×, Enter)
++        // comes as a click with no position.
++        const auto &c = std::get<EventClick>(e.variant);
++        float left = get_absolute_left(), width = get_client_width();
++        if ((c.x != 0.0f || c.y != 0.0f) && width > 0.0f) {
++            float at = (c.x - left) / width;
++            if (at < 0.25f) { owner->step(-1); break; }
++            if (at > 0.75f) { owner->step(1); break; }
++        }
++        owner->choose();
++        break;
++    }
++    case EventType::Focus: {
++        bool active = std::get<EventFocus>(e.variant).active;
++        owner->focused = active;
++        owner->set_row_lit(active);
++        set_border_color(active ? theme::color::SecondaryL : theme::color::BorderSoft);
++        config::set_accept_hint(active && owner->confirm ? "Choose" : "");
++        if (active) {
++            owner->on_hover(owner->option_id);
++        }
++        else if (owner->confirm && config::get_option_browse(owner->config->id, owner->option_id) && browse_left_callback()) {
++            browse_left_callback()(owner->config->id, owner->option_id);
++        }
++        owner->refresh();
++        break;
++    }
++    case EventType::Enable: {
++        bool on = std::get<EventEnable>(e.variant).active;
++        set_focusable(on);
++        set_cursor(on ? Cursor::Pointer : Cursor::None);
++        break;
++    }
++    default:
++        break;
++    }
++}
++
++ConfigOptionCycle::ConfigOptionCycle(
++    ResourceId rid,
++    Element *parent,
++    std::string option_id,
++    size_t option_index,
++    const recomp::config::Config *config,
++    set_option_value_t set_option_value,
++    on_option_hover_t on_hover,
++    std::function<std::vector<config::CycleChoice>()> choices_fn,
++    bool confirm
++) : ConfigOptionElement(rid, parent, option_id, option_index, config, set_option_value, on_hover), choices(std::move(choices_fn)),
++    confirm(confirm)
++{
++    // Update events (queue_update, each frame) follow the list.
++    ContextId context = recompui::get_current_context();
++    value_button = context.create_element<CycleValue>(this, this);
++    value_button->set_flex_shrink(0.0f);
++    prev_icon = context.create_element<Svg>(value_button, "icons/ChevronLeft.svg");
++    prev_icon->set_width(26.0f);
++    prev_icon->set_height(26.0f);
++    prev_icon->set_pointer_events(PointerEvents::None);
++    Element *middle = context.create_element<Element>(value_button, 0, "div", false);
++    middle->set_display(Display::Flex);
++    middle->set_flex_direction(FlexDirection::Column);
++    middle->set_align_items(AlignItems::Center);
++    middle->set_min_width(250.0f);
++    middle->set_pointer_events(PointerEvents::None);
++    value_label = context.create_element<Label>(middle, "", theme::Typography::LabelMD);
++    value_label->set_text_align(TextAlign::Center);
++    value_label->set_white_space(WhiteSpace::Nowrap);
++    value_label->set_pointer_events(PointerEvents::None);
++    hint_label = context.create_element<Label>(middle, "PRESS × TO CHOOSE", theme::Typography::LabelXS);
++    hint_label->set_color(theme::color::Warning);
++    hint_label->set_white_space(WhiteSpace::Nowrap);
++    hint_label->set_display(Display::None);
++    hint_label->set_pointer_events(PointerEvents::None);
++    next_icon = context.create_element<Svg>(value_button, "icons/ChevronRight.svg");
++    next_icon->set_width(26.0f);
++    next_icon->set_height(26.0f);
++    next_icon->set_pointer_events(PointerEvents::None);
++    refresh();
++    update_disabled();
++    queue_update();
++}
++
++std::string ConfigOptionCycle::key() const { return config->id + "/" + option_id; }
++
++std::string ConfigOptionCycle::current_value() {
++    if (confirm) {
++        if (auto b = config::get_option_browse(config->id, option_id)) return *b;
++    }
++    return std::get<std::string>(get_value());
++}
++
++void ConfigOptionCycle::process_event(const Event &e) {
++    if (e.type == EventType::Update) {
++        refresh();
++        queue_update();
++        return;
++    }
++    ConfigOptionElement::process_event(e);
++}
++
++void ConfigOptionCycle::refresh() {
++    const std::string value = current_value();
++    std::string label = value;
++    for (const config::CycleChoice &c : choices()) {
++        if (c.value == value) {
++            label = c.label;
++            break;
++        }
++    }
++    int state = confirm && config::get_option_browse(config->id, option_id) ? 1 : 0;
++    if (label != shown) {
++        shown = label;
++        value_label->set_text(label);
++    }
++    if (state != shown_state) {
++        shown_state = state;
++        value_label->set_color(state ? theme::color::TextDim : theme::color::SecondaryL);
++        hint_label->set_display(state ? Display::Block : Display::None);
++    }
++}
++
++void ConfigOptionCycle::step(int dir) {
++    if (get_disabled()) {
++        return;
++    }
++    std::vector<config::CycleChoice> list = choices();
++    if (list.empty()) {
++        return;
++    }
++    const std::string value = current_value();
++    int at = -1;
++    for (size_t i = 0; i < list.size(); i++) {
++        if (list[i].value == value) {
++            at = (int)i;
++        }
++    }
++    int n = (int)list.size();
++    int next = at < 0 ? (dir > 0 ? 0 : n - 1) : ((at + dir) % n + n) % n;
++    if (next == at) {
++        return;
++    }
++    const std::string &to = list[(size_t)next].value;
++    if (confirm) {
++        // Browsing: the option keeps its value until the choice; back on it is no browse at all.
++        if (to == std::get<std::string>(get_value())) config::set_option_browse(config->id, option_id, std::nullopt);
++        else config::set_option_browse(config->id, option_id, to);
++    }
++    else {
++        set_option_value(option_id, to);
++    }
++    refresh();
++}
++
++void ConfigOptionCycle::choose() {
++    if (get_disabled() || !confirm) {
++        return;
++    }
++    auto b = config::get_option_browse(config->id, option_id);
++    if (!b) {
++        return;  // the chosen one already
++    }
++    std::string to = *b;
++    config::set_option_browse(config->id, option_id, std::nullopt);
++    set_option_value(option_id, to);
++    refresh();
++}
++
++void ConfigOptionCycle::update_disabled() {
++    value_button->set_enabled(!get_disabled());
++}
++
+ // ConfigOptionAction
+ ConfigOptionAction::ConfigOptionAction(
+     ResourceId rid,
+diff --git a/recompui/src/config/ui_config_option.h b/recompui/src/config/ui_config_option.h
+--- a/recompui/src/config/ui_config_option.h
++++ b/recompui/src/config/ui_config_option.h
+@@ -8,6 +8,9 @@
+ #include "elements/ui_slider.h"
+ #include "elements/ui_toggle.h"
+ #include "elements/ui_button.h"
++#include "elements/ui_icon_button.h"
++#include "elements/ui_svg.h"
++#include "recompui/config.h"
+ 
+ namespace recompui {
+     using set_option_value_t = std::function<void(const std::string &option_id, recomp::config::ConfigValueVariant value)>;
+@@ -111,6 +114,57 @@
+     );
+ 
+     void update_value() override {}
++    void update_disabled() override;
++};
++
++// Blitz: a string option as a cycling selector (config::set_option_cycle): one focusable piece, < name >. Left / right
++// step (and wrap); a tap on an arrow steps, a tap on the name or Accept chooses (a confirm row; a plain one sets the
++// value as it steps). The list is read again each frame, so choices that come or go while Settings is open show at once.
++class ConfigOptionCycle;
++class CycleValue : public Element {
++    ConfigOptionCycle *owner;
++protected:
++    void process_event(const Event &e) override;
++    std::string_view get_type_name() override { return "CycleValue"; }
++public:
++    CycleValue(ResourceId rid, Element *parent, ConfigOptionCycle *owner);
++};
++
++class ConfigOptionCycle : public ConfigOptionElement {
++    friend class CycleValue;
++protected:
++    CycleValue *value_button = nullptr;
++    Svg *prev_icon = nullptr;
++    Svg *next_icon = nullptr;
++    Label *value_label = nullptr;
++    Label *hint_label = nullptr;
++    std::function<std::vector<config::CycleChoice>()> choices;
++    bool confirm = false;
++    bool focused = false;
++    std::string shown;
++    int shown_state = -1;  // 0 chosen, 1 browsing
++    std::string key() const;
++    std::string current_value();  // what the row shows: the browse, else the option's value
++    void step(int dir);
++    void choose();
++    void refresh();
++    void process_event(const Event &e) override;
++
++    std::string_view get_type_name() override { return "ConfigOptionCycle"; }
++public:
++    ConfigOptionCycle(
++        ResourceId rid,
++        Element *parent,
++        std::string option_id,
++        size_t option_index,
++        const recomp::config::Config *config,
++        set_option_value_t set_option_value,
++        on_option_hover_t on_hover,
++        std::function<std::vector<config::CycleChoice>()> choices,
++        bool confirm
++    );
++
++    void update_value() override { refresh(); }
+     void update_disabled() override;
+ };
+ 
+diff --git a/recompui/src/config/ui_config_page_options_menu.cpp b/recompui/src/config/ui_config_page_options_menu.cpp
+--- a/recompui/src/config/ui_config_page_options_menu.cpp
++++ b/recompui/src/config/ui_config_page_options_menu.cpp
+@@ -19,6 +19,18 @@
+         static std::map<std::string, std::string> actions;
+         return actions;
+     }
++    struct Cycle {
++        std::function<std::vector<config::CycleChoice>()> choices;
++        bool confirm = false;
++    };
++    std::map<std::string, Cycle> &option_cycles() {
++        static std::map<std::string, Cycle> cycles;
++        return cycles;
++    }
++    std::map<std::string, std::string> &option_browses() {  // "config/option" -> a confirm row's value not chosen yet
++        static std::map<std::string, std::string> browses;
++        return browses;
++    }
+ 
+     // Blitz '27 section row: cyan caps, a soft rule filling the rest, and an optional live count in green.
+     class ConfigSectionRow : public Element {
+@@ -117,6 +129,11 @@
+         config_option.type == recomp::config::ConfigOptionType::Bool) {
+         element = context.create_element<ConfigOptionAction>(parent, config_option.id, i, config, set_value, on_hover, action->second);
+     }
++    else if (auto cycle = option_cycles().find(key); cycle != option_cycles().end() &&
++             config_option.type == recomp::config::ConfigOptionType::String) {
++        element = context.create_element<ConfigOptionCycle>(parent, config_option.id, i, config, set_value, on_hover,
++                                                            cycle->second.choices, cycle->second.confirm);
++    }
+     else {
+         switch (config_option.type) {
+             case recomp::config::ConfigOptionType::Enum:
+@@ -252,6 +269,27 @@
+ 
+ void config::set_option_action(const std::string &config_id, const std::string &option_id, const std::string &button_text) {
+     option_actions()[config_id + "/" + option_id] = button_text;
++}
++
++void config::set_option_cycle(const std::string &config_id, const std::string &option_id,
++                              std::function<std::vector<CycleChoice>()> choices, bool confirm) {
++    option_cycles()[config_id + "/" + option_id] = { std::move(choices), confirm };
++}
++
++std::optional<std::string> config::get_option_browse(const std::string &config_id, const std::string &option_id) {
++    auto it = option_browses().find(config_id + "/" + option_id);
++    if (it == option_browses().end()) {
++        return std::nullopt;
++    }
++    return it->second;
++}
++
++void config::set_option_browse(const std::string &config_id, const std::string &option_id, std::optional<std::string> value) {
++    if (value) {
++        option_browses()[config_id + "/" + option_id] = *value;
++    } else {
++        option_browses().erase(config_id + "/" + option_id);
++    }
+ }
+ 
+ ConfigPageOptionsMenu::ConfigPageOptionsMenu(
+diff --git a/recompui/src/elements/ui_modal.cpp b/recompui/src/elements/ui_modal.cpp
+--- a/recompui/src/elements/ui_modal.cpp
++++ b/recompui/src/elements/ui_modal.cpp
+@@ -1,4 +1,5 @@
+ #include "ui_modal.h"
++#include "recompui/config.h"
+ #include "recompui/recompui.h"  // decorate_panel
+ #include "ui_element.h"
+ #include "ui_document.h"
+@@ -7,6 +8,10 @@
+ 
+ namespace recompui {
+ 
++// Blitz: an element's own word for Accept in the hint row (config::set_accept_hint), "" the default.
++static std::string accept_hint;
++static std::string accept_hint_drawn;
++
+ class ModalOverlay : public Element {
+ protected:
+     Modal *parent_modal;
+@@ -290,7 +295,7 @@
+             if (is_open) {
+                 bool update_action_labels = false;
+                 auto [current_device, current_profile] = get_last_input_info();
+-                if (current_device != last_input_device || current_profile != last_input_profile) {
++                if (current_device != last_input_device || current_profile != last_input_profile || accept_hint != accept_hint_drawn) {
+                     render_menu_actions();
+                 }
+                 // The layer on top owns the hint row: a prompt draws its own.
+@@ -325,7 +330,12 @@
+     render_menu_actions();
+ }
+ 
++void config::set_accept_hint(const std::string &label) {
++    accept_hint = label;
++}
++
+ void Modal::render_menu_actions() {
++    accept_hint_drawn = accept_hint;
+     static const MenuAction menu_action_order[] = {
+         MenuAction::Accept,
+         MenuAction::Back,
+@@ -365,7 +375,8 @@
+         return it != menu_action_callbacks.end() && !it->second.description.empty();
+     };
+     std::vector<HintItem> items;
+-    items.push_back({ { MenuAction::Accept }, described(MenuAction::Accept) ? menu_action_callbacks[MenuAction::Accept].description : "Select" });
++    items.push_back({ { MenuAction::Accept }, !accept_hint.empty() ? accept_hint
++                                              : described(MenuAction::Accept) ? menu_action_callbacks[MenuAction::Accept].description : "Select" });
+     if (described(MenuAction::Back)) {
+         items.push_back({ { MenuAction::Back }, menu_action_callbacks[MenuAction::Back].description });
+     }

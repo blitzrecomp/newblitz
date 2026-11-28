@@ -30,6 +30,7 @@
 #include "recomp.h"
 #include "librecomp/game.hpp"
 #include "team_store.h"
+#include "blitz_soft_reset.h"
 
 namespace blitz {
     void post_notice(const std::string& msg);  // notices.cpp
@@ -77,6 +78,13 @@ namespace {
     std::once_flag load_once;
     std::optional<Pack> active;
     bool reported_mismatch = false;
+
+    // Restart in place (soft_restart.cpp): the pack is read again, as a fresh start reads it.
+    [[maybe_unused]] const bool pack_soft_reset = blitz::on_soft_reset("content pack", [] {
+        blitz::reset_once(load_once);
+        active.reset();
+        reported_mismatch = false;
+    });
 
     struct PackError {
         std::string msg;

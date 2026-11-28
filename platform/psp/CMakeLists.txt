@@ -185,7 +185,7 @@ endif()
 # extended GBI), receiver_targets (SDL, RmlUi), savestate, crew, ds_*, art_dropin (rewrites the whole ROM in memory),
 # config (SDL, the settings UI), controllers, dev_input (SDL).
 set(GAME_TIER2
-  ${GAME}/skin_tones.cpp ${GAME}/house_rules.cpp ${GAME}/cpu_smart.cpp ${GAME}/opponent_select.cpp ${GAME}/mixed_uniforms.cpp
+  ${GAME}/skin_tones.cpp ${GAME}/house_rules.cpp ${GAME}/cpu_smart.cpp ${GAME}/opponent_select.cpp ${GAME}/mixed_uniforms.cpp ${GAME}/uv_overrides.cpp
   ${GAME}/checkpoint.cpp ${GAME}/tournament.cpp ${GAME}/uniform_picker.cpp ${GAME}/button_glyphs.cpp ${GAME}/board_digits.cpp
   ${GAME}/engine32.cpp ${GAME}/content_dirs.cpp ${GAME}/season_tiebreak.cpp ${GAME}/season_settings.cpp ${GAME}/adv_league.cpp)
 set(PSP_LAYER

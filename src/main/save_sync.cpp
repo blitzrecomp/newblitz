@@ -53,6 +53,8 @@
 #include "librecomp/game.hpp"
 #include "../game/save_sync_cloud.h"
 #include "save_sync_wifi.h"
+#include "blitz_soft_reset.h"
+#include "recompui/config.h"
 
 namespace blitz {
     void restart_fresh();     // main.cpp
@@ -1500,6 +1502,16 @@ namespace blitz {
         int n = ss::apply_staged_settings(app);
         if (n > 0) fprintf(stderr, "[sync] %d settings file(s) from an import put in place\n", n);
     }
+
+    // Restart in place (soft_restart.cpp): an import's league settings go in as at a start, and the Season and Rules
+    // settings are read again from them (a fresh start reads them before anything uses them).
+    [[maybe_unused]] const bool sync_soft_reset = on_soft_reset("staged settings", [] {
+        int n = ss::apply_staged_settings(recompui::file::get_app_folder_path());
+        if (n <= 0) return;
+        recompui::config::get_config("rules").load_config();
+        recompui::config::get_config("season").load_config();
+        fprintf(stderr, "[sync] %d settings file(s) from an import put in place and read again\n", n);
+    });
 
     // Every UI tick (firstrun.cpp builder_update).
     void save_sync_update() {

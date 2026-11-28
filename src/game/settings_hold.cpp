@@ -28,6 +28,7 @@
 #include "recompui/recompui.h"
 #include "ultramodern/config.hpp"
 #include "ultramodern/ultramodern.hpp"
+#include "blitz_soft_reset.h"
 
 extern "C" int blitz_savestate_busy(void);                       // savestate.cpp
 extern "C" void blitz_savestate_mark(int op, const char* name);
@@ -62,6 +63,16 @@ namespace {
     std::atomic<int64_t> let_go_ms{0};       // when a hold last ended
 
     bool ui_gone() { return now_ms() - ui_seen_ms.load() > ui_gone_ms; }
+
+    // Restart in place (soft_restart.cpp): the held dispatcher went with the game's threads.
+    // Restart is pressed in Settings, so the game is usually held then, and the dispatcher that would let go (settings_hold_held)
+    // is gone: what the hold turned on goes off here. RT64 left presenting every VI as well as the game's frames made the Surface
+    // Duo's two screens stutter after one restart (build 960: frames over 1/2/3/4+ VIs instead of 2).
+    [[maybe_unused]] const bool hold_soft_reset = blitz::on_soft_reset("settings hold", [] {
+        if (holding.load() && !blitz::replay_is_open()) blitz_replay_keep_presenting = 0;
+        holding = false;
+        run_passes = 0;
+    });
 
     // UI thread only.
     enum class Mark { none, saving, ready, loading, failed };

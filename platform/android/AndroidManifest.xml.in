@@ -79,6 +79,14 @@
             android:theme="@android:style/Theme.Translucent.NoTitleBar"
             android:excludeFromRecents="true"
             android:noHistory="true" />
+        <!-- The whole app started again (Reset Data, BlitzRestart.java): see-through, in its own process so it outlives the
+             game's, then the launcher. -->
+        <activity android:name="com.blitzrecomp.newblitz.BlitzRestart"
+            android:exported="false"
+            android:process=":restart"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:noHistory="true" />
         <!-- Potato Mode's first launch: setup's ROM screen before the game loads. A task of its own, so on two screens it can
              open on the lower one, the touch screen, whichever the launcher's on (BlitzLauncher.startRomFirst). -->
         <activity android:name="com.blitzrecomp.newblitz.BlitzRomFirst"
@@ -100,6 +108,14 @@
         </activity>
         <provider android:name="com.blitzrecomp.newblitz.BlitzFiles" android:authorities="@BLITZ_ANDROID_PACKAGE@.files"
             android:exported="false" android:grantUriPermissions="true" />
+        <!-- New Blitz's folder in the Files app and every picker (BlitzFolder.java, Add-Ons' Open Folder). Only the system's
+             documents UI may bind to it. -->
+        <provider android:name="com.blitzrecomp.newblitz.BlitzFolder" android:authorities="@BLITZ_ANDROID_PACKAGE@.folder"
+            android:exported="true" android:grantUriPermissions="true" android:permission="android.permission.MANAGE_DOCUMENTS">
+            <intent-filter>
+                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+            </intent-filter>
+        </provider>
         <!-- Test builds: remote testing (BlitzRemote.java). Its own process, so it outlives a crash of the game. -->
         <service android:name="com.blitzrecomp.newblitz.BlitzRemote" android:process=":remote" android:exported="false"
             android:foregroundServiceType="specialUse">

@@ -54,11 +54,15 @@ namespace {
 
     jstring jstr(JNIEnv* env, const std::string& s) { return env->NewStringUTF(s.c_str()); }
 
-    // The file picker's answer (nativeFilesPicked, on Android's main thread) for the game thread waiting on it.
+    // The file picker's answer (nativeFilesPicked, on Android's main thread) for the thread waiting on it. Each pick has a
+    // number: a pick whose answer never came (the activity was made again behind the picker) gives way to the next one.
     std::mutex pick_mutex;
     std::condition_variable pick_cv;
-    bool pick_done = false;
+    uint64_t pick_asked = 0, pick_answered = 0;
     std::vector<std::filesystem::path> picked;
+
+    // The progress of the http_get_progress running on this thread (nativeHttpProgress comes back on it).
+    thread_local const std::function<void(uint64_t, uint64_t)>* http_progress_now = nullptr;
 }
 
 namespace blitz {
@@ -91,6 +95,62 @@ namespace blitz {
         for (jobject o : {(jobject)ju, (jobject)jb, (jobject)ja, (jobject)js}) env->DeleteLocalRef(o);
         if (status != 200) body.clear();
         return status == 200;
+    }
+
+    // BlitzActivity.httpGetProgress: the same connection, with BlitzActivity.nativeHttpProgress as it reads (on this thread,
+    // inside the call: a thread_local finds this call's progress).
+    bool http_get_progress(const std::string& url, std::string& body, int& status, const std::function<void(uint64_t, uint64_t)>& progress) {
+        body.clear();
+        status = 0;
+        Activity a;
+        if (!a) return false;
+        jmethodID m = a.method("httpGetProgress", "(Ljava/lang/String;[I)[B");
+        if (!m) return false;
+        JNIEnv* env = a.env;
+        jstring ju = jstr(env, url);
+        jintArray js = env->NewIntArray(1);
+        http_progress_now = progress ? &progress : nullptr;
+        jbyteArray data = (jbyteArray)env->CallStaticObjectMethod(a.cls, m, ju, js);
+        http_progress_now = nullptr;
+        bool threw = a.failed("httpGetProgress");
+        jint code = 0;
+        env->GetIntArrayRegion(js, 0, 1, &code);
+        status = code;
+        if (data && !threw) {
+            jsize n = env->GetArrayLength(data);
+            body.resize((size_t)n);
+            if (n) env->GetByteArrayRegion(data, 0, n, reinterpret_cast<jbyte*>(body.data()));
+            env->DeleteLocalRef(data);
+        }
+        for (jobject o : {(jobject)ju, (jobject)js}) env->DeleteLocalRef(o);
+        if (status != 200) body.clear();
+        return status == 200;
+    }
+
+    // BlitzActivity.networkMetered: ConnectivityManager.isActiveNetworkMetered (mobile data, a hotspot, a metered Wi-Fi).
+    bool network_metered() {
+        Activity a;
+        if (!a) return false;
+        jmethodID m = a.method("networkMetered", "()Z");
+        if (!m) return false;
+        jboolean on = a.env->CallStaticBooleanMethod(a.cls, m);
+        if (a.failed("networkMetered")) return false;
+        return on;
+    }
+
+    // BlitzActivity.openAppFolder: the Files app at New Blitz's folder (BlitzFolder, the app's own documents provider).
+    void open_app_folder_in_files(std::function<void(bool)> done) {
+        bool ok = false;
+        {
+            Activity a;
+            jmethodID m = a ? a.method("openAppFolder", "()Z") : nullptr;
+            if (m) {
+                ok = a.env->CallStaticBooleanMethod(a.cls, m);
+                if (a.failed("openAppFolder")) ok = false;
+            }
+        }
+        fprintf(stderr, "[folder] Files app at the app folder: %s\n", ok ? "opened" : "no app could open it");
+        if (done) done(ok);
     }
 
     // BlitzActivity.httpPost: the same HttpURLConnection. Crash reports (crash_report.cpp).
@@ -243,6 +303,24 @@ namespace blitz {
         SDL_AddEventWatch(on_app_event, window);
     }
 
+    // blitz_host.h: the launcher icon's own start, scheduled for a moment after this process ends (BlitzActivity.relaunch),
+    // so it comes up on the same screens as a start from the icon (the Surface Duo's span included).
+    bool relaunch_app() {
+        // Straight to logcat as well: the process ends right after this, before the log's own thread passes it on.
+        Activity a;
+        bool ok = false;
+        if (a) {
+            if (jmethodID m = a.method("relaunch", "()Z")) {
+                ok = a.env->CallStaticBooleanMethod(a.cls, m) == JNI_TRUE;
+                if (a.failed("relaunch")) ok = false;
+            }
+        }
+        const char* said = ok ? "the launcher starts again as this process ends" : "couldn't start the relaunch";
+        fprintf(stderr, "[restart] Android: %s\n", said);
+        __android_log_print(ANDROID_LOG_INFO, "BlitzRecomp", "[restart] Android: %s", said);
+        return ok;
+    }
+
     // The window the renderer is made on (main.cpp's create_render_context), on the graphics thread: the game's surface as it
     // is now, not the one create_window saw, which Android may have taken away since (backgrounded, minimized). Waits for one
     // while there's none. Held for good: the renderer keeps the pointer.
@@ -268,12 +346,16 @@ namespace blitz {
 
 // The frontend's file dialog on Android (lib/RecompFrontend file.cpp, frontend patch): the system picker
 // (ACTION_OPEN_DOCUMENT), whose picks BlitzActivity copies into the app's cache. Blocks, like a desktop dialog.
+// Called on a thread of its own (the frontend patch 0017 starts one for each dialog, 1.0.6): the UI keeps drawing and taking
+// input behind the picker, and Back or Cancel there comes back as no files, to the screen the player was on.
 std::vector<std::filesystem::path> blitz_android_pick_files(bool multiple) {
+    uint64_t mine;
     {
         std::lock_guard lock{pick_mutex};
-        pick_done = false;
+        mine = ++pick_asked;
         picked.clear();
     }
+    pick_cv.notify_all();  // an earlier pick still waiting gives up: its answer isn't coming
     {
         Activity a;
         if (!a) return {};
@@ -283,8 +365,13 @@ std::vector<std::filesystem::path> blitz_android_pick_files(bool multiple) {
         if (a.failed("pickFiles")) return {};
     }
     std::unique_lock lock{pick_mutex};
-    pick_cv.wait(lock, [] { return pick_done; });
-    return picked;
+    pick_cv.wait(lock, [mine] { return pick_answered >= mine || pick_asked != mine; });
+    if (pick_asked != mine) {
+        fprintf(stderr, "[picker] an earlier pick's answer never came: given up\n");
+        return {};
+    }
+    fprintf(stderr, "[picker] %zu file(s) picked%s\n", picked.size(), picked.empty() ? " (Back or Cancel)" : "");
+    return std::move(picked);
 }
 
 // ---- BLITZ DS (docs/BLITZ_DS.md): the second screen's surface, from BlitzActivity's Presentation ----------------------
@@ -454,10 +541,17 @@ extern "C" JNIEXPORT void JNICALL Java_com_blitzrecomp_newblitz_BlitzActivity_na
         env->ReleaseStringUTFChars(s, c);
         env->DeleteLocalRef(s);
     }
-    std::lock_guard lock{pick_mutex};
-    picked = std::move(got);
-    pick_done = true;
+    {
+        std::lock_guard lock{pick_mutex};
+        picked = std::move(got);
+        pick_answered = pick_asked;
+    }
     pick_cv.notify_all();
+}
+
+// BlitzActivity.httpGetProgress, as it reads (on the thread that called it).
+extern "C" JNIEXPORT void JNICALL Java_com_blitzrecomp_newblitz_BlitzActivity_nativeHttpProgress(JNIEnv*, jclass, jlong got, jlong total) {
+    if (http_progress_now && *http_progress_now) (*http_progress_now)((uint64_t)(got > 0 ? got : 0), (uint64_t)(total > 0 ? total : 0));
 }
 
 namespace blitz {

@@ -148,10 +148,12 @@ namespace blitz {
 namespace blitz {
     // A computer has file dialogs: no drop folder.
     std::filesystem::path rom_drop_folder() { return {}; }
+    void open_app_folder_in_files(std::function<void(bool)> done) { if (done) done(false); }  // Finder: os_shell.cpp
 }
 
 namespace blitz {
     void window_created(SDL_Window*) {}
+    bool relaunch_app() { return false; }  // blitz_host.h: Android only
 }
 
 namespace blitz {

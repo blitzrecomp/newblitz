@@ -345,7 +345,13 @@ text = "    blitz_player_tag(rdram, (int32_t)ctx->r16);"
 [[patches.hook]]
 func = "func_8027139C"
 before_vram = 0x802723E8
-text = "    blitz_player_tag(rdram, (int32_t)ctx->r16); blitz_mixed_body(rdram, (int32_t)ctx->r16);"
+text = "    blitz_player_tag(rdram, (int32_t)ctx->r16); blitz_uvo_player(rdram, (int32_t)ctx->r16); blitz_mixed_body(rdram, (int32_t)ctx->r16);"
+# Per-set texture coordinates (src/game/uv_overrides.cpp): which set a side is dressed in, read where the uniform
+# builder (side, team, set) starts; each player's body then gets segment 15 (above, before his jersey load).
+[[patches.hook]]
+func = "func_80256580"
+before_vram = 0x80256580
+text = "    blitz_uvo_dress(rdram, (int32_t)ctx->r4, (int32_t)ctx->r5, (int32_t)ctx->r6);"
 [[patches.hook]]
 func = "func_8027139C"
 before_vram = 0x802726F8

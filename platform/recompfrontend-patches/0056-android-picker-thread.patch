@@ -1,0 +1,36 @@
+diff --git a/recompui/src/util/file.cpp b/recompui/src/util/file.cpp
+index 849d7a3..bccd402 100644
+--- a/recompui/src/util/file.cpp
++++ b/recompui/src/util/file.cpp
+@@ -11,6 +11,7 @@
+ #include <filesystem>
+ #include <fstream>
+ #include <iomanip>
++#include <thread>
+ 
+ #if defined(_WIN32)
+ #include <Shlobj.h>
+@@ -28,13 +29,19 @@ namespace recompui {
+ // like the desktop dialogs; the picked files are copied into the app's cache, so the import reads them as local files.
+ std::vector<std::filesystem::path> blitz_android_pick_files(bool multiple);
+ namespace recompui {
++    // On a thread of its own (BlitzRecomp, 1.0.6), as iOS's picker answers later: the button that opened it returns at once,
++    // so the UI keeps going behind the picker, and Back or Cancel there lands back on that screen (no files: callback false).
+     static void perform_file_dialog_operation(const std::function<void(bool, const std::filesystem::path&)>& callback) {
+-        std::vector<std::filesystem::path> paths = blitz_android_pick_files(false);
+-        callback(!paths.empty(), paths.empty() ? std::filesystem::path{} : paths.front());
++        std::thread([callback] {
++            std::vector<std::filesystem::path> paths = blitz_android_pick_files(false);
++            callback(!paths.empty(), paths.empty() ? std::filesystem::path{} : paths.front());
++        }).detach();
+     }
+     static void perform_file_dialog_operation_multiple(const std::function<void(bool, const std::list<std::filesystem::path>&)>& callback) {
+-        std::vector<std::filesystem::path> paths = blitz_android_pick_files(true);
+-        callback(!paths.empty(), std::list<std::filesystem::path>(paths.begin(), paths.end()));
++        std::thread([callback] {
++            std::vector<std::filesystem::path> paths = blitz_android_pick_files(true);
++            callback(!paths.empty(), std::list<std::filesystem::path>(paths.begin(), paths.end()));
++        }).detach();
+     }
+ #elif defined(__PROSPERO__) || defined(BLITZ_IOS)
+     // PS5 homebrew (BlitzRecomp): no file dialog; files come from fixed folders (docs/PS5_HOMEBREW.md). iOS uses the

@@ -706,6 +706,19 @@ namespace {
     }
 }
 
+#include "blitz_soft_reset.h"
+
+namespace {
+    // Restart in place (soft_restart.cpp): the next boot reads the ROM again and registers every file again.
+    [[maybe_unused]] const bool fs_soft_reset = blitz::on_soft_reset("files", [] {
+        fs_pending.clear();
+        fs_added.clear();
+        fs_committed = false;
+        for (size_t& m : fs_marks) m = 0;
+        fs_original = 0;
+    });
+}
+
 namespace blitz {
     void post_notice(const std::string& msg);  // notices.cpp
     uint32_t fs_ram_count(uint8_t* rdram);

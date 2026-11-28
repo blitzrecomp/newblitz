@@ -1,13 +1,13 @@
 // The phone controller page (phone_pads.cpp serves it). Landscape: a stick on the left (the first
 // touch there is the centre), the action buttons on the right with labels that follow the game (menus,
-// play select, a play), START at the top, and a menu for save states, Redo Play and taking player 1.
+// play select, a play), START at the bottom centre (where the touch controls have it), and a menu for save states, Redo Play and taking player 1.
 // Messages from the app: "v <version>", "p <player>", "r 1|0" (rumble), "m menu|select|play|offense|defense",
 // "t <status>".
 // To it: "s <buttons> <x> <y>", "c save|load|redo|slot+|slot-|p1".
 #pragma once
 
 // Bump with every change to the page: an open page from an older build reloads itself on connect.
-static const int phone_page_version = 9;  // 4: the Blitz '27 look (docs/design/redesign); 5: the wide logo in the menu; 7: buttons fit under a browser's bar; 8: the can't-connect box; 9: a page knows which game it belongs to (?g=)
+static const int phone_page_version = 10;  // 4: the Blitz '27 look (docs/design/redesign); 5: the wide logo in the menu; 7: buttons fit under a browser's bar; 8: the can't-connect box; 9: a page knows which game it belongs to (?g=); 10: START at the bottom centre
 
 // BRANDING: phone page <title>Blitz Controller</title> and the Blitz '27 style below
 static const char* phone_page_html = R"HTML(<!doctype html>
@@ -39,7 +39,7 @@ body { background:
   var(--ground); }
 .cap { font-family:var(--display); font-style:italic; font-weight:800; font-stretch:condensed; text-transform:uppercase; letter-spacing:.03em; }
 
-/* Top bar: who you are, which side of the ball, START and the menu. */
+/* Top bar: who you are, which side of the ball and the menu. */
 #bar { position:fixed; top:0; left:0; right:0; height:calc(env(safe-area-inset-top) + var(--bar)); display:flex; align-items:center; gap:12px;
   padding:env(safe-area-inset-top) calc(env(safe-area-inset-right) + 14px) 0 calc(env(safe-area-inset-left) + 16px);
   background:linear-gradient(180deg, rgba(2,7,18,.92), rgba(2,7,18,.55)); }
@@ -55,8 +55,6 @@ body { background:
 .top { position:relative; height:48px; display:flex; align-items:center; justify-content:center; border-radius:4px;
   border:2px solid var(--rim-soft); background:var(--deep); color:var(--text); }
 .top::before { content:""; position:absolute; inset:-12px -6px; }    /* 72 px tall touch area */
-#start { min-width:112px; padding:0 18px; font-size:22px; }
-#start.on { background:var(--red); border-color:var(--yellow-hi); color:var(--yellow-hi); }
 #more { width:68px; font:900 24px/1 var(--body); letter-spacing:.08em; padding-bottom:6px; }
 
 /* Stick: the first touch on the left is the centre. */
@@ -78,8 +76,10 @@ body { background:
 #hint span { font:700 12px/1 var(--body); letter-spacing:.16em; text-transform:uppercase; }
 
 /* Buttons: arcade caps in a chrome bezel, sized and placed by the button area's own height (cqh), so they fit whatever
-   a browser's bars leave (2026-11-14: Chrome's address bar in landscape put TURBO over the top bar). */
+   a browser's bars leave (2026-11-14: Chrome's address bar in landscape put TURBO over the top bar). --u is that unit, kept
+   small enough that JUMP (its left edge 100 units in from the right) clears START at the bottom centre on a squarer screen. */
 #pad { position:fixed; right:0; top:calc(env(safe-area-inset-top) + var(--bar)); bottom:0; width:54%; container-type:size; }
+#pad .b { --u:min(1cqh, calc((50vw - env(safe-area-inset-right) - 5.4dvh) / 100)); }
 .b { position:absolute; border-radius:50%; background:var(--chrome); padding:6px; display:flex; flex-direction:column; align-items:center;
   justify-content:center; gap:4px; text-align:center; box-shadow:0 7px 0 rgba(0,0,0,.45), 0 0 0 2px #050a18;
   transition:transform .06s, box-shadow .06s; }
@@ -94,11 +94,19 @@ body { background:
 .b.on::after { filter:brightness(1.35); }
 /* In the button area (H = its height): PASS bottom right, JUMP to its left, TURBO above between them, none overlapping. */
 #pass  { --capfill:radial-gradient(circle at 45% 30%, #F0414F, #B3101E 58%, #6E0812); --captext:#FFE14A; --glow:rgba(255,80,80,.6);
-  width:52cqh; height:52cqh; right:calc(env(safe-area-inset-right) + 4cqh); bottom:6cqh; }
+  width:calc(52 * var(--u)); height:calc(52 * var(--u)); right:calc(env(safe-area-inset-right) + 4 * var(--u)); bottom:calc(6 * var(--u)); }
 #jump  { --capfill:radial-gradient(circle at 45% 30%, #7A2BB0, #3F0A5F 60%, #22053A); --captext:#F2F2F2; --glow:rgba(150,80,220,.6);
-  width:40cqh; height:40cqh; right:calc(env(safe-area-inset-right) + 60cqh); bottom:4cqh; }
+  width:calc(40 * var(--u)); height:calc(40 * var(--u)); right:calc(env(safe-area-inset-right) + 60 * var(--u)); bottom:calc(4 * var(--u)); }
 #turbo { --capfill:radial-gradient(circle at 45% 30%, #FFD84A, #FF9A00 55%, #E05200); --captext:#1A0A00; --glow:rgba(255,170,0,.6);
-  width:36cqh; height:36cqh; right:calc(env(safe-area-inset-right) + 38cqh); bottom:58cqh; }
+  width:calc(36 * var(--u)); height:calc(36 * var(--u)); right:calc(env(safe-area-inset-right) + 38 * var(--u)); bottom:calc(58 * var(--u)); }
+
+/* START: a small round ▶ at the bottom centre, where the touch controls and DS Screens → Controller have it (touch_controls.cpp:
+   centre 93% down, 6.8% of the height across), house navy with the cyan rim; its touch area reaches further. */
+#start { position:fixed; left:50%; top:93dvh; width:max(6.8dvh, 28px); height:max(6.8dvh, 28px); transform:translate(-50%,-50%);
+  border-radius:50%; border:2px solid rgba(143,239,245,.78); background:rgba(13,26,58,.92); display:flex; align-items:center; justify-content:center; }
+#start::before { content:""; position:absolute; inset:-14px; border-radius:50%; }
+#start svg { position:absolute; inset:0; width:100%; height:100%; display:block; }
+#start.on { background:rgba(246,212,0,.86); }
 
 /* Status toast over the stick area (never over a button): eyebrow + title, like the game's yardage banners. */
 #toast { position:fixed; left:23%; top:calc(env(safe-area-inset-top) + var(--bar) + 10px); transform:translate(-50%,-10px); opacity:0;
@@ -168,7 +176,7 @@ body { background:
 }
 </style></head><body>
 <div id="bar"><span id="chip" class="cap">–</span><span id="who" class="cap">Connecting…</span><span id="mode"></span><span id="spacer"></span>
-  <div id="start" class="top cap" role="button" aria-label="Start">&#9654;&#xFE0E;</div><div id="more" class="top" role="button" aria-label="Menu">···</div></div>
+  <div id="more" class="top" role="button" aria-label="Menu">···</div></div>
 <div id="stick"><div id="ring"></div><div id="knob"></div>
   <div id="hint"><div class="dial"><i></i></div><b class="cap">Move</b><span>touch anywhere here</span></div></div>
 <div id="pad">
@@ -176,6 +184,7 @@ body { background:
   <div class="b" id="jump" role="button"><span class="l">JUMP</span><span class="s"></span></div>
   <div class="b" id="pass" role="button"><span class="l">PASS</span><span class="s"></span></div>
 </div>
+<div id="start" role="button" aria-label="Start"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M3.2 2.5 L7.6 5 L3.2 7.5 Z" fill="#FFFFFF" fill-opacity=".92"/></svg></div>
 <div id="toast" class="cap" role="status"><span class="e"></span><span class="t"></span></div>
 <div id="sheet"><div id="menu">
   <h2 class="cap">__BRAND__<small id="sheetWho"></small></h2>

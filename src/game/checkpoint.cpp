@@ -210,6 +210,13 @@ namespace {
             restore_pending = v.restore_pending;
             restored_clock = v.restored_clock;
         }), true);
+
+    // Restart in place (soft_restart.cpp): no game in progress in the boot that follows.
+    [[maybe_unused]] const bool checkpoint_soft_reset = blitz::on_soft_reset("checkpoint", [] {
+        in_progress = false;
+        restore_pending = false;
+        restored_clock = 0;
+    });
 }
 
 namespace blitz {

@@ -1,6 +1,136 @@
 # Changelog
 
-## 1.0.5 (unreleased)
+## 1.0.6 (unreleased)
+
+### New paks: two leagues and new NFL uniforms
+
+- **CFL 2026** and **Pac-12 2026**, two league paks: the nine CFL clubs and the eight schools of the 2026 Pac-12, with
+  their real 2026 rosters (healthy starters), logos, helmets, end zones and every home, away and alternate uniform.
+  They play Arcade and Tournament. Get them in Settings → Add-Ons (they also arrive by themselves with updates on),
+  then choose one under Settings → Teams → **League**.
+- **The 2026 Season's NFL uniforms, redone.** All 32 teams' home, away and alternate sets (116 choices) were redrawn
+  and checked on the field, with new matchup-screen helmets (Pittsburgh's Steelmark on its own side, Carolina,
+  Washington) and corrected end zones (Arizona, Indianapolis, the Giants, the Jets, Tennessee). It's a 2026 Season pak
+  update, so it reaches every version of New Blitz, 1.0.0 on.
+- **Shoulders the old model couldn't paint.** A pak can now give a uniform its own shoulder mapping and a different
+  right sleeve, so Colorado State's and Utah State's shoulder stripes run unbroken and the CFL's two-sided sleeves show
+  as drawn.
+
+### Your cartridge
+
+- **The v1.0 cartridge works.** NFL Blitz 2000 (USA) came out twice, v1.0 and v1.1. New Blitz plays v1.1, and until now
+  a v1.0 dump was turned away. The two are the same game with its code moved around, so New Blitz now updates a v1.0
+  dump to v1.1 as it goes in, checks the result is exactly v1.1, and tells you it did ("That's the v1.0 cartridge: New
+  Blitz updated it to v1.1"). Your own file isn't changed. It works wherever a ROM comes in: Load ROM, Blitz Builder,
+  Change ROM, a phone or handheld's file picker or app folder, the PS5's folder, and other launchers. The update is a
+  38 KB patch of v1.1's code that ships with the app; it holds no game art or sound.
+- **Another launcher's ROM that doesn't work says so on screen.** When a launcher starts New Blitz with a file
+  (`--import-rom`) that isn't the game, or is a damaged dump, New Blitz now stays on its own launcher and tells you why,
+  instead of quietly playing the ROM it had before.
+
+### When the game stops
+
+- **The freeze rescue covers the breaks between quarters.** If the game stopped responding at the end of a quarter or
+  at half time (seen in Original 1999), nothing happened: no message and nothing to pick up. Now New Blitz keeps the
+  last play there too, as it does mid-play, and offers to pick up from it next time. When there's truly nothing to
+  keep (Redo Play off), it still tells you the game stopped and to open New Blitz again, and Quit no longer waits on the
+  stuck game.
+
+### Add-Ons
+
+- **Paks load by themselves.** Every add-on pak New Blitz posts (the 2026 Season now, the league paks as they come)
+  installs and updates itself when the app starts, under Settings → Teams → **Keep Rosters and Uniforms Up to Date**,
+  which is on by default. Turn it off and nothing downloads by itself. What arrives during a game goes in the next time
+  New Blitz starts. On mobile data, big downloads wait for Wi-Fi. If you had it off, New Blitz asks you once after
+  updating: "Keep rosters, uniforms and new paks up to date?"
+- **Check**, at the top right of Add-Ons, looks for new paks right now and downloads them with a progress bar. When
+  there's nothing new it says "Up to date."
+- Paks you added yourself (Add…) are never replaced or updated behind your back, and a pak you remove stays removed
+  until you press **Get** on its row.
+- **Open Folder works on phones.** On an iPhone it opens New Blitz's folder in the Files app (On My iPhone → New
+  Blitz). On Android it opens the Files app at New Blitz's folder, which now also appears in the Files app's menu and
+  in file pickers as "New Blitz". If no app can open it, Add-Ons says where it is.
+- **Android: leaving the file picker.** Back or Cancel in the system file picker (Add…, Load ROM, Change ROM, Import
+  Saves) now returns you to the screen you were on, and the game keeps running behind the picker.
+
+### Leagues
+
+- **Settings → Teams → League** picks whose league you play: **NFL 2026** or any league pak you've added, like the
+  CFL's. It's one row with ◀ ▶ arrows, so every pak fits, whatever the screen (before, the fifth one was cut off).
+  A league pak plays Arcade and Tournament; Season, Advanced and the Play Editor are the NFL's, and the main menu greys
+  them out. **Rosters** and **Lineups** are the NFL's, so they hide while a league pak is chosen.
+- **A pak you add shows up straight away.** Add-Ons (Add…, Check, or the automatic downloads) puts it in the League list
+  without relaunching the app, and asks **"Play CFL 2026 now?"** (Yes / Not Now), on the launcher or in Settings, never
+  over a game. A pak removed while it's your league puts League back to NFL 2026 and says so.
+- **Look, then choose.** ◀ ▶ only look through the leagues (the name dims, with "Press × to choose"); **×** (or Enter,
+  or a tap on the name) chooses. Leaving with a league looked at but not chosen asks **"CFL 2026 isn't chosen yet."**
+  with **Restart to Switch** or **Keep NFL 2026**.
+- **Changing a league no longer does nothing until a restart.** During a game, choosing a league asks **"Switch to CFL
+  2026? New Blitz restarts to load its teams."** with **Restart Now** or **Later** (it waits for the next start). Game,
+  Rosters and Season Mode, also read as the game starts, ask the same with **Restart** and **Cancel** (Cancel puts it
+  back). Lineups needs no restart: every game reads it.
+  While a change waits for a restart, the ↻ Restart button at the top of Settings shows a dot, and its prompt says what
+  waits.
+- **League messages are New Blitz's own.** "CFL 2026 plays Arcade and Tournament. To play a Season, switch League to NFL
+  2026 in Settings → Teams" is an in-game box now (with a **Switch to NFL 2026** button), not a system dialog, and the
+  same goes for a content pack or pak that didn't load.
+- Your settings carry over: Rosters set to a pak becomes League = that pak with Rosters on Auto, including settings
+  that come in through Cloud Sync.
+- **Switching leagues with Restart starts clean.** After a restart from one league to another (the CFL to the Pac-12),
+  the Uniform Picker no longer offers the last league's uniforms to the new league's teams.
+- **A league pak that can't load adds nothing.** Before, a rejected pak's images could still go into the game (the
+  NFL team select showed another league's logo). Now it contributes nothing, you get a message ("CFL 2026 couldn't be
+  loaded: ... Playing NFL 2026."), and the NFL plays as usual. Lineups' "Current (Week 12)" also fills in once a lineup
+  or the 2026 Season pak arrives while the app is running.
+
+### Lineups, simpler
+
+- **Lineups** is **Current (Week 12)** or **All Starters (Healthy)**. Current is the freshest lineup New Blitz has,
+  labelled with its week; All Starters is the old Full Strength. Built-In and the pinned **Week N** are gone, and a
+  saved Built-In or Week N becomes Current. An Advanced season still plays each week with that week's lineup.
+
+### Seasons
+
+- **"Standard or Advanced season?"** When you start a new season, New Blitz asks which one: **Standard** is the classic
+  Blitz season; **Advanced** is the real 2026 schedule in today's eight divisions, with weekly lineups that follow the
+  real season, NFL tiebreakers and 7-team playoffs. It starts from your Season Mode setting and saves your answer
+  there. Picking the other one restarts the game into it (each keeps its own saves), and that next new season isn't
+  asked again. Never asked in the middle of a season.
+
+### On the field
+
+- **Play Art looks like Blitz now.** The routes are drawn the way the playbook's own play cards draw them: fat lines
+  with a shaded edge, a black drop shadow and broad barbed arrowheads, still in your Receiver Buttons' colours (made
+  as bold as the cards' red). They stand out on snow and at night, where the old see-through ribbons faded.
+
+### Menus
+
+- **Back at Controller Select no longer locks the confirm button.** After leaving a game, pressing Back there could
+  leave the confirm button doing nothing until another button was pressed (a controller reporting a button still held).
+  Confirm now always goes through. Back steps through the menus one screen at a time, and the menu history it keeps
+  takes an eighth of the memory it did.
+- **START is in one place on every controller.** The touch controls, two screens' Controller mode and the phone
+  controller page all put START, a small ▶, at the bottom centre (Controller mode had it at the top, the phone page in
+  its top bar). Controller mode's PASS, JUMP and TURBO no longer look cut off at the top and bottom: their shine and
+  lip follow the button's edge instead of running straight across it.
+- **The Uniform Picker no longer repeats a uniform.** At team select a side starts on Auto, which says which set the game
+  will use ("home uniform · Auto"). Pressing the uniform button steps through home, away and the team's alternates, each
+  once, starting after Auto's set; "game default" is no longer a stop. □ takes a side with a pick back to Auto (a second □
+  goes back a screen as before). The game's jersey-clash swap still applies to Auto.
+
+### Restart on every device
+
+- **Restart is back on phones**, at the top of Settings and in Add-Ons, and it no longer closes the app: the game
+  starts over inside New Blitz in a moment, like pressing an N64's reset button, with your settings read again. Handy
+  after changing Game, Season Mode or a roster pak, which wait for the next start.
+- **Main Menu** on a phone now goes straight to the launcher instead of closing the app, and a restored Controller
+  Pak or an imported save goes in without reopening New Blitz.
+- **Reset Data** on Android starts the app again by itself. An iPhone can't reopen an app, so it still closes and
+  tells you to open it again.
+- On Android, Restart after changing Potato Mode, Swap Screens or the two-screen Potato settings starts the whole app
+  again, since those are set as it opens.
+
+## 1.0.5 (2026-11-27)
 
 ### Your saves on every device
 

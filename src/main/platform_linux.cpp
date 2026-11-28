@@ -33,7 +33,16 @@ namespace blitz {
     void install_app_menu(const std::string&) {}
     int window_number(void*) { return 0; }
     std::filesystem::path rom_drop_folder() { return {}; }  // a computer has file dialogs
+    void open_app_folder_in_files(std::function<void(bool)> done) { if (done) done(false); }  // xdg-open: os_shell.cpp
+    // Progress once, at the end; metered connections aren't asked about.
+    bool http_get_progress(const std::string& url, std::string& body, int& status, const std::function<void(uint64_t, uint64_t)>& progress) {
+        bool ok = http_get(url, "", "", body, status);
+        if (ok && progress) progress(body.size(), body.size());
+        return ok;
+    }
+    bool network_metered() { return false; }
     void window_created(SDL_Window*) {}
+    bool relaunch_app() { return false; }  // blitz_host.h: Android only
 
     // curl -s -X POST --data-binary @<file> <url>: the body in a temporary file (stdin carries nothing here), the
     // status as curl's whole output (-o /dev/null -w).

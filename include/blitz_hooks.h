@@ -103,6 +103,9 @@ int blitz_opp_preview(uint8_t* rdram);
 void blitz_mixed_body(uint8_t* rdram, int32_t entry);
 void blitz_mixed_helmet(uint8_t* rdram, int32_t entry);
 void blitz_uniform_reset(int32_t side);  // uniform_picker.cpp
+// Per-set texture coordinates (src/game/uv_overrides.cpp): a side's set at the uniform builder, a player's body lists.
+void blitz_uvo_dress(uint8_t* rdram, int32_t side, int32_t team, int32_t set);
+void blitz_uvo_player(uint8_t* rdram, int32_t entry);
 
 // Drop-in files with new names (src/game/art_dropin.cpp, 2026 flavour).
 int blitz_fs_is_extra(int32_t index);

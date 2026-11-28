@@ -38,6 +38,8 @@
 #include "blitz_savestate.h"
 #include "team_store.h"
 #include "season_pak.h"
+#include "league_sets.h"
+#include "blitz_soft_reset.h"
 
 extern "C" {
     void func_80256580(uint8_t* rdram, recomp_context* ctx);  // a side's QB model: (side, team, set)
@@ -70,6 +72,11 @@ namespace blitz {
     std::vector<std::string> team_franchises();  // content_pack_tp.cpp: franchise id of each team index
     int team_of_slot(int slot);                         // content_pack_tp.cpp: the team in a game slot
     bool league_active();  // content_pack_tp.cpp: a league pak (its teams sit on NFL blocks, so no NFL sets)
+    // content_pack_tp.cpp: a league pak's own sets (team = store index; set 0 home, 1 away, 2 + k alternate k)
+    std::string league_set_name(int team, int set);
+    int league_set_dark(int team, int set);
+    bool league_sets_clash(int team_a, int set_a, int team_b, int set_b);
+    bool league_has_set_clashes();
     std::string active_pack_id();  // content_pack_tp.cpp
     std::string probowl_code(int side, bool human);  // crew.cpp
     bool probowl_code_saved(int side);
@@ -110,6 +117,13 @@ namespace {
         std::array<std::string, 10> files;  // added file names; "" keeps the team's away part
     };
     std::map<std::string, std::vector<ExtraSet>> extra_sets;  // franchise id -> its sets (filled once at startup)
+    std::map<int, std::vector<ExtraSet>> league_sets;           // a league team (store index) -> its sets
+    std::string league_sets_pack;                               // the league pack they're for
+    // Restart in place: read again from the pack the next boot loads (a pak updated meanwhile keeps its id).
+    [[maybe_unused]] const bool league_sets_soft_reset = blitz::on_soft_reset("league uniform sets", [] {
+        league_sets.clear();
+        league_sets_pack.clear();
+    });
 
     bool enabled() {
         return std::get<bool>(recompui::config::get_config("rules").get_option_value("uniform_picker"));
@@ -127,7 +141,28 @@ namespace {
     // A team's extra sets, by the store's team index (team_store.h).
     const std::vector<ExtraSet>* sets_of_team(int team) {
 #if BLITZ_MODERN
-        if (blitz::league_active()) return nullptr;
+        if (blitz::league_active()) {
+            // A league team's own alternates (pack.json "uniform_sets"; its files are the pak's files/added), not
+            // the NFL base's: the league's teams are the store's first, in the pak's order. Kept for the league that
+            // filled it: after a restart in place into another league (the CFL to the Pac-12), team 6 is another
+            // team, and the old league's sets leaked into it (the Surface Duo, 2026-11-28: a Pac-12 team offered
+            // the CFL's "Indigenous Boat 2026").
+            if (team < 0) return nullptr;
+            if (std::string id = blitz::active_pack_id(); id != league_sets_pack) {
+                league_sets.clear();
+                league_sets_pack = id;
+            }
+            auto& league = league_sets;
+            auto it = league.find(team);
+            if (it == league.end()) {
+                std::vector<ExtraSet> list;
+                if (const auto* sets = blitz::league_uniform_sets(team)) {
+                    for (const blitz::LeagueUniformSet& u : *sets) list.push_back(ExtraSet{u.id, u.name, u.dark, u.files});
+                }
+                it = league.emplace(team, std::move(list)).first;
+            }
+            return it->second.empty() ? nullptr : &it->second;
+        }
         const auto& f = blitz::team_franchises();
         if (team < 0 || (size_t)team >= f.size()) return nullptr;
         auto it = extra_sets.find(f[(size_t)team]);
@@ -190,8 +225,48 @@ namespace {
     // home_2026 / away_2026, which the Home and Away slots already are at Unpicked Uniforms 2026 (uniform_live_2026).
     bool is_base_2026(const ExtraSet& s) { return s.id == "home_2026" || s.id == "away_2026"; }
 
+    // The pad (controller) each side's picker last read, a □ press waiting for the selection loop (□ goes back a menu step
+    // at team select; with a pick made it puts the side back to Auto first: blitz_uniform_back), and whether the side's
+    // Auto has been said yet this team select.
+    int32_t pad_of_side[2] = {-1, -1};
+    int32_t auto_back[2] = {0, 0};
+    bool announced[2] = {false, false};
+
+    // The set Auto means for this side's team now: 0 home, 1 away, -1 not known (Rules -> Unpicked Uniforms Random).
+    // What the game would do at kickoff (blitz_uniform_kickoff): home, unless the home jerseys clash with the other
+    // side's team, or the other side has picked a set that asks this one to change. On a clash the game moves one side to
+    // away (ovl_a 0x80302ED4: the flag at 0x802EA474 says which, left or right).
+    int auto_set(uint8_t* rdram, int side, int team) {
+#if BLITZ_MODERN
+        (void)rdram;
+        if (unpicked_mode() == 2) return -1;
+        if (side < 0 || side > 1 || team < 0) return 0;
+        const int o = 1 - side;
+        int other = g.set[o] >= 0 && g.team[o] >= 0 ? g.team[o] : (int)MEM_W(0, (gpr)(int32_t)(chosen + 4 * (uint32_t)o));
+        if (other < 0) return 0;  // nobody to clash with yet
+        bool clash = !blitz::league_has_set_clashes() &&
+                     blitz::teamdata::store().clashes((size_t)blitz::team_of_slot(team), (size_t)blitz::team_of_slot(other));
+        if (g.set[o] >= 0) {  // follows the other's pick, as blitz_uniform_kickoff has an unpicked side do
+            if (g.set[o] >= 2) return g.dark[o] ? 1 : 0;
+            return g.set[o] == 1 ? 0 : (clash ? 1 : 0);
+        }
+        if (!clash) return 0;
+        bool left_changes = MEM_W(0, (gpr)(int32_t)0x802EA474) != 0;
+        return (side == 0) == left_changes ? 1 : 0;
+#else
+        (void)rdram; (void)side; (void)team;
+        return 0;
+#endif
+    }
+
     std::string set_name(int team, int set) {
-        if (set == -1) return "game default";
+        if (set == -1) return "auto";
+#if BLITZ_MODERN
+        if ((set == 0 || set == 1) && blitz::league_active() && team >= 0) {  // the pak's own name for its home / away
+            std::string n = blitz::league_set_name(blitz::team_of_slot(team), set);
+            if (!n.empty()) return n;
+        }
+#endif
         if ((set == 0 || set == 1) && unpicked_mode() == 1) {
             if (const auto* sets = sets_of(team)) {
                 for (const ExtraSet& s : *sets) {
@@ -203,6 +278,16 @@ namespace {
         if (set == 1) return "away uniform";
         const auto* sets = sets_of(team);
         return sets && (int)sets->size() > set - 2 ? (*sets)[(size_t)(set - 2)].name : "away uniform";
+    }
+
+    // A set as the picker's toast says it: "Home" / "Away" (with the 2026 set's own name when it has one), or the alternate's name.
+    std::string set_label(int team, int set) {
+        std::string name = set_name(team, set);
+        if (set == 0 || set == 1) {
+            std::string base = set == 0 ? "Home" : "Away";
+            return name == (set == 0 ? "home uniform" : "away uniform") ? base : base + " (" + name + ")";
+        }
+        return name;
     }
 
     void dress(uint8_t* rdram, recomp_context* ctx, int side, int team, int set) {
@@ -307,8 +392,9 @@ namespace blitz {
         // file table, which the N64 keeps in its heap (40 bytes a file), holds it once.
         static std::map<std::vector<uint8_t>, std::string> added;
         static size_t files = 0, count = 0, shared = 0;
-        if (pass == 0) {  // a restart registers everything again
+        if (pass == 0) {  // a restart (in place too: soft_restart.cpp) registers everything again
             added.clear();
+            extra_sets.clear();
             files = count = shared = 0;
         }
         for (const auto& [franchise, sets] : teams) {
@@ -583,6 +669,9 @@ extern "C" {
         g.held[side] = 0;
         g.lent_team[side] = -1;  // ovl_b's data was reloaded: nothing is lent any more
         g.auto_key = -1;         // a new game: Random picks again
+        pad_of_side[side] = -1;
+        auto_back[side] = 0;
+        announced[side] = false;
         pro_side[side] = false;
         pro_held[side] = 0;
         pro_asking[side] = false;
@@ -685,31 +774,83 @@ extern "C" {
         if (g.redress[side] > 0 && --g.redress[side] == 0) dress(rdram, ctx, side, team, 1);
         // Only a side still choosing: with Choose CPU Opponent both sides' loops read the player's port, and once
         // the player's team is in, the press is for the opponent being picked.
-        if (MEM_W(0, (gpr)(int32_t)(chosen + 4 * (uint32_t)side)) != -1 && side != blitz_opp_choosing_side()) return;
+        if (MEM_W(0, (gpr)(int32_t)(chosen + 4 * (uint32_t)side)) != -1 && side != blitz_opp_choosing_side()) {
+            pad_of_side[side] = -1;  // locked in: □ goes back as usual
+            return;
+        }
         if (side == blitz_opp_choosing_side()) port = blitz_opp_choosing_port();  // the player picks the opponent
         if (port < 0 || port > 3) return;
         port = pad_in_slot(rdram, port);
         uint16_t buttons = 0;
         float x = 0, y = 0;
         if (port < 0 || port > 3 || !blitz::get_input(port, &buttons, &x, &y)) return;
+        pad_of_side[side] = port;
         bool pressed = (buttons & button) && !(g.held[side] & button);
         g.held[side] = buttons;
+        const std::string who = side == 0 ? "Left team: " : "Right team: ";
+        // Said in a toast: a label in the game's own text, made from this loop, breaks the list's confirm flash
+        // (ovl_b 802F83C0 then writes through a stale text handle and the app crashes).
+        auto say_auto = [&] {
+            int r = auto_set(rdram, side, team);
+            std::string what = r < 0 ? std::string("Random") : set_label(team, r);
+            blitz::post_status(std::string(side == 0 ? "Left team" : "Right team") + " (Auto): " + what);
+            fprintf(stderr, "[uniform] side %d team %d: %s · Auto\n", side, team, what.c_str());
+            return r;
+        };
+        // □ with a pick made (blitz_uniform_back): this side is back to Auto, and □ goes back a step only the next time.
+        if (auto_back[side]) {
+            auto_back[side] = 0;
+            if (g.set[side] != -1) {
+                return_slots(rdram, side);
+                g.set[side] = -1;
+                g.redress[side] = 0;
+                int r = say_auto();
+                dress(rdram, ctx, side, team, r == 1 ? 1 : 0);
+                return;
+            }
+        }
+        // Arriving at a team: Auto is what the side starts on, and the toast says which set that is.
+        if (!announced[side] && g.set[side] == -1) {
+            announced[side] = true;
+            say_auto();
+        }
         if (!pressed) return;
-        // Extra sets, unless the other side already lent this team's away slots (the same team on both sides).
+        // Each set once, home, away, then the team's alternates (unless the other side already lent this team's away slots:
+        // the same team on both sides). Auto isn't a stop, it is one of them: the first step goes to the set after the
+        // one Auto means, and □ is the way back to Auto. Home and Away stand for the 2026 sets at Unpicked Uniforms 2026.
         const auto* sets = sets_of(team);
-        int last = 1 + (sets && g.lent_team[1 - side] != team ? (int)sets->size() : 0);
-        int next = g.set[side] + 1;
-        while (next >= 2 && next <= last && unpicked_mode() == 1 && is_base_2026((*sets)[(size_t)(next - 2)])) next++;  // Home and Away are those
-        if (next > last) next = -1;
+        std::vector<int> order = {0, 1};
+        if (sets && g.lent_team[1 - side] != team) {
+            for (size_t k = 0; k < sets->size(); k++) {
+                if (unpicked_mode() == 1 && is_base_2026((*sets)[k])) continue;
+                order.push_back(2 + (int)k);
+            }
+        }
+        int from = g.set[side] >= 0 ? g.set[side] : auto_set(rdram, side, team);
+        auto at = std::find(order.begin(), order.end(), from);
+        int next = at == order.end() ? order.front() : order[(size_t)(at - order.begin() + 1) % order.size()];
+        if (from < 0) next = order.front();  // Random: nothing for Auto to be, start at home
         return_slots(rdram, side);
         g.set[side] = next;
         if (next >= 2) lend_slots(rdram, side, team, next - 2);
         dress(rdram, ctx, side, team, next >= 1 ? 1 : 0);
-        std::string what = set_name(team, next);
-        // Said in a toast: a label in the game's own text, made from this loop, breaks the list's confirm flash
-        // (ovl_b 802F83C0 then writes through a stale text handle and the app crashes).
-        blitz::post_status(std::string(side == 0 ? "Left" : "Right") + " team: " + what);
+        std::string what = set_label(team, next);
+        // The hint sits in the toast's top line (the toast font has no □): Back is □ on a PlayStation pad.
+        blitz::post_status(std::string(side == 0 ? "Left team" : "Right team") + " (Back = Auto): " + what);
         fprintf(stderr, "[uniform] side %d team %d: %s\n", side, team, what.c_str());
+    }
+
+    // □ at team select (savestate.cpp, blitz_menu_step_input), before it goes back a step: true if this pad's side has a
+    // uniform picked, and so □ is its way back to Auto (the next frame of the picker does it) instead.
+    int32_t blitz_uniform_back(int32_t pad) {
+        if (!enabled()) return 0;
+        for (int s = 0; s < 2; s++) {
+            if (pad_of_side[s] == pad && g.set[s] != -1) {
+                auto_back[s] = 1;
+                return 1;
+            }
+        }
+        return 0;
     }
 
     // ovl_a 0x80302F40, before func_80256850(team0, set0, team1, set1): the picked sets win.
@@ -728,9 +869,17 @@ extern "C" {
         int32_t set[2] = {picker && g.team[0] == kick_team[0] ? g.set[0] : -1, picker && g.team[1] == kick_team[1] ? g.set[1] : -1};
         bool picked[2] = {set[0] >= 0, set[1] >= 0};
         bool clash = ((int32_t)ctx->r5 | (int32_t)ctx->r7) != 0;  // the game gave one side its away set
+        const int32_t game_set[2] = {(int32_t)ctx->r5, (int32_t)ctx->r7};
+#if BLITZ_MODERN
+        // A league pak that lists its clashes per set: unpicked sides start from the game's own choice and the
+        // check below (league_resolve) changes one only where the pak says two sets clash.
+        const bool set_clashes = blitz::league_has_set_clashes();
+#else
+        const bool set_clashes = false;
+#endif
         // A side left to the game follows the other's pick: home against a road set or a white extra set, away
         // against a colour extra set, and against home only when the jerseys clash (so the two never both change).
-        for (int s = 0; s < 2; s++) {
+        for (int s = 0; s < 2 && !set_clashes; s++) {
             int o = set[1 - s];
             if (set[s] >= 0 || o < 0) continue;
             if (o >= 2) set[s] = g.dark[1 - s] ? 1 : 0;
@@ -765,6 +914,9 @@ extern "C" {
             auto is_dark = [&](int s, int pick) {
                 const auto* sets = sets_of(team[s]);
                 if (pick >= 2 && sets && pick - 2 < (int)sets->size()) return (*sets)[(size_t)(pick - 2)].dark;
+#if BLITZ_MODERN
+                if (int d = blitz::league_active() ? blitz::league_set_dark(blitz::team_of_slot(team[s]), pick) : -1; d >= 0) return d == 1;
+#endif
                 return pick == 0;  // a base home jersey is a colour one, the away a white one
             };
             int pick[2] = {picked[0] ? set[0] : g.auto_pick[0], picked[1] ? set[1] : g.auto_pick[1]};
@@ -786,6 +938,50 @@ extern "C" {
             const auto* sets = sets_of(team[s]);
             if (sets && set[s] - 2 < (int)sets->size()) wear[s] = &(*sets)[(size_t)(set[s] - 2)];
         }
+#if BLITZ_MODERN
+        // League pak clash list (its symmetric per-set suggestions): if the two sets now worn are listed as a clash, an
+        // unpicked side changes to its first set (home, away, then alternates) that clashes with neither. Which side:
+        // the one the game already moved off its home set, else the one that needs the smaller change; a player's pick
+        // is never changed. No visitor-wears-away rule: two sets the pak doesn't list stay as they are.
+        if (set_clashes) {
+            int now[2];
+            for (int s = 0; s < 2; s++) {
+                now[s] = set[s];
+                const auto* sets = sets_of(team[s]);
+                if (wear[s] && sets) now[s] = 2 + (int)(wear[s] - sets->data());
+            }
+            int t0 = blitz::team_of_slot(team[0]), t1 = blitz::team_of_slot(team[1]);
+            if (blitz::league_sets_clash(t0, now[0], t1, now[1])) {
+                int fit[2] = {-1, -1};  // each unpicked side's first set that doesn't clash with the other's
+                for (int s = 0; s < 2; s++) {
+                    if (picked[s]) continue;
+                    const auto* sets = sets_of(team[s]);
+                    int n = 2 + (sets ? (int)sets->size() : 0);
+                    int ts = s == 0 ? t0 : t1, to = s == 0 ? t1 : t0;
+                    for (int c = 0; c < n && fit[s] < 0; c++)
+                        if (c != now[s] && !blitz::league_sets_clash(ts, c, to, now[1 - s])) fit[s] = c;
+                }
+                int best_side = -1;
+                for (int s = 0; s < 2; s++)  // the side the game moved, when it moved exactly one
+                    if (fit[s] >= 0 && game_set[s] && !game_set[1 - s]) best_side = s;
+                if (best_side < 0 && (fit[0] >= 0 || fit[1] >= 0))
+                    best_side = fit[1] < 0 ? 0 : fit[0] < 0 ? 1 : fit[0] < fit[1] ? 0 : 1;
+                int best_set = best_side >= 0 ? fit[best_side] : -1;
+                if (best_side >= 0) {
+                    int s = best_side;
+                    const auto* sets = sets_of(team[s]);
+                    wear[s] = best_set >= 2 && sets ? &(*sets)[(size_t)(best_set - 2)] : nullptr;
+                    set[s] = best_set >= 2 ? 1 : best_set;
+                    fprintf(stderr, "[uniform] league clash: side %d set %d against side %d set %d; side %d wears set %d\n",
+                            0, now[0], 1, now[1], s, best_set);
+                }
+                else {
+                    fprintf(stderr, "[uniform] league clash: sides %d/%d sets %d/%d, both picked or nothing fits: kept\n",
+                            t0, t1, now[0], now[1]);
+                }
+            }
+        }
+#endif
         // A set for an unpicked side goes into this game's copy of the team (ovl_b's confirm copy, which the game
         // dresses from now; each new game copies afresh), worn as "away".
         for (int s = 0; s < 2; s++) {

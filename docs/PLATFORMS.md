@@ -42,9 +42,9 @@ A change to the core reaches every platform at its next build. Platform code is 
 | System document picker | | | | ✓ | ✓ | |
 | ROM drop folder (imported at startup) | | | | ✓ Documents | ✓ app files | ✓ /data/blitzrecomp |
 | Local browser (Roster Room opens here) | ✓ | ✓ | ✓ | LAN address | LAN address | LAN address |
-| Open Folder / Reveal | ✓ | ✓ | ✓ | | | |
+| Open Folder / Reveal | ✓ | ✓ | ✓ | Open Folder: Files app (Documents) | Open Folder: Files app (BlitzFolder) | (FTP: hidden) |
 | Export ROM | ✓ | ✓ | ✓ | | | |
-| Restart | ✓ | ✓ | ✓ | | | |
+| Restart | ✓ | ✓ | ✓ | In place (iPhone) | In place (Android) | |
 | Classic ⇄ Modern in one install | ✓ | ✓ (combined folder) | | | | ✓ (two titles) |
 | F12 screenshots and clips | ✓ | screenshots | | system | system | Create button |
 | Touch controls | | | | ✓ | ✓ | |

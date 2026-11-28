@@ -68,6 +68,6 @@ namespace blitz::settings_layout {
         // Hidden: kept for what they store.
         "welcomed", "setup_season_asked", "setup_updates_asked", "setup_ask_updates", "setup_started", "hints_seen",
         "install_notice_day", "phone_controllers", "launcher_at_start", "gyro_sensitivity", "mouse_sensitivity",
-        "cloud_ask_count", "cloud_ask_never", "cloud_ask_version",
+        "cloud_ask_count", "cloud_ask_never", "cloud_ask_version", "content_ask_done",
     };
 }

@@ -353,6 +353,16 @@ move_start:
     addiu v0, v0, 1
     move  v0, zero
 @@pick:
+    lui   t8, hi(ORDER_AT)      ; on a cart with order_orig.asm (the export sets ORDER_AT to its ORDER): the team's
+    lw    t8, lo(ORDER_AT)(t8)  ; own slot (ORDER[POS[pick]], as a jump there), and the list's cursor as shown, so
+    beqz  t8, @@set             ; the VS screen's right helmet and the first move in name order work
+    addu  t5, t8, v0
+    lbu   t6, 31(t5)            ; POS[pick]
+    addu  t5, t8, t6
+    lbu   v0, 0(t5)             ; ORDER[POS[pick]]
+    addu  t5, t8, s5
+    sb    v0, -3(t5)            ; CUR[side] (just before N and ORDER)
+@@set:
     move  s6, v0
     lui   t0, hi(REDRESSING)
     addiu t1, zero, 1
@@ -372,6 +382,7 @@ move_start:
     lw    t9, 0x14(sp)
     j     fix_port
     addiu sp, sp, 0x20
+ORDER_AT: .word 0               ; order_orig.asm's ORDER on a league cart (Export ROM sets it), else 0
 .if . > 0x800278B0
 .error "move_start is past func_800277F0"
 .endif

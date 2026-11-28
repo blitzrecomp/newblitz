@@ -69,6 +69,7 @@ namespace blitz {
     uint8_t* monitor_rdram();  // dev_monitor.cpp
     void dev_dump_rdram();  // dev_monitor.cpp
     void request_restart();  // main.cpp
+    void leave_to_main_menu();  // main.cpp
     void request_blitz_party();
     void hints_preview(const std::string& id);  // hints.cpp
     void export_rom_now_dev();                   // export_rom.cpp
@@ -442,6 +443,10 @@ namespace {
         }
         if (word == "RESTART") {
             blitz::request_restart();
+            return true;
+        }
+        if (word == "MAINMENU") {  // as Settings -> Main Menu's Leave (a phone: the game stops in place, the launcher shows)
+            blitz::leave_to_main_menu();
             return true;
         }
         if (word == "RESIZE") {  // "RESIZE 1280 720 [centre]": as dragging the window's corner (the Windows resize crash)

@@ -121,7 +121,9 @@ class SeasonPak(unittest.TestCase):
             m = json.loads(f["pak.json"])
             m["id"] = "other"
             f["pak.json"] = json.dumps(m).encode()
-        refused(other_id, "not the 2026 Season pak")
+        # Paks are generic since 1.0.6 (any catalog id installs): another id is still refused here, now because the
+        # season's own folders (houston/, the season files) belong to the 2026 Season pak alone.
+        refused(other_id, "outside the pak's folders")
 
     def test_truncated(self):
         with self.assertRaises(zipfile.BadZipFile):

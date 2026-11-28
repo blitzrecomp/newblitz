@@ -387,6 +387,7 @@ target_sources(BlitzRecompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/src/main/firstrun_screen.cpp
     ${CMAKE_SOURCE_DIR}/src/main/crash_report.cpp
     ${CMAKE_SOURCE_DIR}/src/main/reset_data.cpp
+    ${CMAKE_SOURCE_DIR}/src/main/soft_restart.cpp
     ${CMAKE_SOURCE_DIR}/src/main/pak_backups.cpp
     ${CMAKE_SOURCE_DIR}/src/main/save_sync.cpp
     ${CMAKE_SOURCE_DIR}/src/main/save_sync_wifi.cpp
@@ -452,6 +453,7 @@ target_sources(BlitzRecompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/src/game/season_pregame.cpp
     ${CMAKE_SOURCE_DIR}/src/game/roster_room.cpp
     ${CMAKE_SOURCE_DIR}/src/game/mixed_uniforms.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/uv_overrides.cpp
     ${CMAKE_SOURCE_DIR}/src/game/tournament.cpp
     ${CMAKE_SOURCE_DIR}/src/game/adv_mode.cpp
     ${CMAKE_SOURCE_DIR}/src/game/adv_season.cpp
@@ -460,6 +462,7 @@ target_sources(BlitzRecompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/src/game/adv_league.cpp
     ${CMAKE_SOURCE_DIR}/src/game/season32.cpp
     ${CMAKE_SOURCE_DIR}/src/game/season_settings.cpp
+    ${CMAKE_SOURCE_DIR}/src/game/league_select.cpp
     ${CMAKE_SOURCE_DIR}/src/game/rosters_live.cpp
     ${CMAKE_SOURCE_DIR}/src/game/controllers_tab.cpp
     ${CMAKE_SOURCE_DIR}/src/game/ui_theme.cpp
@@ -469,6 +472,7 @@ target_sources(BlitzRecompiled PRIVATE
     ${CMAKE_SOURCE_DIR}/src/game/content_dirs.cpp
     ${CMAKE_SOURCE_DIR}/src/game/season_pak.cpp
     ${CMAKE_SOURCE_DIR}/src/common/sha256.cpp
+    ${CMAKE_SOURCE_DIR}/src/common/rom_upgrade.cpp  # USA v1.0 -> v1.1 at import (assets/rom/v10_to_v11.nbdiff ships in assets/)
     ${GENERATED_DIR}/rsp/n_aspMain.cpp
 )
 # The host services each platform provides (window menu, HTTP, ...): the same functions, one file per platform.
@@ -489,6 +493,9 @@ endif()
 if (APPLE)
     target_sources(BlitzRecompiled PRIVATE ${CMAKE_SOURCE_DIR}/src/main/secure_store_apple.cpp)
     target_link_libraries(BlitzRecompiled PRIVATE "-framework Security")
+    # Downloads with progress and the metered-network check (blitz_host.h http_get_progress, network_metered).
+    target_sources(BlitzRecompiled PRIVATE ${CMAKE_SOURCE_DIR}/src/main/net_apple.mm)
+    target_link_libraries(BlitzRecompiled PRIVATE "-framework Network")
 endif()
 
 target_include_directories(BlitzRecompiled PRIVATE

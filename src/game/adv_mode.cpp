@@ -23,6 +23,9 @@ namespace blitz {
     struct SeasonData;
     const SeasonData* pack_season();  // content_pack_tp.cpp: the active pack's season, else the built-in one
     bool season_content();  // content_dirs.cpp: the 2026 Season is here (bundled or the pak)
+    bool league_selected();  // season_settings.cpp: League is a league pack, not NFL 2026
+    void season_option_changed(const char* id, recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant prev,
+                               recomp::config::OptionChangeContext ctx);
 }
 #endif
 
@@ -77,6 +80,14 @@ namespace {
         blitz_adv = advanced ? 1 : 0;
         fprintf(stderr, "[mode] %s\n", advanced ? "Advanced" : "Modern");
     }
+
+    // Restart in place (soft_restart.cpp): the game starts again, so Game and Season Mode are taken again from Settings.
+    [[maybe_unused]] const bool mode_soft_reset = blitz::on_soft_reset("game mode", [] {
+        blitz::reset_once(original_once);
+        blitz::reset_once(latch_once);
+        original = advanced = false;
+        blitz_adv = 0;
+    });
 }
 
 namespace blitz {
@@ -104,8 +115,15 @@ namespace blitz {
         bool o = std::get<uint32_t>(recompui::config::get_config("season").get_option_value(opt_game)) == 1 || none;
         recomp::config::Config& season = recompui::config::get_config("season");
         season.update_option_hidden(opt_game, none);  // only Original 1999 until the pak is added
-        season.update_option_hidden("rosters", o);
-        for (const char* id : {"lineups", "live_rosters", "roster_room", "season_mode"}) season.update_option_hidden(id, o || none);
+        // League (1.0.6): the NFL or a league pack, New Blitz only. Rosters, Lineups and the Roster Room are the NFL's.
+        bool league = !o && blitz::league_selected();
+        season.update_option_hidden("league", o);
+        season.update_option_hidden("rosters", o || league);
+        for (const char* id : {"lineups", "roster_room"}) season.update_option_hidden(id, o || none || league);
+        season.update_option_hidden("season_mode", o || none);
+        // Content updates (rosters, uniforms and the posted paks, 1.0.6) mean something in either game: the paks come
+        // either way, so the switch for them is always there.
+        season.update_option_hidden("live_rosters", false);
         recomp::config::Config& rules = recompui::config::get_config("rules");
         for (const char* id : {"uniform_picker", "cpu_uniforms", "pick_crew"}) rules.update_option_hidden(id, o || none);
     }
@@ -132,10 +150,13 @@ namespace blitz {
             "<b>Original 1999</b>: NFL Blitz 2000 as it shipped: its 31 teams and players, its art and its own "
             "Season. Keeps its own saves."
             "<br /><br />"
-            "<b>Takes effect the next time the game starts.</b>",
+            "<b>Takes effect the next time the game starts</b>: during a game, New Blitz asks to restart.",
             {{0, "new", "New Blitz"}, {1, "original", "Original 1999"}}, 0);
-        config.add_option_change_callback(opt_game, [](recomp::config::ConfigValueVariant, recomp::config::ConfigValueVariant,
-                                                       recomp::config::OptionChangeContext) { original_settings_visibility(); });
+        config.add_option_change_callback(opt_game, [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant prev,
+                                                       recomp::config::OptionChangeContext ctx) {
+            original_settings_visibility();
+            blitz::season_option_changed(opt_game, cur, prev, ctx);  // during a game: asks to restart (league_select.cpp)
+        });
     }
 
     // The Season Mode option, on the Season settings tab (season_settings.cpp).
@@ -151,9 +172,15 @@ namespace blitz {
             "pack (2026: 18 weeks, 17 games), NFL tiebreakers and 7-team playoffs. Teams are listed in the "
             "pack's order. Advanced keeps its own saves."
             "<br /><br />"
-            "<b>Takes effect the next time the game starts.</b>",
+            "A new season asks which one to play, starting from this setting."
+            "<br /><br />"
+            "<b>Takes effect the next time the game starts</b>: during a game, New Blitz asks to restart.",
             {{SeasonMode::Modern, "Modern", "Standard"}, {SeasonMode::Advanced, "Advanced", "Advanced"}},
             SeasonMode::Advanced);  // the default since 2026-10-21 (team): today's divisions and schedule
+        config.add_option_change_callback(opt_mode, [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant prev,
+                                                       recomp::config::OptionChangeContext ctx) {
+            blitz::season_option_changed(opt_mode, cur, prev, ctx);  // during a game: asks to restart (league_select.cpp)
+        });
     }
 
     // Fixes the mode for this run (called at game start; later calls return the same answer).

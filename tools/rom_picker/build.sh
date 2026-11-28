@@ -47,7 +47,7 @@ out += "constexpr uint32_t rom_opp_code[] = {\n    " + words("opponent.bin", 0x2
 out += "constexpr uint32_t rom_opp_code2[] = {\n    " + words("opponent2.bin", 0x1A0) + "\n};\n"
 out += "constexpr uint32_t rom_opp_code3[] = {\n    " + words("opponent3.bin", 0xC0) + "\n};\n"
 out += "constexpr uint32_t rom_opp_vram = 0x8001CBD0, rom_opp_vram2 = 0x8001D160, rom_opp_vram3 = 0x800277F0"
-for k in ("reset", "wake", "setup", "in_a", "in_b", "in_c", "panel", "hold", "restore", "woken"):
+for k in ("reset", "wake", "setup", "in_a", "in_b", "in_c", "panel", "hold", "restore", "woken", "order_at"):
     out += f",\n                   rom_opp_{k} = 0x{sym[k]:08X}"
 out += ";\n"
 po = symbols("picker_orig.sym")
@@ -69,7 +69,7 @@ o = symbols("order_orig.sym")
 out += "// Team select in name order on the original game at 0x80024EC0 (over osPfsIsPlug); its entry points and tables.\n"
 out += "constexpr uint32_t rom_order_orig_code[] = {\n    " + words("order_orig.bin", 0x17C) + "\n};\n"
 out += "constexpr uint32_t rom_order_orig_vram = 0x80024EC0"
-for k in ("reset", "moved", "above_0", "above_n", "below_0", "below_n", "next", "cur", "order", "pos"):
+for k in ("reset", "moved", "above_0", "above_n", "below_0", "below_n", "next", "cur", "n", "order", "pos"):
     out += f",\n                   rom_order_orig_{k} = 0x{o[k]:08X}"
 out += ";\n"
 c = symbols("cart32.sym")

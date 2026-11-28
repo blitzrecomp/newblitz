@@ -17,7 +17,9 @@
 #   tools/live.sh savestate | loadstate  as F5 / F7: save / load the current slot
 #   tools/live.sh quitprompt             as Cmd+Q: the quit prompt (Save this game? during a game)
 #   tools/live.sh resize W H [centre]    resize the window, as dragging its corner (BLITZ_RESIZE_STRESS=<s> flips it); centre: on its screen
-#   tools/live.sh restart                what Settings → Restart does (quit, then relaunch into the game)
+#   tools/live.sh restart                what Settings → Restart does (a computer: quit, then relaunch into the game;
+#                                        a phone, or BLITZ_SOFT_RESTART=1: the game boots again in place)
+#   tools/live.sh mainmenu               what Settings → Main Menu's Leave does (in place: the game stops, the launcher shows)
 #   tools/live.sh config TAB OPTION VALUE set a setting as its page would (true/false, enum index, number)
 #   tools/live.sh stop
 # The app is stopped automatically after 30 minutes (BLITZ_LIVE_MAX=<seconds>) or once its log passes 50 MB.
@@ -149,6 +151,10 @@ savestate|loadstate)
 restart)
     running || { echo "not running"; exit 1; }
     echo "RESTART" >> "$CMDS"
+    ;;
+mainmenu)
+    running || { echo "not running"; exit 1; }
+    echo "MAINMENU" >> "$CMDS"
     ;;
 send)
     running || { echo "not running"; exit 1; }
